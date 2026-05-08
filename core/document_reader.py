@@ -157,6 +157,29 @@ def _excel_to_text(excel_bytes: bytes, max_rows: int = 300) -> str:
     return text, was_truncated, total_rows
 
 
+def _sanitize_text(text: str) -> str:
+    """Replace non-ASCII Unicode whitespace and invisible characters with plain ASCII equivalents."""
+    import unicodedata
+    # Normalize composed characters (e.g. accented letters → base + combining)
+    text = unicodedata.normalize('NFKC', text)
+    # Replace Unicode whitespace variants (narrow no-break space  ,
+    # no-break space  , thin space  , etc.) with regular space
+    replacements = {
+        ' ': ' ',   # no-break space
+        ' ': ' ',   # narrow no-break space
+        ' ': ' ',   # thin space
+        ' ': ' ',   # figure space
+        ' ': ' ',   # punctuation space
+        '​': '',    # zero-width space (drop)
+        '‌': '',    # zero-width non-joiner (drop)
+        '‍': '',    # zero-width joiner (drop)
+        '﻿': '',    # BOM (drop)
+    }
+    for char, repl in replacements.items():
+        text = text.replace(char, repl)
+    return text
+
+
 def _prepare_document_text(source, source_type: str) -> tuple[str, dict]:
     """
     Convert raw input to a plain text string ready for the LLM.
@@ -170,7 +193,7 @@ def _prepare_document_text(source, source_type: str) -> tuple[str, dict]:
     metadata: dict = {'char_count': 0, 'was_truncated': False}
 
     if source_type == 'email':
-        text = str(source)
+        text = _sanitize_text(str(source))
         if len(text) > 40000:
             text = text[:40000]
             metadata['was_truncated'] = True
@@ -179,6 +202,7 @@ def _prepare_document_text(source, source_type: str) -> tuple[str, dict]:
 
     elif source_type == 'excel':
         text, was_truncated, row_count = _excel_to_text(source, max_rows=300)
+        text = _sanitize_text(text)
         if len(text) > 40000:
             text = text[:40000]
             was_truncated = True
@@ -188,7 +212,7 @@ def _prepare_document_text(source, source_type: str) -> tuple[str, dict]:
         return text, metadata
 
     elif source_type == 'pdf':
-        text = extract_text_from_pdf(source)
+        text = _sanitize_text(extract_text_from_pdf(source))
         if not text.strip():
             raise SmartParseError(
                 'PDF has no extractable text — it appears to be a scanned image. '
