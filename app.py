@@ -1764,7 +1764,13 @@ def _process_and_append(raw_items=None, source=None, source_type=None):
                 status_text.text('Falling back to Classic mode...')
                 if source_type == 'email':
                     from core.parser import parse_email_text
-                    _fb_raw = parse_email_text(str(source))
+                    _fb_em_client = None
+                    try:
+                        from openai import OpenAI as _OAI_FB_EM
+                        _fb_em_client = _OAI_FB_EM(api_key=api_key)
+                    except Exception:
+                        pass
+                    _fb_raw = parse_email_text(str(source), openai_client=_fb_em_client)
                 elif source_type == 'excel':
                     from core.parser import parse_excel_file
                     _fb_xl_client = None
@@ -1895,7 +1901,14 @@ with tab_email:
                 if _process_and_append(source=email_text, source_type='email'):
                     st.rerun()
             else:
-                raw_items = parse_email_text(email_text)
+                _email_client = None
+                if _os.environ.get('OPENAI_API_KEY'):
+                    try:
+                        from openai import OpenAI as _OAI_EM
+                        _email_client = _OAI_EM(api_key=_os.environ['OPENAI_API_KEY'])
+                    except Exception:
+                        pass
+                raw_items = parse_email_text(email_text, openai_client=_email_client)
                 if _process_and_append(raw_items=raw_items):
                     st.rerun()
         else:
