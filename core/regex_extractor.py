@@ -473,6 +473,10 @@ def _extract_size(desc: str, gasket_type: str) -> dict:
 _RATING_HASH_RE = re.compile(
     rf'\b({_ASME_CLASSES})\s*(?:#|LBS?\b)', re.IGNORECASE
 )
+# "#  300" or "# 300" — hash before number (some customer formats, e.g. Excel column layout)
+_RATING_HASH_PREFIX_RE = re.compile(
+    rf'(?<![A-Za-z0-9])#\s*({_ASME_CLASSES})\b', re.IGNORECASE
+)
 # "CL 150" or "CL.150" or "CLASS 300" or "Cl.150"
 _RATING_CL_RE = re.compile(
     rf'\bCL(?:ASS)?[\s.]*({_ASME_CLASSES})\b', re.IGNORECASE
@@ -519,8 +523,13 @@ def _extract_rating(desc: str) -> str | None:
     if m:
         return f'PN {m.group(1)}'
 
-    # ASME class with # or LB
+    # ASME class with # or LB (number-first: "300#", "300 LB")
     m = _RATING_HASH_RE.search(upper)
+    if m:
+        return f'{m.group(1)}#'
+
+    # Hash-prefix format: "# 300" or "#  300" (hash before number)
+    m = _RATING_HASH_PREFIX_RE.search(upper)
     if m:
         return f'{m.group(1)}#'
 
