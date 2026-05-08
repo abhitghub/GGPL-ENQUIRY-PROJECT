@@ -442,14 +442,8 @@ if 'chat_loading' not in st.session_state:
     st.session_state.chat_loading = False
 if 'parse_mode' not in st.session_state:
     st.session_state.parse_mode = 'Smart'
-if '_undo_stack' not in st.session_state:
-    st.session_state._undo_stack = []
-if '_undo_msg' not in st.session_state:
-    st.session_state._undo_msg = ''
-
 _HISTORY_PATH = Path(__file__).resolve().parent / 'data' / 'quote_history.json'
 _HISTORY_LIMIT = 25
-_UNDO_LIMIT = 20
 
 # Load history from Redis once per session
 if not st.session_state._history_loaded:
@@ -555,66 +549,6 @@ def _history_pdf_bytes(run):
         return None
 
 
-def _undo_widget_keys():
-    prefixes = ('inp_', 'qp_', 'bulk_', 'm_', 'email_text_')
-    explicit = {'filter_mode', 'parse_mode', '_last_filter_mode'}
-    return [
-        key for key in st.session_state.keys()
-        if key in explicit or any(str(key).startswith(prefix) for prefix in prefixes)
-    ]
-
-
-def _capture_undo_state(label):
-    return {
-        'label': label,
-        'working_items': copy.deepcopy(st.session_state.get('working_items', [])),
-        '_selected_rows': copy.deepcopy(st.session_state.get('_selected_rows', set())),
-        '_show_confirm': st.session_state.get('_show_confirm', False),
-        '_show_quote_page': st.session_state.get('_show_quote_page', False),
-        '_quote_data': copy.deepcopy(st.session_state.get('_quote_data', {})),
-        '_quote_excel': st.session_state.get('_quote_excel'),
-        '_input_reset_seq': st.session_state.get('_input_reset_seq', 0),
-        '_bulk_df': copy.deepcopy(st.session_state.get('_bulk_df')) if '_bulk_df' in st.session_state else None,
-        '_last_excel': st.session_state.get('_last_excel'),
-        '_last_filename': st.session_state.get('_last_filename'),
-        'widget_values': {
-            key: copy.deepcopy(st.session_state.get(key))
-            for key in _undo_widget_keys()
-            if key in st.session_state
-        },
-    }
-
-
-def _push_undo_snapshot(label):
-    stack = st.session_state._undo_stack
-    stack.append(_capture_undo_state(label))
-    st.session_state._undo_stack = stack[-_UNDO_LIMIT:]
-
-
-def _restore_undo_snapshot():
-    if not st.session_state._undo_stack:
-        return False
-    snap = st.session_state._undo_stack.pop()
-    for key in (
-        'working_items', '_selected_rows', '_show_confirm', '_show_quote_page',
-        '_quote_data', '_quote_excel', '_input_reset_seq', '_last_excel',
-        '_last_filename',
-    ):
-        if snap.get(key) is None and key in ('_last_excel', '_last_filename'):
-            st.session_state.pop(key, None)
-        else:
-            st.session_state[key] = copy.deepcopy(snap.get(key))
-    if snap.get('_bulk_df') is None:
-        st.session_state.pop('_bulk_df', None)
-    else:
-        st.session_state['_bulk_df'] = copy.deepcopy(snap['_bulk_df'])
-    for key, value in snap.get('widget_values', {}).items():
-        try:
-            st.session_state[key] = copy.deepcopy(value)
-        except Exception:
-            pass
-    st.session_state._undo_msg = f"Undid: {snap.get('label', 'last change')}"
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1006,19 +940,6 @@ with st.sidebar:
     st.markdown('<hr style="margin:0.8rem 0;border-color:#2e4470">', unsafe_allow_html=True)
 
     # ── Parse mode toggle ───────────────────────────────────────────────────
-    st.markdown('<div class="gq-sidebar-title">Undo</div>', unsafe_allow_html=True)
-    if st.button(
-        '↶ Undo',
-        key='gq_undo_btn',
-        type='secondary',
-        disabled=(len(st.session_state._undo_stack) == 0),
-        help='Shortcut: Ctrl+Z when focus is not inside a text field',
-    ):
-        if _restore_undo_snapshot():
-            st.rerun()
-    if st.session_state.get('_undo_msg'):
-        st.caption(st.session_state._undo_msg)
-
     st.markdown('<hr style="margin:0.8rem 0;border-color:#2e4470">', unsafe_allow_html=True)
     st.markdown('<div class="gq-sidebar-title">Parse Mode</div>', unsafe_allow_html=True)
     _parse_choice = st.radio(
@@ -1148,24 +1069,6 @@ st.html(f"""
     event.returnValue = '';
     return '';
   }};
-  if (!window.gqUndoShortcutAttached) {{
-    window.gqUndoShortcutAttached = true;
-    document.addEventListener('keydown', function(event) {{
-      var key = (event.key || '').toLowerCase();
-      if (!(event.ctrlKey || event.metaKey) || key !== 'z' || event.shiftKey || event.altKey) return;
-      var el = document.activeElement;
-      var tag = el && el.tagName ? el.tagName.toLowerCase() : '';
-      var nativeUndo = tag === 'input' || tag === 'textarea' || (el && el.isContentEditable);
-      if (nativeUndo) return;
-      var buttons = Array.from(document.querySelectorAll('button'));
-      var undoBtn = buttons.find(function(btn) {{
-        return btn.innerText && btn.innerText.trim().indexOf('Undo') !== -1 && !btn.disabled;
-      }});
-      if (!undoBtn) return;
-      event.preventDefault();
-      undoBtn.click();
-    }}, true);
-  }}
 }})();
 </script>
 """, unsafe_allow_javascript=True)
@@ -1269,7 +1172,6 @@ def _build_rows(items):
 
 
 def _delete_selected_items(items, display_indices):
-    _push_undo_snapshot('delete selected rows')
     to_delete = {
         display_indices[i]
         for i in st.session_state._selected_rows
@@ -1331,7 +1233,6 @@ def _reprocess_customer_descriptions(items, display_indices, edited_df, visible_
     if not raw_items:
         return 0
 
-    _push_undo_snapshot('reprocess text')
     reprocessed = extract_batch(raw_items)
     updated_full = list(items)
 
@@ -1472,7 +1373,6 @@ def _editor_fragment(items, display_indices):
 
     # ── Update Descriptions ──────────────────────────────────────────────────
     if act_c2.button('↻  Update Descriptions', type='secondary', key='update_btn'):
-        _push_undo_snapshot('update descriptions')
         updated_full = list(items)
 
         for i, row in edited_df.iterrows():
@@ -1565,7 +1465,6 @@ def _editor_fragment(items, display_indices):
     if act_c4.button(f'⛔  Regret ({sel_label})', type='secondary', key='regret_sel_btn',
                      disabled=(n_sel == 0),
                      help='Mark selected items as REGRET — GGPL cannot produce'):
-        _push_undo_snapshot('toggle regret')
         updated_full = list(items)
         for i in st.session_state._selected_rows:
             orig_idx = display_indices[i]
@@ -1873,7 +1772,6 @@ def _process_and_append(raw_items=None, source=None, source_type=None):
     status_text.empty()
     preview_ph.empty()
 
-    _push_undo_snapshot('process and add items')
     st.session_state.working_items = existing + processed
     st.session_state._selected_rows = set()
     st.session_state.pop('_bulk_df', None)
@@ -2024,7 +1922,6 @@ with tab_manual:
             }
             item = apply_rules(raw)
             item['ggpl_description'] = format_description(item)
-            _push_undo_snapshot('add manual item')
             st.session_state.working_items = existing + [item]
             st.session_state._show_confirm = False
             st.rerun()
@@ -2211,7 +2108,6 @@ if st.session_state.working_items:
     with wl_clear:
         st.markdown('<div style="height:0.9rem"></div>', unsafe_allow_html=True)
         if st.button('🗑 Clear', key='clear_list_btn', type='secondary', help='Remove all items from working list'):
-            _push_undo_snapshot('clear working list')
             st.session_state.working_items = []
             st.session_state._selected_rows = set()
             st.session_state.pop('_bulk_df', None)
@@ -2284,7 +2180,6 @@ if st.session_state.working_items:
         if sa2.button('Deselect All', key='desel_all_btn'):
             st.session_state._selected_rows = set()
         if sa3.button('＋ Add Row', key='add_row_btn'):
-            _push_undo_snapshot('add blank row')
             new_item = apply_rules({
                 'line_no': len(items) + 1,
                 'raw_description': '',
@@ -2325,7 +2220,6 @@ if st.session_state.working_items:
             bulk_standard = bc13.text_input('Standard',      placeholder='e.g. ASME B16.20',        key='bulk_standard')
 
             if st.button('Apply Bulk Edit', type='secondary', key='apply_bulk'):
-                _push_undo_snapshot('apply bulk edit')
                 df_bulk = st.session_state['_bulk_df'].copy() if '_bulk_df' in st.session_state \
                           else pd.DataFrame(_build_rows([items[i] for i in display_indices]))
                 df_bulk = df_bulk.drop(columns=[c for c in ('Select', 'Delete') if c in df_bulk.columns])
