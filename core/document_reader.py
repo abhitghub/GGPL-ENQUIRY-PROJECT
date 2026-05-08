@@ -1,9 +1,9 @@
 """
-Smart Parse mode — reads the entire customer enquiry document with a single
+Smart Parse mode - reads the entire customer enquiry document with a single
 GPT-4o call and returns structured gasket line items.
 
-Used as an alternative to parser.py → extractor.py in Classic mode.
-The downstream rules.py → formatter.py → exporter.py pipeline is unchanged.
+Used as an alternative to parser.py -> extractor.py in Classic mode.
+The downstream rules.py -> formatter.py -> exporter.py pipeline is unchanged.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class SmartParseError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Default item template — every field rules.py expects
+# Default item template - every field rules.py expects
 # ---------------------------------------------------------------------------
 
 _ITEM_TEMPLATE: dict = {
@@ -53,7 +53,7 @@ _ITEM_TEMPLATE: dict = {
 
 _SMART_PARSE_SYSTEM_PROMPT = """You are a gasket procurement data extraction assistant. Extract every gasket line item and return ONLY valid JSON: {"items": [...]}. No markdown, no explanation.
 
-Output ONLY these fields per item (skip a field entirely if the value is null/unknown — do NOT output null):
+Output ONLY these fields per item (skip a field entirely if the value is null/unknown - do NOT output null):
 line_no, quantity, uom, raw_description, is_gasket,
 size, size_type, rating, gasket_type, confidence,
 moc, face_type, standard, thickness_mm, special,
@@ -67,15 +67,15 @@ Rules:
 - uom: "NOS" or "M" (meters = sheet supply)
 - size: keep as found, e.g. "25 mm NB", "6\\"", "DN 100"
 - size_type: "NPS" / "NB" / "DN" / "OD_ID" / "UNKNOWN"
-- rating: output as "150#" / "300#" / "600#" etc. or "PN 10" / "PN 16". "# 300" or "#  150" (hash before number) means the same — output as "300#" / "150#"
+- rating: output as "150#" / "300#" / "600#" etc. or "PN 10" / "PN 16". "# 300" or "#  150" (hash before number) means the same - output as "300#" / "150#"
 - gasket_type: "SOFT_CUT" / "SPIRAL_WOUND" / "RTJ" / "KAMM" / "DJI" / "ISK"
 - moc: for SOFT_CUT only; omit for SPIRAL_WOUND/RTJ/KAMM/DJI
 - face_type: "RF" or "FF" for SOFT_CUT/ISK only; omit for all others
 - is_gasket: true for gaskets; false for bolts, flanges, fittings (still include the row)
 - raw_description: exact verbatim copy from source
 - SPIRAL_WOUND: sw_winding_material = strip metal (e.g. SS316), sw_filler = GRAPHITE/PTFE, sw_inner_ring / sw_outer_ring = ring materials
-- Normalize: 316SS→SS316, carbon steel/MS→CS, CL300→300#, Class 150→150#
-- Unspecified rubber: omit moc, set special="MOC ambiguous — confirm rubber type"
+- Normalize: 316SS->SS316, carbon steel/MS->CS, CL300->300#, Class 150->150#
+- Unspecified rubber: omit moc, set special="MOC ambiguous - confirm rubber type"
 """
 
 
@@ -158,27 +158,18 @@ def _excel_to_text(excel_bytes: bytes, max_rows: int = 300) -> str:
 
 
 def _sanitize_text(text: str) -> str:
-    """Replace non-ASCII Unicode whitespace and invisible characters with plain ASCII equivalents."""
+    """Normalize to ASCII-safe text before sending to GPT-4o."""
     import unicodedata
-    # Normalize composed characters (e.g. accented letters → base + combining)
+    # NFKC: resolve ligatures, fractions, compatibility variants
     text = unicodedata.normalize('NFKC', text)
-    # Replace Unicode whitespace variants (narrow no-break space  ,
-    # no-break space  , thin space  , etc.) with regular space
-    replacements = {
-        ' ': ' ',   # no-break space
-        ' ': ' ',   # narrow no-break space
-        ' ': ' ',   # thin space
-        ' ': ' ',   # figure space
-        ' ': ' ',   # punctuation space
-        '​': '',    # zero-width space (drop)
-        '‌': '',    # zero-width non-joiner (drop)
-        '‍': '',    # zero-width joiner (drop)
-        '﻿': '',    # BOM (drop)
-    }
-    for char, repl in replacements.items():
-        text = text.replace(char, repl)
+    # Encode to ASCII, replacing any non-ASCII character with a plain space.
+    # This handles narrow no-break spaces, em dashes, arrows, etc. universally.
+    text = text.encode('ascii', errors='replace').decode('ascii')
+    # Replace the '?' placeholders from non-ASCII with space so descriptions stay readable
+    # (encode 'replace' uses '?' — swap for space to avoid confusing the LLM)
+    import re
+    text = re.sub(r'\?+', ' ', text)
     return text
-
 
 def _prepare_document_text(source, source_type: str) -> tuple[str, dict]:
     """
@@ -215,7 +206,7 @@ def _prepare_document_text(source, source_type: str) -> tuple[str, dict]:
         text = _sanitize_text(extract_text_from_pdf(source))
         if not text.strip():
             raise SmartParseError(
-                'PDF has no extractable text — it appears to be a scanned image. '
+                'PDF has no extractable text - it appears to be a scanned image. '
                 'Open the PDF, select all text (Ctrl+A), copy it, '
                 'then paste into the Email tab.'
             )
@@ -239,7 +230,7 @@ def _validate_and_normalize_output(raw_items: list) -> tuple[list[dict], int]:
         raise SmartParseError(f'LLM output is not a list (got {type(raw_items).__name__})')
     if len(raw_items) == 0:
         raise SmartParseError(
-            'no_items_found'  # sentinel — caller maps to user-friendly message
+            'no_items_found'  # sentinel - caller maps to user-friendly message
         )
 
     result = []
@@ -247,14 +238,14 @@ def _validate_and_normalize_output(raw_items: list) -> tuple[list[dict], int]:
     skipped_non_gasket = 0
     for i, raw in enumerate(raw_items):
         if not isinstance(raw, dict):
-            logger.warning(f'Smart Parse: item {i} is not a dict — skipping')
+            logger.warning(f'Smart Parse: item {i} is not a dict - skipping')
             continue
 
         # Filter out non-gasket items before any further processing
         is_gasket_val = raw.get('is_gasket', True)
         if is_gasket_val is False or str(is_gasket_val).lower() == 'false':
             desc_preview = str(raw.get('raw_description', ''))[:60]
-            logger.info(f'Smart Parse: skipping non-gasket item — {desc_preview}')
+            logger.info(f'Smart Parse: skipping non-gasket item - {desc_preview}')
             skipped_non_gasket += 1
             skipped_raw.append(raw)
             continue
@@ -265,7 +256,7 @@ def _validate_and_normalize_output(raw_items: list) -> tuple[list[dict], int]:
             if k in _ITEM_TEMPLATE:
                 item[k] = v
 
-        # Normalize string "null"/"none"/"" → actual None (except sentinel fields)
+        # Normalize string "null"/"none"/"" -> actual None (except sentinel fields)
         _KEEP_AS_STRING = {'uom', 'raw_description', 'gasket_type', 'size_type', 'confidence'}
         for k, v in item.items():
             if k not in _KEEP_AS_STRING and isinstance(v, str) and v.strip().lower() in ('null', 'none', ''):
@@ -322,7 +313,7 @@ def _validate_and_normalize_output(raw_items: list) -> tuple[list[dict], int]:
     if skipped_non_gasket:
         logger.info(
             f'Smart Parse: filtered out {skipped_non_gasket} non-gasket item(s) '
-            f'(cam & groove, fittings, etc.) — {len(result)} gasket item(s) remain'
+            f'(cam & groove, fittings, etc.) - {len(result)} gasket item(s) remain'
         )
 
     # Safety fallback: if ALL items were filtered as non-gasket, the is_gasket
@@ -331,7 +322,7 @@ def _validate_and_normalize_output(raw_items: list) -> tuple[list[dict], int]:
     # can warn the user rather than silently failing.
     if len(result) == 0 and skipped_non_gasket > 0:
         logger.warning(
-            f'Smart Parse: all {skipped_non_gasket} item(s) were classified as non-gasket — '
+            f'Smart Parse: all {skipped_non_gasket} item(s) were classified as non-gasket - '
             f'is_gasket filter may be wrong; returning all items unfiltered'
         )
         # Process the skipped items as if they were gaskets
@@ -342,7 +333,7 @@ def _validate_and_normalize_output(raw_items: list) -> tuple[list[dict], int]:
                     item[k] = v
             item['_all_filtered_fallback'] = True
             result.append(item)
-        skipped_non_gasket = 0  # reset — we un-filtered them
+        skipped_non_gasket = 0  # reset - we un-filtered them
 
     return result, skipped_non_gasket
 
@@ -391,7 +382,7 @@ def _split_into_chunks(document_text: str, chunk_size: int = _CHUNK_SIZE) -> lis
             for i in range(0, len(data_lines), chunk_size)
         ]
     else:
-        # PDF / email — split by non-empty lines
+        # PDF / email - split by non-empty lines
         non_empty = [l for l in lines if l.strip()]
         if len(non_empty) <= chunk_size:
             return [document_text]
@@ -426,7 +417,7 @@ def _gpt4o_single_chunk(openai_client, chunk_text: str, source_type: str) -> lis
         err = str(e)
         if 'rate_limit' in err.lower() or '429' in err:
             raise SmartParseError(
-                'OpenAI rate limit reached — too many requests. '
+                'OpenAI rate limit reached - too many requests. '
                 'Wait 60 seconds then try again, or switch to Classic mode.'
             )
         if 'authentication' in err.lower() or '401' in err or 'invalid api key' in err.lower():
@@ -450,7 +441,7 @@ def _gpt4o_single_chunk(openai_client, chunk_text: str, source_type: str) -> lis
     if choice.finish_reason == 'length':
         raise SmartParseError(
             'GPT-4o output was cut off mid-response. '
-            'This chunk is too large — reduce CHUNK_SIZE or split the file.'
+            'This chunk is too large - reduce CHUNK_SIZE or split the file.'
         )
 
     raw_content = choice.message.content or '{}'
@@ -548,7 +539,7 @@ def read_document_smart(
         row_count = metadata.get('row_count', '')
         row_info = f' ({row_count} rows read)' if row_count else ''
         logger.warning(
-            f'Smart Parse: document truncated{row_info} — '
+            f'Smart Parse: document truncated{row_info} - '
             f'{metadata["char_count"]:,} chars sent to GPT-4o. '
             f'Consider splitting the file if items are missing.'
         )
