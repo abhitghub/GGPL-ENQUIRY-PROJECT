@@ -36,8 +36,92 @@ def worksheet_rows_with_merged_values(ws, max_row: int | None = None) -> list[tu
     return [tuple(row) for row in rows]
 
 
-def parse_email_text(text: str) -> list[dict]:
-    """Extract line items from pasted email body text."""
+_AI_EMAIL_PARSE_PROMPT = """\
+You are extracting gasket procurement line items from a customer email body.
+
+Email text:
+{email_text}
+
+Return ONLY valid JSON (no markdown, no explanation) — a list of objects, one per gasket line item:
+[
+  {{
+    "line_no": <integer serial / item number from the email, or null>,
+    "description": <full gasket description string exactly as written by the customer>,
+    "quantity": <numeric quantity, or null if not stated>,
+    "uom": <"NOS" | "M" — use "M" only if unit is meters/m, otherwise "NOS">
+  }},
+  ...
+]
+
+Rules:
+- Include ONLY gasket-related items. Skip headers, cover-note text, totals, and non-gasket items.
+- Preserve the customer's description verbatim — do not paraphrase or normalize.
+- If quantity is missing from a line, set it to null.
+- Return an empty list [] if no gasket line items are found.
+"""
+
+
+def _ai_parse_email_text(text: str, openai_client) -> list[dict] | None:
+    """Use gpt-4o-mini to extract line items from email text. Returns None on failure."""
+    prompt = _AI_EMAIL_PARSE_PROMPT.format(email_text=text[:12000])
+    try:
+        response = openai_client.chat.completions.create(
+            model='gpt-4o-mini',
+            temperature=0,
+            response_format={'type': 'json_object'},
+            messages=[{'role': 'user', 'content': prompt}],
+            timeout=30,
+        )
+        raw = response.choices[0].message.content or ''
+        # gpt-4o-mini with json_object mode wraps arrays in an object — unwrap
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            items = parsed
+        elif isinstance(parsed, dict):
+            items = next((v for v in parsed.values() if isinstance(v, list)), [])
+        else:
+            return None
+        result = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            desc = str(item.get('description') or '').strip()
+            if not desc:
+                continue
+            qty_raw = item.get('quantity')
+            try:
+                qty = float(qty_raw) if qty_raw is not None else None
+            except (TypeError, ValueError):
+                qty = None
+            uom = _normalize_uom(str(item.get('uom') or 'NOS'))
+            line_no = item.get('line_no')
+            result.append({
+                'line_no': int(line_no) if line_no else None,
+                'description': desc,
+                'quantity': qty,
+                'uom': uom,
+            })
+        logger.info('AI email parse: %d items extracted', len(result))
+        return result if result else None
+    except Exception as exc:
+        logger.warning('AI email parse failed, falling back to regex: %s', exc)
+        return None
+
+
+def parse_email_text(text: str, openai_client=None) -> list[dict]:
+    """Extract line items from pasted email body text.
+
+    If openai_client is provided, uses gpt-4o-mini first (mirrors how
+    parse_excel_file handles Classic mode), then falls back to regex.
+    """
+    if openai_client is not None:
+        ai_items = _ai_parse_email_text(text, openai_client)
+        if ai_items:
+            for i, item in enumerate(ai_items, 1):
+                if not item.get('line_no'):
+                    item['line_no'] = i
+            return ai_items
+
     items = []
     lines = _merge_continuation_lines([l.strip() for l in text.splitlines() if l.strip()])
     for line in lines:
