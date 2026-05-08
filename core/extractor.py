@@ -389,9 +389,9 @@ def extract_batch(items: list[dict], progress_cb=None) -> list[dict]:
     if not need_llm:
         pass  # all done via cache + regex
     elif not api_key:
-        # No API key — use regex-only results (better than null stubs)
-        for desc in need_llm:
-            cache[desc] = regex_results[desc]
+        raise RuntimeError(
+            'OpenAI API key not found. Add it to the .env file or enter it in the sidebar.'
+        )
     else:
         progress_q: _stdlib_queue.SimpleQueue = _stdlib_queue.SimpleQueue()
         llm_results: dict[str, dict | None] = {}

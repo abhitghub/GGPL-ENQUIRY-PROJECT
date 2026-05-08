@@ -1836,7 +1836,12 @@ def _process_and_append(raw_items=None, source=None, source_type=None):
             status_text.text(f'Extracting... {done}/{total} descriptions ({pct}%)')
             progress_bar.progress(5 + int(done / total * 70))
 
-        extracted_items = extract_batch(raw_items, progress_cb=_on_progress)
+        try:
+            extracted_items = extract_batch(raw_items, progress_cb=_on_progress)
+        except RuntimeError as _e:
+            st.error(str(_e))
+            progress_bar.empty(); status_text.empty()
+            return False
 
     # ── Common tail: rules + formatter ────────────────────────────────────
     progress_bar.progress(88)
@@ -1903,23 +1908,24 @@ with tab_email:
     else:
         st.caption(_wl_hint)
     if st.button('⚡  Process & Add to List', type='primary', key='process_email_btn'):
-        if email_text.strip():
-            if st.session_state.parse_mode == 'Smart' and _os.environ.get('OPENAI_API_KEY'):
-                if _process_and_append(source=email_text, source_type='email'):
-                    st.rerun()
-            else:
+        if not email_text.strip():
+            st.warning('Please paste some email text first.')
+        elif not _os.environ.get('OPENAI_API_KEY'):
+            st.error('OpenAI API key required. Enter it in the sidebar to process enquiries.')
+        elif st.session_state.parse_mode == 'Smart':
+            if _process_and_append(source=email_text, source_type='email'):
+                st.rerun()
+        else:
+            try:
+                from openai import OpenAI as _OAI_EM
+                _email_client = _OAI_EM(api_key=_os.environ['OPENAI_API_KEY'])
+            except Exception as _e:
+                st.error(f'Could not initialise OpenAI client: {_e}')
                 _email_client = None
-                if _os.environ.get('OPENAI_API_KEY'):
-                    try:
-                        from openai import OpenAI as _OAI_EM
-                        _email_client = _OAI_EM(api_key=_os.environ['OPENAI_API_KEY'])
-                    except Exception:
-                        pass
+            if _email_client:
                 raw_items = parse_email_text(email_text, openai_client=_email_client)
                 if _process_and_append(raw_items=raw_items):
                     st.rerun()
-        else:
-            st.warning('Please paste some email text first.')
 
 with tab_excel:
     uploaded_file = st.file_uploader(

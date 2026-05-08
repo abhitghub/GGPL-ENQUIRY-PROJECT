@@ -190,6 +190,8 @@ _PAREN_ID_OD_SLASH_RE = re.compile(
     re.IGNORECASE,
 )
 _DN_RE = re.compile(r'\bDN[\s\-]*(\d+)\b', re.IGNORECASE)
+# "20DN" — number-first DN notation (e.g. "20DN ASME 150_Flat ring")
+_NUMBER_DN_RE = re.compile(r'\b(\d+)\s*DN\b', re.IGNORECASE)
 # NB format
 _NB_RE = re.compile(r'\b(\d+)\s*NB\b', re.IGNORECASE)
 # NPS explicit: "NPS 6" or "NPS: 6"
@@ -332,8 +334,13 @@ def _extract_size(desc: str, gasket_type: str) -> dict:
             result['size_type'] = 'OD_ID'
             return result
 
-    # 2. DN
+    # 2. DN — "DN 20" or "20DN"
     m = _DN_RE.search(upper)
+    if m:
+        result['size'] = f'DN {m.group(1)}'
+        result['size_type'] = 'DN'
+        return result
+    m = _NUMBER_DN_RE.search(upper)
     if m:
         result['size'] = f'DN {m.group(1)}'
         result['size_type'] = 'DN'
@@ -496,6 +503,11 @@ _RATING_FACE_RE = re.compile(
 _RATING_S_SERIES_RE = re.compile(
     rf'\bS-({_ASME_CLASSES})\b', re.IGNORECASE
 )
+# "ASME 150_" or bare "150_" — class followed by underscore separator
+# (e.g. "20DN ASME 150_Flat ring" where _ is used as a field delimiter)
+_RATING_UNDERSCORE_RE = re.compile(
+    rf'\b({_ASME_CLASSES})_', re.IGNORECASE
+)
 
 
 def _extract_rating(desc: str) -> str | None:
@@ -544,6 +556,11 @@ def _extract_rating(desc: str) -> str | None:
 
     # "S-150" catalog series notation
     m = _RATING_S_SERIES_RE.search(upper)
+    if m:
+        return f'{m.group(1)}#'
+
+    # "150_" underscore-separated (e.g. "ASME 150_Flat ring")
+    m = _RATING_UNDERSCORE_RE.search(upper)
     if m:
         return f'{m.group(1)}#'
 
