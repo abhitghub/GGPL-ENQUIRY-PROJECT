@@ -511,23 +511,43 @@ def _call_gpt4o(
     print(f'[Smart Parse] {len(chunks)} chunk(s) for {source_type}, '
           f'{len(document_text):,} chars', flush=True)
 
+    import concurrent.futures
+    import threading
+
     all_raw: list[dict] = []
-    for i, chunk in enumerate(chunks, 1):
-        print(f'[Smart Parse] calling GPT-4o chunk {i}/{len(chunks)}...', flush=True)
-        chunk_raw = _gpt4o_single_chunk(openai_client, chunk, source_type)
-        print(f'[Smart Parse] chunk {i}/{len(chunks)} done — {len(chunk_raw)} raw item(s)', flush=True)
-        all_raw.extend(chunk_raw)
+    done_count = 0
+    lock = threading.Lock()
 
-        # Normalize this chunk's items and surface them immediately
-        if on_chunk_items and chunk_raw:
-            try:
-                chunk_items, _ = _validate_and_normalize_output(chunk_raw)
-                on_chunk_items(chunk_items)
-            except SmartParseError:
-                pass  # empty / bad chunk — skip streaming for this one
+    _MAX_WORKERS = 2  # safe concurrency for gpt-4o-mini rate limits
 
-        if progress_cb:
-            progress_cb(i, len(chunks))
+    def _process_chunk(idx_chunk):
+        idx, chunk = idx_chunk
+        print(f'[Smart Parse] calling chunk {idx}/{len(chunks)}...', flush=True)
+        raw = _gpt4o_single_chunk(openai_client, chunk, source_type)
+        print(f'[Smart Parse] chunk {idx}/{len(chunks)} done — {len(raw)} item(s)', flush=True)
+        return raw
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(_process_chunk, (i, chunk)): i
+            for i, chunk in enumerate(chunks, 1)
+        }
+        for future in concurrent.futures.as_completed(futures):
+            chunk_raw = future.result()
+            with lock:
+                all_raw.extend(chunk_raw)
+                done_count += 1
+
+            if on_chunk_items and chunk_raw:
+                try:
+                    chunk_items, _ = _validate_and_normalize_output(chunk_raw)
+                    on_chunk_items(chunk_items)
+                except SmartParseError:
+                    pass
+
+            if progress_cb:
+                with lock:
+                    progress_cb(done_count, len(chunks))
 
     result, skipped = _validate_and_normalize_output(all_raw)
 
