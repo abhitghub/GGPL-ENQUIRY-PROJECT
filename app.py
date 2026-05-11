@@ -68,6 +68,11 @@ st.markdown("""
 }
 [data-testid="stSidebar"] .stButton > button:hover {
     background: #3d5a8a !important;
+    color: #e8ecf1 !important;
+}
+[data-testid="stSidebar"] .stButton > button p,
+[data-testid="stSidebar"] .stButton > button span {
+    color: #e8ecf1 !important;
 }
 [data-testid="stSidebar"] hr { border-color: #2e4470 !important; }
 
