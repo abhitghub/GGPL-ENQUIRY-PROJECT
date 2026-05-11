@@ -79,28 +79,101 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
 
 
 def _excel_to_text(excel_bytes: bytes, max_rows: int = 400) -> tuple[str, bool, int]:
-    import openpyxl
-    from core.parser import worksheet_rows_with_merged_values
-    wb = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
-    parts = []
+    """Convert Excel to cleaned markdown tables for LLM input.
+
+    Improvements over openpyxl approach:
+    - Drops columns that are >80% empty (PO numbers, plant tags, etc.)
+    - Detects header row automatically (first row with ≥3 non-empty cells)
+    - Strips whitespace, collapses runs of spaces, removes literal 'nan'
+    - Outputs markdown tables — more readable for the LLM than tab-separated
+    """
+    import re
+    import pandas as pd
+
+    parts: list[str] = []
     total_rows = 0
     was_truncated = False
 
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-        sheet_rows = []
-        for row in worksheet_rows_with_merged_values(ws):
-            cells = [str(c) if c is not None else '' for c in row]
-            if not any(c.strip() for c in cells):
-                continue
-            if total_rows >= max_rows:
-                was_truncated = True
+    all_sheets: dict = pd.read_excel(
+        io.BytesIO(excel_bytes),
+        sheet_name=None,
+        header=None,
+        dtype=str,
+        na_filter=False,
+    )
+
+    for sheet_name, raw_df in all_sheets.items():
+        if raw_df.empty:
+            continue
+
+        # Clean every cell: strip whitespace, collapse spaces, drop 'nan'/'none'/'#N/A'
+        def _clean(val: str) -> str:
+            val = str(val).strip()
+            val = re.sub(r'\s+', ' ', val)
+            if val.lower() in ('nan', 'none', '#n/a', 'n/a', '#na', '-'):
+                return ''
+            return val
+
+        df = raw_df.map(_clean)  # type: ignore[arg-type]
+
+        # Remove fully-empty rows
+        df = df[df.apply(lambda r: any(c for c in r), axis=1)].reset_index(drop=True)
+        if df.empty:
+            continue
+
+        # Detect header row: first row with ≥3 non-empty cells
+        header_idx = 0
+        for i, row in df.iterrows():
+            if sum(1 for c in row if c) >= 3:
+                header_idx = int(i)  # type: ignore[arg-type]
                 break
-            sheet_rows.append('\t'.join(cells))
-            total_rows += 1
-        if sheet_rows:
-            parts.append(f'=== Sheet: {sheet_name} ===')
-            parts.extend(sheet_rows)
+
+        df.columns = df.iloc[header_idx].tolist()
+        df = df.iloc[header_idx + 1:].reset_index(drop=True)
+
+        # Drop columns where >80% of values are empty
+        min_fill = max(1, int(len(df) * 0.20))
+        df = df.loc[:, df.apply(lambda col: (col != '').sum() >= min_fill)]
+
+        # Drop duplicate column names (keep first occurrence)
+        seen: set = set()
+        keep_cols = []
+        for col in df.columns:
+            key = str(col).strip().lower()
+            if key not in seen:
+                seen.add(key)
+                keep_cols.append(col)
+        df = df[keep_cols]
+
+        # Remove rows that are entirely empty after column filtering
+        df = df[df.apply(lambda r: any(c for c in r), axis=1)].reset_index(drop=True)
+        if df.empty:
+            continue
+
+        # Truncate to max_rows across all sheets
+        remaining = max_rows - total_rows
+        if remaining <= 0:
+            was_truncated = True
+            break
+        if len(df) > remaining:
+            df = df.iloc[:remaining]
+            was_truncated = True
+
+        total_rows += len(df)
+
+        # Render as markdown table
+        headers = [str(c) for c in df.columns]
+        sep = ['---'] * len(headers)
+        md_rows = [
+            '| ' + ' | '.join(headers) + ' |',
+            '| ' + ' | '.join(sep) + ' |',
+        ]
+        for _, row in df.iterrows():
+            cells = [str(v).replace('|', '/') for v in row]
+            md_rows.append('| ' + ' | '.join(cells) + ' |')
+
+        parts.append(f'=== Sheet: {sheet_name} ===')
+        parts.extend(md_rows)
 
     return '\n'.join(parts), was_truncated, total_rows
 
@@ -151,29 +224,7 @@ def _split_into_chunks(document_text: str, chunk_size: int = _CHUNK_SIZE) -> lis
     lines = document_text.splitlines()
     is_excel = any(l.startswith('=== Sheet:') for l in lines[:5])
 
-    if is_excel:
-        header_lines: list[str] = []
-        data_lines: list[str] = []
-        found_data = False
-        for line in lines:
-            if line.startswith('=== Sheet:'):
-                header_lines.append(line)
-                found_data = False
-            elif not found_data and line.strip():
-                header_lines.append(line)
-                found_data = True
-            else:
-                data_lines.append(line)
-
-        if len(data_lines) <= chunk_size:
-            return [document_text]
-
-        header = '\n'.join(header_lines)
-        return [
-            f'{header}\n' + '\n'.join(data_lines[i:i + chunk_size])
-            for i in range(0, len(data_lines), chunk_size)
-        ]
-    else:
+    if not is_excel:
         non_empty = [l for l in lines if l.strip()]
         if len(non_empty) <= chunk_size:
             return [document_text]
@@ -181,6 +232,35 @@ def _split_into_chunks(document_text: str, chunk_size: int = _CHUNK_SIZE) -> lis
             '\n'.join(non_empty[i:i + chunk_size])
             for i in range(0, len(non_empty), chunk_size)
         ]
+
+    # Excel: markdown table format — sheet marker + col header + separator are repeated in each chunk
+    # Structure per sheet: "=== Sheet: X ===" / "| col | ... |" / "| --- | ... |" / data rows...
+    header_prefix: list[str] = []  # lines that repeat at top of every chunk
+    data_lines: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('=== Sheet:'):
+            # Grab sheet marker + col header + separator (next 2 lines)
+            header_prefix = [line]
+            if i + 1 < len(lines):
+                header_prefix.append(lines[i + 1])  # | col | ... |
+            if i + 2 < len(lines):
+                header_prefix.append(lines[i + 2])  # | --- | ... |
+            i += 3
+        else:
+            if line.strip():
+                data_lines.append(line)
+            i += 1
+
+    if len(data_lines) <= chunk_size:
+        return [document_text]
+
+    prefix = '\n'.join(header_prefix)
+    return [
+        f'{prefix}\n' + '\n'.join(data_lines[j:j + chunk_size])
+        for j in range(0, len(data_lines), chunk_size)
+    ]
 
 
 def _get_redis():
@@ -203,7 +283,7 @@ def _call_single_chunk(openai_client, chunk_text: str, source_type: str) -> list
     user_msg = f'Document type: {source_type}\n\n--- DOCUMENT ---\n{chunk_text}\n--- END ---'
     try:
         resp = openai_client.chat.completions.create(
-            model='gpt-4o',
+            model='gpt-4.1-mini',
             temperature=0,
             response_format={'type': 'json_object'},
             messages=[
@@ -221,6 +301,11 @@ def _call_single_chunk(openai_client, chunk_text: str, source_type: str) -> list
         )
     except Exception as e:
         err = str(e)
+        if 'insufficient_quota' in err.lower():
+            raise SmartParseError(
+                'OpenAI account quota exceeded — your prepaid credit has run out. '
+                'Add credits at platform.openai.com/settings/billing, then try again.'
+            )
         if 'rate_limit' in err.lower() or '429' in err:
             raise SmartParseError('OpenAI rate limit reached. Wait 60 seconds and try again.')
         if 'authentication' in err.lower() or '401' in err or 'invalid api key' in err.lower():

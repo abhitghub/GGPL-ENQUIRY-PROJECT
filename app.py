@@ -1508,7 +1508,7 @@ def _process_and_append(source, source_type: str):
         progress_bar.empty(); status_text.empty()
         return False
 
-    status_text.text('Sending document to GPT-4o...')
+    status_text.text('Sending document to LLM')
     progress_bar.progress(10)
 
     # Accumulates processed items streamed in chunk by chunk for live preview
