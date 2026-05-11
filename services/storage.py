@@ -78,6 +78,7 @@ def save_quote(entry: dict) -> str | None:
             'quote_no':       entry.get('quote_no') or '',
             'customer':       entry.get('customer') or '',
             'project_ref':    entry.get('project_ref') or '',
+            'custom_label':   entry.get('custom_label') or '',
             'timestamp':      entry.get('timestamp') or '',
             'n_items':        int(entry.get('n_items', 0)),
             'n_ready':        int(entry.get('n_ready', 0)),
@@ -121,11 +122,12 @@ def load_quotes(limit: int = 100) -> list[dict]:
         entries = []
         for row in result.data or []:
             entry: dict = {
-                'supabase_id': row.get('id'),
-                'quote_no':    row.get('quote_no') or '',
-                'customer':    row.get('customer') or '',
-                'project_ref': row.get('project_ref') or '',
-                'timestamp':   row.get('timestamp') or (row.get('created_at') or '')[:16],
+                'supabase_id':  row.get('id'),
+                'quote_no':     row.get('quote_no') or '',
+                'customer':     row.get('customer') or '',
+                'project_ref':  row.get('project_ref') or '',
+                'custom_label': row.get('custom_label') or '',
+                'timestamp':    row.get('timestamp') or (row.get('created_at') or '')[:16],
                 'n_items':     row.get('n_items', 0),
                 'n_ready':     row.get('n_ready', 0),
                 'n_check':     row.get('n_check', 0),

@@ -1103,8 +1103,9 @@ with st.sidebar:
             for _run in _groups[_grp]:
                 _run_idx = history.index(_run)
                 _pdf_ready = _run.get('pdf_ready', True)
-                _label = (_run.get('quote_no') or _run.get('customer') or
-                          _run.get('project_ref') or f'Enquiry {_run_idx + 1}')
+                _label = (_run.get('custom_label') or _run.get('quote_no') or
+                          _run.get('customer') or _run.get('project_ref') or
+                          f'Enquiry {_run_idx + 1}')
                 _is_sel = _sel == _run_idx
                 _arrow = '▾' if _is_sel else '▸'
                 _dot = ' ·' if not _pdf_ready else ''
@@ -1140,6 +1141,19 @@ with st.sidebar:
                         f'</div></div>',
                         unsafe_allow_html=True,
                     )
+                    _rename_cols = st.columns([4, 1])
+                    _new_name = _rename_cols[0].text_input(
+                        'Rename', value=_run.get('custom_label') or '',
+                        placeholder=_label,
+                        key=f'rename_input_{_run_idx}',
+                        label_visibility='collapsed',
+                    )
+                    if _rename_cols[1].button('✓', key=f'rename_btn_{_run_idx}', help='Save name'):
+                        _run['custom_label'] = _new_name.strip() or ''
+                        from services import storage as _storage_rename
+                        _storage_rename.save_quote(_run)
+                        _save_history_local()
+                        st.rerun()
                     _d1, _d2 = st.columns(2)
                     if _d1.button('Restore', key=f'restore_{_run_idx}'):
                         _restore_history_entry(_run)
