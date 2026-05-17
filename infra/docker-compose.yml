@@ -1,0 +1,67 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    env_file:
+      - ../.env
+    environment:
+      APP_ENV: local
+      REDIS_URL: redis://redis:6379/0
+      REDIS_ENABLED: "false"
+      APPROVED_QUOTE_REDIS_ENABLED: "false"
+      SMART_PARSE_REDIS_CACHE_ENABLED: "false"
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/gasket_quote
+      GGPL_LOGO_PATH: /app/apps/streamlit/logo.png
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../apps/api:/app/apps/api
+      - ../apps/streamlit/logo.png:/app/apps/streamlit/logo.png:ro
+      - ../packages:/app/packages
+    depends_on:
+      - redis
+      - postgres
+
+  worker:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    command: celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
+    env_file:
+      - ../.env
+    environment:
+      APP_ENV: local
+      REDIS_URL: redis://redis:6379/0
+      REDIS_ENABLED: "false"
+      APPROVED_QUOTE_REDIS_ENABLED: "false"
+      SMART_PARSE_REDIS_CACHE_ENABLED: "false"
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/gasket_quote
+      GGPL_LOGO_PATH: /app/apps/streamlit/logo.png
+    volumes:
+      - ../apps/api:/app/apps/api
+      - ../apps/streamlit/logo.png:/app/apps/streamlit/logo.png:ro
+      - ../packages:/app/packages
+    depends_on:
+      - redis
+      - postgres
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: gasket_quote
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  postgres-data:

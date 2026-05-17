@@ -13,4 +13,13 @@ core/__pycache__/exporter.cpython-312.pyc
 core/__pycache__/parser.cpython-312.pyc
 claude.md
 .claude
+.next/
+node_modules/
+.local/
+coverage/
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+*.log
 AGENTS.md

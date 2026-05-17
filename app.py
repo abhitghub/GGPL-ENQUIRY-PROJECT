@@ -1,26 +1,22 @@
+"""Compatibility entrypoint for the Streamlit app.
+
+The migration keeps the Streamlit shell under apps/streamlit. This wrapper
+preserves the historical `streamlit run app.py` workflow during the cutover.
 """
-Gasket Quote Processor — Dashboard landing page.
+from __future__ import annotations
 
-The original processing workspace now lives at pages/2_Quote_Workspace.py.
-"""
-import streamlit as st
+import runpy
+import sys
+from pathlib import Path
 
-from ui.bootstrap import init_session_state  # also runs env / secrets loading
 
-st.set_page_config(
-    page_title='Quote Pipeline — GGPL',
-    page_icon='📊',
-    layout='wide',
-    initial_sidebar_state='collapsed',
-)
+def main() -> None:
+    _streamlit_dir = Path(__file__).resolve().parent / "apps" / "streamlit"
+    if str(_streamlit_dir) not in sys.path:
+        sys.path.insert(0, str(_streamlit_dir))
 
-from ui.chat import render_chat_widget
-from ui.dashboard import render_dashboard
-from ui.history import load_history
-from ui.styles import apply_global_styles
+    runpy.run_path(str(_streamlit_dir / "app.py"), run_name="__main__")
 
-apply_global_styles()
-init_session_state()
-load_history()
-render_dashboard()
-render_chat_widget()
+
+if __name__ == "__main__":
+    main()
