@@ -446,7 +446,7 @@ if st.session_state.working_items:
                     'To proceed with the quote, kindly clarify:\n\n'
                     + '\n'.join(rfi_lines)
                     + '\n\nWith regards,\nGoodrich Gasket')
-        with st.expander('Draft RFI email'):
+        with st.expander('RFI email'):
             st.code(rfi_text, language=None)
             st.download_button(
                 label='Download RFI as .txt',

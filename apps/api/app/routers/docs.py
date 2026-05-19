@@ -24,9 +24,12 @@ router = APIRouter(prefix="/api/v1/doc-assistant", tags=["doc-assistant"])
 
 SYSTEM_PROMPT = (
     "You are a precise technical document assistant for Goodrich Gasket Pvt. Ltd. "
-    "Answer based only on the supplied documents. If something is not in the documents, say so."
+    "Answer based only on the supplied documents. If something is not in the documents, say so. "
+    "Prioritize gasket enquiry details, technical requirements, exceptions, risks, quantities, standards, materials, "
+    "commercial terms, and action items. Cite the source filename when making document-backed claims."
 )
 MAX_CONTEXT_CHARS = 120_000
+DOC_ASSISTANT_MODEL = os.environ.get("DOC_ASSISTANT_MODEL", "gpt-5.2")
 
 
 def _extract_pdf(raw: bytes) -> str:
@@ -123,20 +126,42 @@ def create_message(
     context = "\n\n---\n\n".join(
         f"[File: {name}]\n{text}" for name, text in session["documents"].items()
     )[:MAX_CONTEXT_CHARS]
+    question = (
+        f"Document content:\n\n<documents>\n{context}\n</documents>\n\n"
+        f"Question: {payload.question}\n\n"
+        "Answer in a concise but complete business/technical style. Use bullets or a table when useful. "
+        "If the answer depends on a specific file, include the filename in parentheses."
+    )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Document content:\n\n<document>\n{context}\n</document>"},
-        {"role": "assistant", "content": "Understood. I have read the document and am ready to answer."},
         *session["messages"],
-        {"role": "user", "content": payload.question},
+        {"role": "user", "content": question},
     ]
-    response = OpenAI(api_key=key).chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=messages,
-        temperature=0.1,
-        max_tokens=2048,
-    )
-    answer = response.choices[0].message.content.strip()
+    client = OpenAI(api_key=key)
+    try:
+        response = client.responses.create(
+            model=DOC_ASSISTANT_MODEL,
+            instructions=SYSTEM_PROMPT,
+            input=messages[1:],
+            max_output_tokens=3000,
+        )
+        answer = response.output_text.strip()
+    except AttributeError:
+        response = client.chat.completions.create(
+            model=DOC_ASSISTANT_MODEL,
+            messages=messages,
+            temperature=0.1,
+            max_tokens=3000,
+        )
+        answer = response.choices[0].message.content.strip()
+    except TypeError:
+        response = client.chat.completions.create(
+            model=DOC_ASSISTANT_MODEL,
+            messages=messages,
+            temperature=0.1,
+            max_completion_tokens=3000,
+        )
+        answer = response.choices[0].message.content.strip()
     repo.append_doc_message(user.org_id, session_id, "user", payload.question)
     repo.append_doc_message(user.org_id, session_id, "assistant", answer)
     return DocAssistantMessageRead(answer=answer)

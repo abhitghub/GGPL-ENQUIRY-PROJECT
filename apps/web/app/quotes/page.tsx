@@ -5,7 +5,7 @@ import { QuotesClient } from "./quotes-client";
 
 export default function QuotesPage() {
   return (
-    <AppShell activePath="/quotes" title="Drafts" breadcrumb="Workspace / Drafts">
+    <AppShell activePath="/quotes" title="Enquiry" breadcrumb="Workspace / Enquiry">
       <Suspense fallback={<div className="rounded-md border p-4 text-sm text-muted-foreground">Loading quote workspace...</div>}>
         <QuotesClient section="drafts" />
       </Suspense>

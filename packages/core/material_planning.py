@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Material planning estimates for gasket quote drafts.
+Material planning estimates for gasket quote enquiries.
 
 The planner deliberately separates deterministic calculations from Streamlit UI.
 It uses the normalized item contract produced by apply_rules(), then falls back to
@@ -90,7 +90,7 @@ def build_material_plan(
     sheet_length_mm: float = DEFAULT_SHEET_LENGTH_MM,
     nesting_efficiency: float = DEFAULT_NESTING_EFFICIENCY,
 ) -> dict[str, Any]:
-    """Build a reviewable material plan for the current quote draft."""
+    """Build a reviewable material plan for the current quote enquiry."""
     sheet_width_mm = _positive_float(sheet_width_mm, DEFAULT_SHEET_WIDTH_MM)
     sheet_length_mm = _positive_float(sheet_length_mm, DEFAULT_SHEET_LENGTH_MM)
     nesting_efficiency = max(0.1, min(_positive_float(nesting_efficiency, DEFAULT_NESTING_EFFICIENCY), 1.0))
@@ -346,7 +346,7 @@ def _plan_isk(item: dict[str, Any], config: dict[str, Any]) -> tuple[list[dict[s
     ):
         if item.get(field):
             comp = _base_row(item, label, _material(item.get(field)), "Kit component", qty, "Count after bolt schedule")
-            comp["calculation_notes"] = "Bolt count not in quote draft; review manually."
+            comp["calculation_notes"] = "Bolt count not in quote enquiry; review manually."
             rows.append(comp)
     return rows, assumptions, warnings
 

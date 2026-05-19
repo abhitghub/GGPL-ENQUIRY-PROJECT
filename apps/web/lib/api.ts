@@ -1,5 +1,8 @@
 "use client";
 
+import { getCurrentAppUser } from "@/lib/auth/users";
+import type { AppUser } from "@/lib/auth/users";
+
 export type QuoteStage = "initial" | "review" | "quote_prep" | "repricing" | "sent" | "po";
 export type JobStatus = "queued" | "running" | "succeeded" | "failed";
 
@@ -179,10 +182,13 @@ export const BULK_EDIT_FIELDS = [
 ] as const;
 
 function headers(extra?: HeadersInit): HeadersInit {
+  const user = getCurrentAppUser();
   return {
     "Content-Type": "application/json",
     "X-Org-Id": ORG_ID,
-    "X-User-Id": USER_ID,
+    "X-User-Id": user.id || USER_ID,
+    "X-User-Role": user.role,
+    "X-User-Name": user.name,
     ...extra,
   };
 }
@@ -291,7 +297,7 @@ export async function createExtraction(params: {
     return parse(
       await apiFetch(`${API_BASE}/api/v1/extractions`, {
         method: "POST",
-        headers: { "X-Org-Id": ORG_ID, "X-User-Id": USER_ID },
+        headers: { "X-Org-Id": ORG_ID, "X-User-Id": getCurrentAppUser().id || USER_ID, "X-User-Role": getCurrentAppUser().role },
         body: form,
       }),
     );
@@ -372,13 +378,46 @@ export async function chatCompletion(messages: Array<{ role: string; content: st
   );
 }
 
+export async function listAppUsers(): Promise<AppUser[]> {
+  return parse<AppUser[]>(await apiFetch(`${API_BASE}/api/v1/users`, { headers: headers() }));
+}
+
+export async function createAppUser(payload: Omit<AppUser, "id"> & { id?: string }): Promise<AppUser> {
+  return parse<AppUser>(
+    await apiFetch(`${API_BASE}/api/v1/users`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ user_id: payload.id, name: payload.name, email: payload.email, role: payload.role, active: payload.active }),
+    }),
+  );
+}
+
+export async function patchAppUser(id: string, payload: Partial<AppUser>): Promise<AppUser> {
+  return parse<AppUser>(
+    await apiFetch(`${API_BASE}/api/v1/users/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: headers(),
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export async function deleteAppUser(id: string): Promise<void> {
+  await parse<{ message: string }>(
+    await apiFetch(`${API_BASE}/api/v1/users/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: headers(),
+    }),
+  );
+}
+
 export async function uploadDocAssistantSession(files: FileList): Promise<{ id: string; document_names: string[] }> {
   const form = new FormData();
   Array.from(files).forEach((file) => form.append("files", file));
   return parse(
     await apiFetch(`${API_BASE}/api/v1/doc-assistant/sessions/upload`, {
       method: "POST",
-      headers: { "X-Org-Id": ORG_ID, "X-User-Id": USER_ID },
+      headers: { "X-Org-Id": ORG_ID, "X-User-Id": getCurrentAppUser().id || USER_ID, "X-User-Role": getCurrentAppUser().role },
       body: form,
     }),
   );

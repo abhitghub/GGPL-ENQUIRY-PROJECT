@@ -5,7 +5,9 @@ import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertCircle,
   ArrowRight,
+  Ban,
   Check,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
   Circle,
@@ -23,6 +25,8 @@ import {
   RotateCcw,
   Save,
   Search,
+  Send,
+  ShieldCheck,
   Trash2,
   Upload,
   X,
@@ -48,6 +52,7 @@ import {
   toNumber,
 } from "@/lib/api";
 import { addBackgroundJob } from "@/lib/background-jobs";
+import { canApproveQuotes, getCurrentAppUser, roleLabels, USERS_CHANGED_EVENT } from "@/lib/auth/users";
 import { buildMaterialPlan, MaterialPlan, DEFAULT_NESTING_EFFICIENCY, DEFAULT_SHEET_LENGTH_MM, DEFAULT_SHEET_WIDTH_MM } from "@/lib/material-planning";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -213,9 +218,17 @@ const BULK_DEFAULTS = {
 };
 const BLANK_SELECT_VALUE = "__blank__";
 const LARGE_DRAFT_THRESHOLD = 250;
-const DRAFT_PAGE_SIZE = 25;
+const DRAFT_PAGE_SIZE = 500;
 const FINAL_PAGE_SIZE = 50;
 const SUMMARY_LIMIT = 40;
+const VIRTUAL_ROW_HEIGHT = 58;
+const VIRTUAL_VIEWPORT_HEIGHT = 620;
+const VIRTUAL_OVERSCAN = 6;
+const GRID_INPUT_CLASS =
+  "h-7 w-full min-w-0 rounded-none border-0 bg-transparent px-2 py-1 text-xs shadow-none focus-visible:ring-1 focus-visible:ring-ring";
+const GRID_TEXTAREA_CLASS =
+  "h-14 w-full min-w-0 resize-none rounded-none border-0 bg-transparent px-2 py-1 text-xs shadow-none outline-none focus:ring-1 focus:ring-ring";
+const GRID_READONLY_CLASS = "bg-muted/30 text-muted-foreground";
 
 function blankItem(lineNo: number): GasketItem {
   return {
@@ -235,6 +248,177 @@ function getString(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (Array.isArray(value)) return value.join("; ");
   return String(value);
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function nextRevisionNo(value: unknown): string {
+  const current = Number.parseInt(getString(value).match(/\d+/)?.[0] ?? "0", 10);
+  return String(Number.isFinite(current) ? current + 1 : 1);
+}
+
+function todayDisplayDate(): string {
+  return new Date().toLocaleDateString("en-GB");
+}
+
+function revisionLabel(quote: Quote): string {
+  const revNo = getString(quote.quote_data?.rev_no);
+  return revNo ? `Rev ${revNo}` : "";
+}
+
+function storedMaterialPlan(quote: Quote | null): MaterialPlan | null {
+  const plan = quote?.stage_meta?.material_plan;
+  if (!plan || typeof plan !== "object") return null;
+  const candidate = plan as Partial<MaterialPlan>;
+  if (!Array.isArray(candidate.rows) || !candidate.totals || !candidate.config) return null;
+  return candidate as MaterialPlan;
+}
+
+type QualityFinding = {
+  severity: "high" | "medium" | "low";
+  title: string;
+  detail: string;
+  rows?: number[];
+};
+
+type QualityReport = {
+  score: number;
+  readiness: number;
+  quoteScore: number;
+  technicalScore: number;
+  riskScore: number;
+  missing: string[];
+  risks: QualityFinding[];
+};
+
+type ApprovalState = {
+  status: "draft" | "pending" | "approved" | "rejected";
+  requested_by?: string;
+  requested_at?: string;
+  decided_by?: string;
+  decided_at?: string;
+  comments?: string;
+  score?: number;
+  risk_count?: number;
+};
+
+function hasText(value: unknown): boolean {
+  return getString(value).trim().length > 0;
+}
+
+function itemHasMaterial(item: GasketItem): boolean {
+  return [
+    item.moc,
+    item.sw_winding_material,
+    item.sw_filler,
+    item.sw_inner_ring,
+    item.sw_outer_ring,
+    item.rtj_hardness_spec,
+    item.isk_gasket_material,
+    item.isk_core_material,
+    item.kamm_core_material,
+    item.kamm_surface_material,
+    item.dji_filler,
+  ].some(hasText);
+}
+
+function itemHasSize(item: GasketItem): boolean {
+  return hasText(item.size) || hasText(item.size_norm) || Boolean(item.od_mm && item.id_mm) || hasText(item.ring_no);
+}
+
+function pushRisk(risks: QualityFinding[], finding: QualityFinding) {
+  const existing = risks.find((risk) => risk.title === finding.title && risk.detail === finding.detail);
+  if (existing) {
+    existing.rows = Array.from(new Set([...(existing.rows ?? []), ...(finding.rows ?? [])])).sort((a, b) => a - b);
+  } else {
+    risks.push(finding);
+  }
+}
+
+function evaluateQuoteQuality(quote: Quote | null, quoteItems: GasketItem[], quoteData: Record<string, unknown>): QualityReport {
+  const itemsToCheck = quoteItems.length ? quoteItems : [];
+  const totalItems = quote?.n_items ?? itemsToCheck.length;
+  const ready = quoteItems.length ? quoteItems.filter((item) => item.status === "ready").length : (quote?.n_ready ?? 0);
+  const check = quoteItems.length ? quoteItems.filter((item) => item.status === "check").length : (quote?.n_check ?? 0);
+  const missingCount = quoteItems.length ? quoteItems.filter((item) => item.status === "missing").length : (quote?.n_missing ?? 0);
+  const readiness = totalItems ? Math.round((ready / totalItems) * 100) : 0;
+  const quoteMissing = [
+    !hasText(quote?.customer) ? "Customer name" : "",
+    !hasText(quote?.project_ref) ? "Project / enquiry reference" : "",
+    !hasText(quoteData.customer_enq_no) ? "Customer enquiry no" : "",
+    !hasText(quoteData.attention) ? "Attention/contact person" : "",
+    !hasText(quoteData.currency) ? "Currency" : "",
+    !hasText(quoteData.delivery) ? "Delivery terms/time" : "",
+    !hasText(quoteData.payment_terms) ? "Payment terms" : "",
+  ].filter(Boolean);
+  const quoteScore = Math.max(0, Math.round(((7 - quoteMissing.length) / 7) * 100));
+  const technicalScore = totalItems ? Math.max(0, Math.round(100 - ((missingCount * 1.6 + check * 0.7) / totalItems) * 100)) : 0;
+  const risks: QualityFinding[] = [];
+
+  if (!totalItems) {
+    pushRisk(risks, { severity: "high", title: "No line items", detail: "The enquiry has no parsed or manual gasket items yet." });
+  }
+  if (missingCount > 0) {
+    pushRisk(risks, { severity: "high", title: "Missing technical fields", detail: `${missingCount} line item(s) are marked missing.` });
+  }
+  if (check > 0) {
+    pushRisk(risks, { severity: "medium", title: "Defaults or review flags used", detail: `${check} line item(s) need review before quotation.` });
+  }
+
+  itemsToCheck.forEach((item, index) => {
+    const row = index + 1;
+    const type = getString(item.gasket_type).toUpperCase();
+    const text = [item.raw_description, item.standard, item.rating, item.special].map(getString).join(" ").toUpperCase();
+    if (!hasText(type)) {
+      pushRisk(risks, { severity: "high", title: "Unknown gasket type", detail: "Gasket type is blank.", rows: [row] });
+    }
+    if (!itemHasSize(item)) {
+      pushRisk(risks, { severity: "high", title: "Missing dimensions", detail: "Size, normalized size, OD/ID, or ring number is missing.", rows: [row] });
+    }
+    if (!itemHasMaterial(item)) {
+      pushRisk(risks, { severity: "medium", title: "Missing material", detail: "Material/MOC is not clear enough for procurement or pricing.", rows: [row] });
+    }
+    if (!hasText(item.rating) && !hasText(item.standard) && type !== "RTJ") {
+      pushRisk(risks, { severity: "medium", title: "Pressure class unclear", detail: "Rating/standard is missing.", rows: [row] });
+    }
+    if ((text.includes("ASME") || text.includes("ANSI")) && (text.includes("DIN") || text.includes("EN 1092"))) {
+      pushRisk(risks, { severity: "high", title: "Standard mismatch", detail: "ASME/ANSI and DIN/EN references appear on the same line.", rows: [row] });
+    }
+    if (type === "RTJ" && (!hasText(item.rtj_groove_type) || !hasText(item.ring_no))) {
+      pushRisk(risks, { severity: "medium", title: "RTJ details incomplete", detail: "Ring number and groove type should be checked.", rows: [row] });
+    }
+    if (type === "SPIRAL_WOUND" && (!hasText(item.sw_winding_material) || !hasText(item.sw_filler))) {
+      pushRisk(risks, { severity: "medium", title: "Spiral wound material incomplete", detail: "Winding and filler material should be present.", rows: [row] });
+    }
+    if (toNumber(item.quantity, 0) <= 0) {
+      pushRisk(risks, { severity: "high", title: "Invalid quantity", detail: "Quantity must be greater than zero.", rows: [row] });
+    }
+    if (text.includes("SPECIAL") || text.includes("CUSTOM") || text.includes("NON STANDARD") || text.includes("DRAWING")) {
+      pushRisk(risks, { severity: "medium", title: "Non-standard item", detail: "Drawing/custom/non-standard wording requires engineering review.", rows: [row] });
+    }
+  });
+
+  const highRiskPenalty = risks.filter((risk) => risk.severity === "high").length * 18;
+  const mediumRiskPenalty = risks.filter((risk) => risk.severity === "medium").length * 8;
+  const riskScore = Math.max(0, 100 - highRiskPenalty - mediumRiskPenalty);
+  const score = Math.round(quoteScore * 0.3 + technicalScore * 0.5 + riskScore * 0.2);
+  return { score, readiness, quoteScore, technicalScore, riskScore, missing: quoteMissing, risks };
+}
+
+function approvalState(quote: Quote | null): ApprovalState {
+  const approval = quote?.stage_meta?.approval;
+  if (!approval || typeof approval !== "object") return { status: "draft" };
+  const status = getString((approval as ApprovalState).status);
+  if (status !== "pending" && status !== "approved" && status !== "rejected") return { status: "draft" };
+  return approval as ApprovalState;
+}
+
+function approvalBadgeVariant(status: ApprovalState["status"]) {
+  if (status === "approved") return "secondary";
+  if (status === "rejected") return "warning";
+  return "outline";
 }
 
 function setItemValue(item: GasketItem, field: string, value: string): GasketItem {
@@ -294,7 +478,7 @@ function statusClass(status: string | null | undefined) {
 
 function stageLabel(stage: string) {
   const labels: Record<string, string> = {
-    initial: "Draft",
+    initial: "Enquiry",
     review: "Review",
     quote_prep: "Quotation prep",
     repricing: "Repricing",
@@ -398,11 +582,15 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     sheet_length_mm: DEFAULT_SHEET_LENGTH_MM,
     nesting_efficiency: DEFAULT_NESTING_EFFICIENCY,
   });
+  const [currentUser, setCurrentUser] = React.useState(() => getCurrentAppUser());
+  const [approvalComment, setApprovalComment] = React.useState("");
+  const [draftScrollTop, setDraftScrollTop] = React.useState(0);
   const isDraftSection = section === "drafts";
   const isMaterialSection = section === "material";
   const isFinalSection = section === "final";
   const sectionBasePath = isFinalSection ? "/quotes/final" : isMaterialSection ? "/material-planning" : "/quotes";
   const loadedQuoteId = React.useRef<string | null>(null);
+  const draftGridRef = React.useRef<HTMLDivElement | null>(null);
 
   const qd = React.useMemo(() => ({ ...quoteDefaults, ...(quote?.quote_data ?? {}) }), [quote?.quote_data]);
   const items = React.useMemo(() => quote?.items ?? [], [quote?.items]);
@@ -421,6 +609,12 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const safeDraftPage = Math.min(draftPage, pageCount - 1);
   const pagedDisplayIndices = displayIndices.slice(safeDraftPage * DRAFT_PAGE_SIZE, (safeDraftPage + 1) * DRAFT_PAGE_SIZE);
   const filteredItems = pagedDisplayIndices.map((index) => items[index]);
+  const virtualStart = Math.max(0, Math.floor(draftScrollTop / VIRTUAL_ROW_HEIGHT) - VIRTUAL_OVERSCAN);
+  const virtualCount = Math.ceil(VIRTUAL_VIEWPORT_HEIGHT / VIRTUAL_ROW_HEIGHT) + VIRTUAL_OVERSCAN * 2;
+  const virtualEnd = Math.min(pagedDisplayIndices.length, virtualStart + virtualCount);
+  const virtualDisplayIndices = pagedDisplayIndices.slice(virtualStart, virtualEnd);
+  const virtualPaddingTop = virtualStart * VIRTUAL_ROW_HEIGHT;
+  const virtualPaddingBottom = Math.max(0, (pagedDisplayIndices.length - virtualEnd) * VIRTUAL_ROW_HEIGHT);
   const pageStart = displayIndices.length ? safeDraftPage * DRAFT_PAGE_SIZE + 1 : 0;
   const pageEnd = Math.min(displayIndices.length, (safeDraftPage + 1) * DRAFT_PAGE_SIZE);
   const finalPageCount = Math.max(1, Math.ceil(items.length / FINAL_PAGE_SIZE));
@@ -465,13 +659,31 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     if (quote?.id === loadedQuoteId.current) return;
     loadedQuoteId.current = quote?.id ?? null;
     setIntakeCollapsed(Boolean(quote && !isFinalSection && (quote.items?.length ?? 0) > 0));
+    setMaterialPlan(isMaterialSection ? storedMaterialPlan(quote) : null);
     setDraftPage(0);
     setFinalPage(0);
-  }, [isFinalSection, quote]);
+  }, [isFinalSection, isMaterialSection, quote]);
 
   React.useEffect(() => {
     setDraftPage(0);
   }, [statusFilter, quote?.id]);
+
+  React.useEffect(() => {
+    setDraftScrollTop(0);
+    if (draftGridRef.current) {
+      draftGridRef.current.scrollTop = 0;
+    }
+  }, [safeDraftPage, statusFilter, quote?.id]);
+
+  React.useEffect(() => {
+    const refresh = () => setCurrentUser(getCurrentAppUser());
+    window.addEventListener(USERS_CHANGED_EVENT, refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener(USERS_CHANGED_EVENT, refresh);
+      window.removeEventListener("storage", refresh);
+    };
+  }, []);
 
   React.useEffect(() => {
     const hasProgress = Boolean(quote && (items.length > 0 || isFinalSection));
@@ -611,7 +823,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         id: accepted.job_id,
         quoteId: quote.id,
         sourceType,
-        label: `Smart Parse ${sourceType === "excel" ? "Excel" : "email"} draft`,
+        label: `Smart Parse ${sourceType === "excel" ? "Excel" : "email"} enquiry`,
         startedAt: new Date().toISOString(),
       });
       invalidateMaterialPlan();
@@ -676,6 +888,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
 
   async function exportCurrent(type: "pdf", mode: "preview" | "download" = "download") {
     if (!quote) return;
+    if (mode === "download" && !canExportFinal) {
+      toast.error("Approval is required before downloading the final quotation");
+      return;
+    }
     setExporting(type);
     try {
       await savePatch({ items, quote_data: qd, quote_no: getString(qd.quote_no) } as Partial<Quote>);
@@ -693,6 +909,75 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     } finally {
       setExporting(null);
     }
+  }
+
+  async function requestApproval() {
+    if (!quote) return;
+    const nextApproval: ApprovalState = {
+      status: "pending",
+      requested_by: currentUser.name || currentUser.id,
+      requested_at: new Date().toISOString(),
+      comments: approvalComment.trim(),
+      score: qualityReport.score,
+      risk_count: qualityReport.risks.length,
+    };
+    await savePatch(
+      {
+        items,
+        quote_data: qd,
+        quote_no: getString(qd.quote_no),
+        stage_meta: {
+          ...(quote.stage_meta ?? {}),
+          approval: nextApproval,
+        },
+      } as Partial<Quote>,
+      "Approval requested",
+    );
+    setApprovalComment("");
+  }
+
+  async function decideApproval(status: "approved" | "rejected") {
+    if (!quote || !canApprove) return;
+    const nextApproval: ApprovalState = {
+      ...approval,
+      status,
+      decided_by: currentUser.name || currentUser.id,
+      decided_at: new Date().toISOString(),
+      comments: approvalComment.trim() || approval.comments,
+      score: qualityReport.score,
+      risk_count: qualityReport.risks.length,
+    };
+    await savePatch(
+      {
+        items,
+        quote_data: qd,
+        quote_no: getString(qd.quote_no),
+        stage_meta: {
+          ...(quote.stage_meta ?? {}),
+          approval: nextApproval,
+        },
+      } as Partial<Quote>,
+      status === "approved" ? "Quotation approved" : "Quotation rejected",
+    );
+    setApprovalComment("");
+  }
+
+  async function markSent() {
+    if (!quote) return;
+    if (approval.status !== "approved") {
+      toast.error("Approve the quotation before marking it sent");
+      return;
+    }
+    const sentMeta = {
+      ...(quote.stage_meta ?? {}),
+      approval,
+      sent_by: currentUser.name || currentUser.id,
+      sent_at: new Date().toISOString(),
+    };
+    const advanced = await advanceQuoteStage(quote.id, "sent", "Approved quotation sent", sentMeta);
+    setQuote(advanced);
+    setQuotes((prev) => prev.map((row) => (row.id === advanced.id ? quoteSummary(advanced) : row)));
+    toast.success("Quotation marked sent");
   }
 
   function updateItem(index: number, field: string, value: string) {
@@ -776,6 +1061,54 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     router.replace(`/quotes?quote=${created.id}`);
   }
 
+  async function createRevision() {
+    if (!quote) return;
+    setSaving(true);
+    try {
+      invalidateMaterialPlan();
+      const saved = await patchQuote(quote.id, {
+        customer: quote.customer,
+        project_ref: quote.project_ref,
+        custom_label: quote.custom_label,
+        quote_no: quote.quote_no,
+        items,
+        quote_data: qd,
+      } as Partial<Quote>);
+      const revNo = nextRevisionNo(qd.rev_no);
+      const revisionQuoteData = {
+        ...cloneJson(qd),
+        rev_no: revNo,
+        rev_date: todayDisplayDate(),
+      };
+      const revision = await createQuote({
+        quote_no: saved.quote_no,
+        customer: saved.customer,
+        project_ref: saved.project_ref,
+        custom_label: saved.custom_label,
+        items: cloneJson(saved.items),
+        quote_data: revisionQuoteData,
+        stage: "initial",
+        stage_meta: {
+          ...(saved.stage_meta ?? {}),
+          revision_of_quote_id: saved.id,
+          revision_no: revNo,
+          revision_created_from_version: saved.version,
+        },
+      } as Partial<Quote>);
+      setQuote(revision);
+      setSelectedRows(new Set());
+      setRfiText("");
+      setIntakeCollapsed(Boolean(revision.items.length));
+      await refreshQuotes(revision.id);
+      router.replace(`/quotes?quote=${revision.id}`);
+      toast.success(`Revision ${revNo} enquiry created`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not create revision");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   function updateQd(key: string, value: unknown) {
     const next = { ...qd, [key]: value };
     if (key === "currency") {
@@ -802,6 +1135,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const missingCount = items.filter((item) => item.status === "missing").length;
   const actionCount = checkCount + missingCount;
   const readiness = items.length ? Math.round((readyCount / items.length) * 100) : 0;
+  const qualityReport = React.useMemo(() => evaluateQuoteQuality(quote, items, qd), [items, qd, quote]);
+  const approval = approvalState(quote);
+  const canApprove = canApproveQuotes(currentUser.role);
+  const canExportFinal = approval.status === "approved" || canApprove;
   const visibleQuotes = quotes.filter((row) => {
     if (isFinalSection && !FINAL_STAGES.has(row.stage)) return false;
     else if (isMaterialSection && !MATERIAL_STAGES.has(row.stage)) return false;
@@ -823,9 +1160,122 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     }
   }
 
-  function generateMaterialPlan() {
+  function renderGridCell(index: number, item: GasketItem, column: TableColumn) {
+    const rawValue = item[column.field];
+    if (column.field === "status") {
+      return (
+        <div className="flex h-7 items-center gap-1.5 px-2 text-xs">
+          {statusIcon[getString(item.status)]}
+          <span className="capitalize">{getString(item.status)}</span>
+        </div>
+      );
+    }
+    if (column.field === "flags") {
+      return (
+        <textarea
+          className={`${GRID_TEXTAREA_CLASS} ${GRID_READONLY_CLASS}`}
+          value={notesFor(item)}
+          readOnly
+        />
+      );
+    }
+    if (column.field === "line_no" || column.field === "confidence") {
+      return <Input className={`${GRID_INPUT_CLASS} ${GRID_READONLY_CLASS}`} value={getString(rawValue)} readOnly />;
+    }
+    if (column.field === "ggpl_description" || column.kind === "readonly") {
+      return (
+        <textarea
+          className={`${GRID_TEXTAREA_CLASS} ${GRID_READONLY_CLASS}`}
+          value={getString(rawValue)}
+          readOnly
+        />
+      );
+    }
+    if (column.kind === "textarea") {
+      return (
+        <textarea
+          className={GRID_TEXTAREA_CLASS}
+          value={getString(rawValue)}
+          onChange={(event) => updateItem(index, column.field, event.target.value)}
+        />
+      );
+    }
+    if (column.kind === "select") {
+      return (
+        <Select value={getString(rawValue) || BLANK_SELECT_VALUE} onValueChange={(value) => updateItem(index, column.field, value === BLANK_SELECT_VALUE ? "" : value)}>
+          <SelectTrigger className={`${GRID_INPUT_CLASS} min-w-28 justify-between`}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {(column.options ?? []).map((value) => <SelectItem key={value || `${column.field}-blank`} value={value || BLANK_SELECT_VALUE}>{value || "(blank)"}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      );
+    }
+    if (column.kind === "checkbox") {
+      return (
+        <div className="flex h-7 items-center justify-center">
+          <input
+            type="checkbox"
+            checked={item.status === "regret" || item.regret === true}
+            onChange={(event) => {
+              const next = [...items];
+              next[index] = { ...item, regret: event.target.checked, status: event.target.checked ? "regret" : "check" };
+              invalidateMaterialPlan();
+              setQuote((current) => (current ? { ...current, items: next } : current));
+            }}
+            aria-label={`Regret row ${index + 1}`}
+          />
+        </div>
+      );
+    }
+    return (
+      <Input
+        className={GRID_INPUT_CLASS}
+        type={column.kind === "number" ? "number" : "text"}
+        value={getString(rawValue)}
+        onChange={(event) => updateItem(index, column.field, event.target.value)}
+      />
+    );
+  }
+
+  async function generateMaterialPlan() {
     if (!quote) return;
-    setMaterialPlan(buildMaterialPlan(items, materialConfig));
+    const nextPlan = buildMaterialPlan(items, materialConfig);
+    setMaterialPlan(nextPlan);
+    await savePatch(
+      {
+        stage_meta: {
+          ...(quote.stage_meta ?? {}),
+          material_plan: nextPlan,
+          material_plan_updated_at: new Date().toISOString(),
+        },
+      } as Partial<Quote>,
+      "Material plan saved",
+    );
+  }
+
+  async function saveMaterialPlan(plan: MaterialPlan | null = materialPlan) {
+    if (!quote || !plan) return;
+    await savePatch(
+      {
+        stage_meta: {
+          ...(quote.stage_meta ?? {}),
+          material_plan: plan,
+          material_plan_updated_at: new Date().toISOString(),
+        },
+      } as Partial<Quote>,
+      "Material plan saved",
+    );
+  }
+
+  async function clearMaterialPlan() {
+    if (!quote) return;
+    const nextStageMeta = { ...(quote.stage_meta ?? {}) };
+    delete nextStageMeta.material_plan;
+    delete nextStageMeta.material_plan_updated_at;
+    setMaterialPlan(null);
+    await savePatch({ stage_meta: nextStageMeta } as Partial<Quote>, "Material plan cleared");
   }
 
   function updatePlanRow(index: number, patch: Partial<MaterialPlan["rows"][number]>) {
@@ -862,16 +1312,16 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
             <div className="space-y-2">
               <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
                 {isFinalSection ? <FileSpreadsheet className="h-4 w-4" /> : isMaterialSection ? <Layers3 className="h-4 w-4" /> : <Inbox className="h-4 w-4" />}
-                {isFinalSection ? "Quotation queue" : isMaterialSection ? "Material planning queue" : "Draft queue"}
+                {isFinalSection ? "Quotation queue" : isMaterialSection ? "Material planning queue" : "Enquiry queue"}
               </div>
               <div>
-                <h2 className="text-2xl font-semibold tracking-normal">{isFinalSection ? "Final quotations" : isMaterialSection ? "Material planning" : "Drafts"}</h2>
+                <h2 className="text-2xl font-semibold tracking-normal">{isFinalSection ? "Final quotations" : isMaterialSection ? "Material planning" : "Enquiry"}</h2>
                 <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
                   {isFinalSection
                     ? "Pricing, terms, PDF preview, and final customer quotation output."
                     : isMaterialSection
-                      ? "Select a cleaned draft to generate starter stock sizes, estimated weights, and review notes."
-                    : "Email and Excel enquiries move through draft cleanup before quotation preparation."}
+                      ? "Select a cleaned enquiry to generate starter stock sizes, estimated weights, and review notes."
+                    : "Email and Excel enquiries move through enquiry cleanup before quotation preparation."}
                 </p>
               </div>
             </div>
@@ -879,7 +1329,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               {isDraftSection && (
                 <Button onClick={startQuote}>
                   <Plus className="h-4 w-4" />
-                  New draft
+                  New enquiry
                 </Button>
               )}
               <Button variant="secondary" onClick={() => refreshQuotes().catch((error) => toast.error(error.message))} aria-label="Refresh quotes">
@@ -893,7 +1343,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         <Card>
           <CardHeader className="gap-3 border-b md:flex-row md:items-center md:justify-between md:space-y-0">
             <div className="space-y-1">
-              <CardTitle>{isFinalSection ? "Final quotation queue" : isMaterialSection ? "Material planning queue" : "Draft queue"}</CardTitle>
+              <CardTitle>{isFinalSection ? "Final quotation queue" : isMaterialSection ? "Material planning queue" : "Enquiry queue"}</CardTitle>
               <div className="text-sm text-muted-foreground">{visibleQuotes.length} workspace{visibleQuotes.length === 1 ? "" : "s"}</div>
             </div>
             <div className="relative w-full md:max-w-sm">
@@ -915,7 +1365,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 </TableHeader>
                 <TableBody>
                   {visibleQuotes.map((row) => {
-                    const rowReady = row.n_items ? Math.round((row.n_ready / row.n_items) * 100) : 0;
+                    const rowQuality = evaluateQuoteQuality(row, row.items, row.quote_data ?? {});
+                    const highRisks = rowQuality.risks.filter((risk) => risk.severity === "high").length;
                     return (
                       <TableRow key={row.id} className="cursor-pointer hover:bg-muted/60" onClick={() => openQuote(row)}>
                         <TableCell>
@@ -926,17 +1377,25 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                             <div className="min-w-0">
                               <div className="truncate font-medium">{row.custom_label || row.customer || row.quote_no || "Untitled quote"}</div>
                               <div className="truncate text-xs text-muted-foreground">{row.project_ref || row.quote_no || row.id}</div>
-                              <Badge variant={row.stage === "po" ? "secondary" : "outline"} className="mt-2">{stageLabel(row.stage)}</Badge>
+                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                <Badge variant={row.stage === "po" ? "secondary" : "outline"}>{stageLabel(row.stage)}</Badge>
+                                {revisionLabel(row) && <Badge variant="outline">{revisionLabel(row)}</Badge>}
+                                <Badge variant="outline">Version {row.version}</Badge>
+                              </div>
                             </div>
                           </div>
                         </TableCell>
                         <TableCell>
                           <div className="space-y-2">
                             <div className="flex items-center justify-between text-xs">
-                              <span className="text-muted-foreground">Ready</span>
-                              <span className="font-medium">{rowReady}%</span>
+                              <span className="text-muted-foreground">RFQ score</span>
+                              <span className="font-medium">{rowQuality.score}%</span>
                             </div>
-                            <ProgressBar value={rowReady} />
+                            <ProgressBar value={rowQuality.score} />
+                            <div className="flex flex-wrap gap-1">
+                              <Badge variant={highRisks ? "warning" : "muted"}>{highRisks} high risk</Badge>
+                              <Badge variant="outline">{rowQuality.readiness}% ready</Badge>
+                            </div>
                           </div>
                         </TableCell>
                         <TableCell>
@@ -972,11 +1431,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                           <div className="flex h-10 w-10 items-center justify-center rounded-md border bg-background">
                             {isMaterialSection ? <Layers3 className="h-5 w-5" /> : <Inbox className="h-5 w-5" />}
                           </div>
-                          <div>{isFinalSection ? "No quotes are ready for final quotation yet." : isMaterialSection ? "No drafts are ready for material planning." : "No drafts match the current search."}</div>
+                          <div>{isFinalSection ? "No quotes are ready for final quotation yet." : isMaterialSection ? "No enquiries are ready for material planning." : "No enquiries match the current search."}</div>
                           {isDraftSection && (
                             <Button onClick={startQuote}>
                               <Plus className="h-4 w-4" />
-                              New draft
+                              New enquiry
                             </Button>
                           )}
                         </div>
@@ -999,18 +1458,20 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           <div className="min-w-0 space-y-3">
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant={quote.stage === "po" ? "secondary" : "outline"}>{stageLabel(quote.stage)}</Badge>
+              {revisionLabel(quote) && <Badge variant="outline">{revisionLabel(quote)}</Badge>}
               {saving && <span className="inline-flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" />Saving</span>}
             </div>
             <div>
-              <h2 className="truncate text-2xl font-semibold tracking-normal">{quote.customer || quote.quote_no || "Untitled draft"}</h2>
+              <h2 className="truncate text-2xl font-semibold tracking-normal">{quote.customer || quote.quote_no || "Untitled enquiry"}</h2>
               <div className="mt-1 truncate text-sm text-muted-foreground">{quote.project_ref || quote.id}</div>
             </div>
             {!isFinalSection && (
-              <div className="grid gap-3 sm:grid-cols-4">
+              <div className="grid gap-3 sm:grid-cols-5">
                 <SummaryTile label="Items" value={items.length} detail={`${filteredItems.length} on this page`} />
+                <SummaryTile label="RFQ score" value={`${qualityReport.score}%`} detail={`${readiness}% item ready`} tone={qualityReport.score >= 80 ? "ready" : qualityReport.score >= 60 ? "check" : "missing"} />
                 <SummaryTile label="Ready" value={readyCount} detail={`${readiness}% complete`} tone="ready" />
                 <SummaryTile label="Review" value={checkCount} detail="Defaults used" tone="check" />
-                <SummaryTile label="Missing" value={missingCount} detail="Needs input" tone="missing" />
+                <SummaryTile label="Risks" value={qualityReport.risks.length} detail={`${qualityReport.risks.filter((risk) => risk.severity === "high").length} high`} tone={qualityReport.risks.some((risk) => risk.severity === "high") ? "missing" : qualityReport.risks.length ? "check" : "ready"} />
               </div>
             )}
           </div>
@@ -1023,7 +1484,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               <>
                 <Button variant="secondary" onClick={startNew}>
                   <Plus className="h-4 w-4" />
-                  New draft
+                  New enquiry
+                </Button>
+                <Button variant="secondary" onClick={createRevision}>
+                  <RefreshCw className="h-4 w-4" />
+                  Revision
                 </Button>
                 <Button onClick={openQuotationScreen} disabled={!items.length}>
                   <ArrowRight className="h-4 w-4" />
@@ -1034,12 +1499,63 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           </div>
         </div>
 
+        {!isFinalSection && (
+          <div className="mt-5 grid gap-3 border-t pt-5 lg:grid-cols-[1fr_1fr]">
+            <div className="rounded-md border p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium">RFQ completeness</div>
+                  <div className="text-xs text-muted-foreground">
+                    Commercial {qualityReport.quoteScore}% / Technical {qualityReport.technicalScore}% / Risk {qualityReport.riskScore}%
+                  </div>
+                </div>
+                <Badge variant={qualityReport.score >= 80 ? "secondary" : qualityReport.score >= 60 ? "warning" : "outline"}>{qualityReport.score}%</Badge>
+              </div>
+              <div className="mt-3">
+                <ProgressBar value={qualityReport.score} />
+              </div>
+              {qualityReport.missing.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {qualityReport.missing.slice(0, 5).map((item) => <Badge key={item} variant="outline">{item}</Badge>)}
+                  {qualityReport.missing.length > 5 && <Badge variant="muted">+{qualityReport.missing.length - 5} more</Badge>}
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-md border p-3">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium">Technical risk check</div>
+                  <div className="text-xs text-muted-foreground">Flags missing data, standard mismatches, and non-standard items.</div>
+                </div>
+                <Badge variant={qualityReport.risks.some((risk) => risk.severity === "high") ? "warning" : "secondary"}>
+                  {qualityReport.risks.length} risk{qualityReport.risks.length === 1 ? "" : "s"}
+                </Badge>
+              </div>
+              {qualityReport.risks.length === 0 ? (
+                <div className="text-sm text-muted-foreground">No technical risks detected from the current enquiry data.</div>
+              ) : (
+                <div className="space-y-2">
+                  {qualityReport.risks.slice(0, 5).map((risk) => (
+                    <div key={`${risk.title}-${risk.detail}`} className="rounded-md bg-muted/40 px-2 py-1.5 text-xs">
+                      <span className="font-medium">{risk.title}</span>
+                      <span className="text-muted-foreground"> - {risk.detail}</span>
+                      {risk.rows?.length ? <span className="text-muted-foreground"> Rows {risk.rows.slice(0, 8).join(", ")}</span> : null}
+                    </div>
+                  ))}
+                  {qualityReport.risks.length > 5 && <div className="text-xs text-muted-foreground">+{qualityReport.risks.length - 5} more risk checks</div>}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="mt-5 grid gap-3 border-t pt-5 md:grid-cols-[1fr_1fr_auto] md:items-end">
           <Field label="Customer" value={quote.customer} onChange={(value) => setQuote({ ...quote, customer: value })} />
           <Field label="Project / PO reference" value={quote.project_ref} onChange={(value) => setQuote({ ...quote, project_ref: value })} />
           <Button
             variant="secondary"
-            onClick={() => savePatch({ customer: quote.customer, project_ref: quote.project_ref } as Partial<Quote>, "Draft details saved")}
+            onClick={() => savePatch({ customer: quote.customer, project_ref: quote.project_ref } as Partial<Quote>, "Enquiry details saved")}
           >
             <Save className="h-4 w-4" />
             Save details
@@ -1052,7 +1568,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           <CardHeader className="border-b">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div className="space-y-1">
-                <CardTitle>Draft intake</CardTitle>
+                <CardTitle>Enquiry intake</CardTitle>
                 <div className="text-sm text-muted-foreground">
                   {intakeCollapsed && !startingExtraction ? `${items.length} item(s) captured. Intake is minimized.` : "Email, Excel, and manual item capture"}
                 </div>
@@ -1069,8 +1585,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     variant="ghost"
                     size="icon"
                     onClick={() => setIntakeCollapsed((value) => !value)}
-                    aria-label={intakeCollapsed ? "Expand draft intake" : "Minimize draft intake"}
-                    title={intakeCollapsed ? "Expand draft intake" : "Minimize draft intake"}
+                    aria-label={intakeCollapsed ? "Expand enquiry intake" : "Minimize enquiry intake"}
+                    title={intakeCollapsed ? "Expand enquiry intake" : "Minimize enquiry intake"}
                   >
                     {intakeCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
                   </Button>
@@ -1081,7 +1597,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           {intakeCollapsed && !startingExtraction ? (
             <CardContent className="pt-5">
               <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
-                Intake minimized. Review and clean the extracted draft below.
+                Intake minimized. Review and clean the extracted enquiry below.
               </div>
             </CardContent>
           ) : (
@@ -1102,7 +1618,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     <Button onClick={() => runExtraction("email")} disabled={startingExtraction}>
                       {startingExtraction ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-                      Process email draft
+                      Process email enquiry
                     </Button>
                     <Button variant="secondary" onClick={() => setEmailText("")} disabled={!emailText}>
                       Clear
@@ -1126,7 +1642,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   </div>
                   <Button className="mt-3" onClick={() => runExtraction("excel", excelFile)} disabled={startingExtraction}>
                     <Upload className="h-4 w-4" />
-                    Process Excel draft
+                    Process Excel enquiry
                   </Button>
                 </TabsContent>
                 <TabsContent value="manual" className="mt-4">
@@ -1167,7 +1683,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
             <CardHeader className="sticky top-16 z-20 border-b bg-card/95 backdrop-blur">
               <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
                 <div className="space-y-1">
-                  <CardTitle>Draft items</CardTitle>
+                  <CardTitle>Enquiry items</CardTitle>
                   <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
                     <span>{items.length} items</span>
                     <span>{readyCount} ready</span>
@@ -1284,7 +1800,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/30 px-3 py-2 text-sm">
                 <div className="text-muted-foreground">
                   Showing {pageStart}-{pageEnd} of {displayIndices.length} visible row(s).
-                  {isLargeDraft ? " Compact columns are shown for large drafts; select one row to edit all fields below." : " Large drafts are paged to keep the browser responsive."}
+                  {isLargeDraft ? " Compact columns are shown for large enquiries; select one row to edit all fields below." : " Large enquiries are paged to keep the browser responsive."}
                 </div>
                 <div className="flex items-center gap-2">
                   <Button
@@ -1307,25 +1823,48 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 </div>
               </div>
 
-              <div className="max-h-[540px] overflow-auto rounded-md border">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="sticky left-0 z-20 w-12 bg-card">Select</TableHead>
-                      <TableHead className="sticky left-12 z-20 w-44 bg-card">Actions</TableHead>
-                      {activeTableColumns.map((column) => <TableHead key={column.label} className={column.width ?? "min-w-36"}>{column.label}</TableHead>)}
+              <div
+                ref={draftGridRef}
+                className="max-h-[620px] overflow-auto rounded-md border"
+                onScroll={(event) => setDraftScrollTop(event.currentTarget.scrollTop)}
+              >
+                <Table className="w-max min-w-full border-collapse text-xs">
+                  <TableHeader className="sticky top-0 z-30 bg-card">
+                    <TableRow className="hover:bg-transparent">
+                      <TableHead className="sticky left-0 z-40 h-8 w-10 border-r bg-card px-2 text-center">Sel</TableHead>
+                      <TableHead className="sticky left-10 z-40 h-8 w-20 border-r bg-card px-2 text-center">Tools</TableHead>
+                      {activeTableColumns.map((column) => (
+                        <TableHead key={column.label} className={`${column.width ?? "min-w-36"} h-8 whitespace-nowrap border-r bg-card px-2 text-xs font-semibold`}>
+                          {column.label}
+                        </TableHead>
+                      ))}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {pagedDisplayIndices.map((index) => {
+                    {virtualPaddingTop > 0 && (
+                      <TableRow className="hover:bg-transparent">
+                        <TableCell colSpan={activeTableColumns.length + 2} style={{ height: virtualPaddingTop }} className="border-0 p-0" />
+                      </TableRow>
+                    )}
+                    {virtualDisplayIndices.map((index) => {
                       const item = items[index];
                       if (!item) return null;
+                      const selected = selectedRows.has(index);
                       return (
-                        <TableRow key={`${index}-${item.line_no ?? ""}`} className={statusClass(item.status)}>
-                          <TableCell className="sticky left-0 z-10 bg-card align-top">
+                        <TableRow
+                          key={`${index}-${item.line_no ?? ""}`}
+                          style={{ height: VIRTUAL_ROW_HEIGHT }}
+                          className={`${statusClass(item.status)} ${selected ? "outline outline-1 outline-primary" : ""}`}
+                          onClick={() => {
+                            if (selectedRows.size === 1 && selected) return;
+                            setSelectedRows(new Set([index]));
+                          }}
+                        >
+                          <TableCell className="sticky left-0 z-20 border-r bg-card p-0 text-center align-middle">
                             <input
                               type="checkbox"
-                              checked={selectedRows.has(index)}
+                              checked={selected}
+                              onClick={(event) => event.stopPropagation()}
                               onChange={(event) => {
                                 const next = new Set(selectedRows);
                                 if (event.target.checked) next.add(index);
@@ -1335,66 +1874,47 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                               aria-label={`Select row ${index + 1}`}
                             />
                           </TableCell>
-                          <TableCell className="sticky left-12 z-10 bg-card align-top">
-                            <div className="flex flex-col gap-2">
+                          <TableCell className="sticky left-10 z-20 border-r bg-card p-0 align-middle">
+                            <div className="flex h-full items-center justify-center gap-1 px-1">
                               <Button
-                                variant="secondary"
-                                size="sm"
-                                onClick={() => recomputeRows([index])}
-                                title="Recalculate GGPL description from this row's edited fields"
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  recomputeRows([index]);
+                                }}
+                                title="Update row"
                               >
-                                <RefreshCw className="h-4 w-4" />
-                                Update
+                                <RefreshCw className="h-3.5 w-3.5" />
                               </Button>
                               <Button
-                                variant="secondary"
-                                size="sm"
-                                onClick={() => reprocessRows([index])}
-                                title="Run Smart Parse again on this row's customer description"
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  reprocessRows([index]);
+                                }}
+                                title="Smart Parse row"
                               >
-                                <RotateCcw className="h-4 w-4" />
-                                Smart Parse
+                                <RotateCcw className="h-3.5 w-3.5" />
                               </Button>
                             </div>
                           </TableCell>
                           {activeTableColumns.map((column) => (
-                            <TableCell key={column.label} className="align-top">
-                              {column.field === "status" ? (
-                                <div className="flex items-center gap-2 text-sm">{statusIcon[getString(item.status)]}{getString(item.status)}</div>
-                              ) : column.field === "flags" ? (
-                                <textarea className="h-20 min-w-72 rounded-md border bg-muted px-2 py-1 text-xs" value={notesFor(item)} readOnly />
-                              ) : column.field === "line_no" || column.field === "confidence" ? (
-                                <Input className="h-8 min-w-20 bg-muted text-xs" value={getString(item[column.field])} readOnly />
-                              ) : column.field === "ggpl_description" || column.kind === "readonly" ? (
-                                <textarea className="h-20 min-w-72 rounded-md border bg-muted px-2 py-1 text-xs" value={getString(item[column.field])} readOnly />
-                              ) : column.kind === "textarea" ? (
-                                <textarea className="h-20 min-w-72 rounded-md border bg-background px-2 py-1 text-xs" value={getString(item[column.field])} onChange={(event) => updateItem(index, column.field, event.target.value)} />
-                              ) : column.kind === "select" ? (
-                                <Select value={getString(item[column.field]) || BLANK_SELECT_VALUE} onValueChange={(value) => updateItem(index, column.field, value === BLANK_SELECT_VALUE ? "" : value)}>
-                                  <SelectTrigger className="h-8 min-w-28"><SelectValue /></SelectTrigger>
-                                  <SelectContent>
-                                    {(column.options ?? []).map((value) => <SelectItem key={value || `${column.field}-blank`} value={value || BLANK_SELECT_VALUE}>{value || "(blank)"}</SelectItem>)}
-                                  </SelectContent>
-                                </Select>
-                              ) : column.kind === "checkbox" ? (
-                                <input
-                                  type="checkbox"
-                                  checked={item.status === "regret" || item.regret === true}
-                                  onChange={(event) => {
-                                    const next = [...items];
-                                    next[index] = { ...item, regret: event.target.checked, status: event.target.checked ? "regret" : "check" };
-                                    setQuote((current) => (current ? { ...current, items: next } : current));
-                                  }}
-                                  aria-label={`Regret row ${index + 1}`}
-                                />
-                              ) : (
-                                <Input className="h-8 min-w-28 text-xs" type={column.kind === "number" ? "number" : "text"} value={getString(item[column.field])} onChange={(event) => updateItem(index, column.field, event.target.value)} />
-                              )}
+                            <TableCell key={column.label} className="border-r p-0 align-top">
+                              {renderGridCell(index, item, column)}
                             </TableCell>
                           ))}
                         </TableRow>
                       );
                     })}
+                    {virtualPaddingBottom > 0 && (
+                      <TableRow className="hover:bg-transparent">
+                        <TableCell colSpan={activeTableColumns.length + 2} style={{ height: virtualPaddingBottom }} className="border-0 p-0" />
+                      </TableRow>
+                    )}
                     {!filteredItems.length && (
                       <TableRow>
                         <TableCell colSpan={activeTableColumns.length + 2} className="py-8 text-center text-sm text-muted-foreground">No items match this filter.</TableCell>
@@ -1403,6 +1923,23 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   </TableBody>
                 </Table>
               </div>
+
+              {selectedIndices.length === 1 && items[selectedIndices[0]] && (
+                <div className="grid gap-3 rounded-md border bg-muted/20 p-3 lg:grid-cols-2">
+                  <Field
+                    label="Customer description"
+                    value={getString(items[selectedIndices[0]].raw_description)}
+                    onChange={(value) => updateItem(selectedIndices[0], "raw_description", value)}
+                    textarea
+                  />
+                  <Field
+                    label="GGPL description"
+                    value={getString(items[selectedIndices[0]].ggpl_description)}
+                    onChange={(value) => updateItem(selectedIndices[0], "ggpl_description", value)}
+                    textarea
+                  />
+                </div>
+              )}
 
               <details className="rounded-md border p-3">
                 <summary className="cursor-pointer text-sm font-medium">All 50 item fields</summary>
@@ -1439,14 +1976,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       size="sm"
                       onClick={() => quote && rfiDraft(quote.id).then((draft) => setRfiText(draft.text)).catch((error) => toast.error(error.message))}
                     >
-                      Build RFI draft
+                      Build RFI email
                     </Button>
                   </div>
                   <textarea className="mt-2 min-h-32 w-full rounded-md border bg-background px-3 py-2 text-sm" value={rfiText} onChange={(event) => setRfiText(event.target.value)} />
                   {rfiText && (
                     <a
                       className="mt-2 inline-flex h-8 items-center rounded-md border px-3 text-sm"
-                      download="rfi-draft.txt"
+                      download="rfi-enquiry.txt"
                       href={`data:text/plain;charset=utf-8,${encodeURIComponent(rfiText)}`}
                     >
                       Download RFI text
@@ -1466,12 +2003,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               <div className="space-y-1">
                 <CardTitle>Material planning</CardTitle>
                 <div className="text-sm text-muted-foreground">
-                  Generate a reviewable stock plan from the selected draft. Sheet settings are editable in Planning inputs.
+                  Generate a reviewable stock plan from the selected enquiry. Sheet settings are editable in Planning inputs.
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
                 {materialPlan && (
-                  <Button variant="secondary" onClick={() => setMaterialPlan(null)}>
+                  <Button variant="secondary" onClick={() => saveMaterialPlan()}>
+                    <Save className="h-4 w-4" />
+                    Save plan
+                  </Button>
+                )}
+                {materialPlan && (
+                  <Button variant="secondary" onClick={clearMaterialPlan}>
                     <X className="h-4 w-4" />
                     Clear
                   </Button>
@@ -1529,7 +2072,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               <>
                 <div className="space-y-1 text-center">
                   <div className="text-base font-semibold uppercase tracking-tight">
-                    {quote?.customer || quote?.quote_no || "Untitled draft"} - REG : {quote?.quote_no || quote?.id || "N/A"} / {quote?.project_ref || "N/A"} / {quote?.custom_label || "GASKETS"}
+                    {quote?.customer || quote?.quote_no || "Untitled enquiry"} - REG : {quote?.quote_no || quote?.id || "N/A"} / {quote?.project_ref || "N/A"} / {quote?.custom_label || "GASKETS"}
                   </div>
                   <div className="text-sm text-muted-foreground">
                     Sheet rows use {materialPlan.config.sheet_width_mm} x {materialPlan.config.sheet_length_mm} mm stock with {Math.round(materialPlan.config.nesting_efficiency * 100)}% nesting efficiency.
@@ -1629,22 +2172,26 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="space-y-1">
                 <CardTitle>Quotation preparation</CardTitle>
-                <div className="text-sm text-muted-foreground">{quote.customer || quote.quote_no || "Untitled draft"}</div>
+                <div className="text-sm text-muted-foreground">{quote.customer || quote.quote_no || "Untitled enquiry"}</div>
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button variant="secondary" onClick={closeQuotationScreen}>
                   <RotateCcw className="h-4 w-4" />
-                  Back to draft
+                  Back to enquiry
                 </Button>
                 <Button variant="secondary" onClick={() => savePatch({ items, quote_data: qd, quote_no: getString(qd.quote_no) } as Partial<Quote>, "Quotation saved")}>
                   <Save className="h-4 w-4" />
                   Save
                 </Button>
-                <Button variant="secondary" onClick={() => exportCurrent("pdf", "preview")}>
+                <Button variant="secondary" onClick={() => exportCurrent("pdf", "preview")} disabled={!canExportFinal}>
                   {exporting === "pdf" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
                   Preview PDF
                 </Button>
-                <Button onClick={() => exportCurrent("pdf")}>
+                <Button variant="secondary" onClick={markSent} disabled={approval.status !== "approved" || quote.stage === "sent"}>
+                  <Send className="h-4 w-4" />
+                  Mark sent
+                </Button>
+                <Button onClick={() => exportCurrent("pdf")} disabled={!canExportFinal}>
                   {exporting === "pdf" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                   Download PDF
                 </Button>
@@ -1652,6 +2199,65 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
             </div>
           </CardHeader>
           <CardContent className="space-y-5">
+              <div className="grid gap-3 lg:grid-cols-[1fr_1fr]">
+                <div className="rounded-md border p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2 text-sm font-medium">
+                        <ShieldCheck className="h-4 w-4" />
+                        Approval workflow
+                      </div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        Current user: {currentUser.name} ({roleLabels[currentUser.role]})
+                      </div>
+                    </div>
+                    <Badge variant={approvalBadgeVariant(approval.status)}>{approval.status}</Badge>
+                  </div>
+                  <div className="mt-3 grid gap-2 text-xs text-muted-foreground md:grid-cols-3">
+                    <div>RFQ score: <span className="font-medium text-foreground">{qualityReport.score}%</span></div>
+                    <div>Risks: <span className="font-medium text-foreground">{qualityReport.risks.length}</span></div>
+                    <div>Quote value: <span className="font-medium text-foreground">{grandTotal.toFixed(2)} {currency}</span></div>
+                  </div>
+                  {approval.requested_by && (
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      Requested by {approval.requested_by}{approval.requested_at ? ` on ${new Date(approval.requested_at).toLocaleString()}` : ""}
+                    </div>
+                  )}
+                  {approval.decided_by && (
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {approval.status === "approved" ? "Approved" : "Rejected"} by {approval.decided_by}{approval.decided_at ? ` on ${new Date(approval.decided_at).toLocaleString()}` : ""}
+                    </div>
+                  )}
+                  {approval.comments && <div className="mt-2 rounded-md bg-muted/40 p-2 text-xs">{approval.comments}</div>}
+                </div>
+
+                <div className="rounded-md border p-3">
+                  <Label>Approval comments</Label>
+                  <textarea
+                    className="mt-1 min-h-20 w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+                    value={approvalComment}
+                    onChange={(event) => setApprovalComment(event.target.value)}
+                    placeholder="Reason, exception approval, price override, or rejection comments"
+                  />
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button variant="secondary" onClick={requestApproval} disabled={approval.status === "pending" || approval.status === "approved"}>
+                      <ShieldCheck className="h-4 w-4" />
+                      Request approval
+                    </Button>
+                    <Button onClick={() => decideApproval("approved")} disabled={!canApprove || approval.status !== "pending"}>
+                      <CheckCircle2 className="h-4 w-4" />
+                      Approve
+                    </Button>
+                    <Button variant="secondary" onClick={() => decideApproval("rejected")} disabled={!canApprove || approval.status !== "pending"}>
+                      <Ban className="h-4 w-4" />
+                      Reject
+                    </Button>
+                  </div>
+                  {!canApprove && <div className="mt-2 text-xs text-muted-foreground">Only admin or approver users can approve or reject.</div>}
+                  {!canExportFinal && <div className="mt-1 text-xs text-muted-foreground">Final PDF download is locked until approval is completed.</div>}
+                </div>
+              </div>
+
               <div className="grid gap-3 md:grid-cols-4">
                 <Field label="Quote no" value={getString(qd.quote_no)} onChange={(value) => updateQd("quote_no", value)} />
                 <Field label="Quote date" value={getString(qd.quote_date)} onChange={(value) => updateQd("quote_date", value)} />

@@ -16,7 +16,7 @@ type NavItem = {
 
 const navItems: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/quotes", label: "Drafts", icon: FileText },
+  { href: "/quotes", label: "Enquiry", icon: FileText },
   { href: "/material-planning", label: "Material Planning", icon: Layers3 },
   { href: "/quotes/final", label: "Final Quotation", icon: FileCheck2 },
   { href: "/tools/converter", label: "Converter", icon: Calculator },

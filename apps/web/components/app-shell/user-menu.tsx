@@ -2,6 +2,7 @@
 
 import { LogOut, Settings, UserCircle } from "lucide-react";
 import { useRouter } from "next/navigation";
+import * as React from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -15,9 +16,21 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { clearLocalSession } from "@/lib/auth/local-session";
 import { getSupabaseBrowserClient } from "@/lib/auth/supabase";
+import { getCurrentAppUser, roleLabels, USERS_CHANGED_EVENT } from "@/lib/auth/users";
 
 export function UserMenu() {
   const router = useRouter();
+  const [user, setUser] = React.useState(() => getCurrentAppUser());
+
+  React.useEffect(() => {
+    const refresh = () => setUser(getCurrentAppUser());
+    window.addEventListener(USERS_CHANGED_EVENT, refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener(USERS_CHANGED_EVENT, refresh);
+      window.removeEventListener("storage", refresh);
+    };
+  }, []);
 
   async function signOut() {
     const supabase = getSupabaseBrowserClient();
@@ -38,7 +51,10 @@ export function UserMenu() {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuLabel>GGPL user</DropdownMenuLabel>
+        <DropdownMenuLabel>
+          <div>{user.name || "GGPL user"}</div>
+          <div className="text-xs font-normal text-muted-foreground">{roleLabels[user.role]}</div>
+        </DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => router.push("/settings")}>
           <Settings className="mr-2 h-4 w-4" />

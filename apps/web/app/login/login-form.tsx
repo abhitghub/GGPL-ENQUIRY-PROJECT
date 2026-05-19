@@ -12,6 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { setLocalSession } from "@/lib/auth/local-session";
 import { getSupabaseBrowserClient, hasSupabaseConfig } from "@/lib/auth/supabase";
+import { ensureLoginUser } from "@/lib/auth/users";
 
 type AuthMode = "signin" | "signup";
 
@@ -31,6 +32,7 @@ export function LoginForm() {
   }
 
   async function completeLocalAuth() {
+    ensureLoginUser(email);
     setLocalSession();
     toast.success(mode === "signin" ? "Signed in" : "Account ready");
     router.push(redirectTo);
@@ -60,6 +62,7 @@ export function LoginForm() {
         throw error;
       }
       if (data.session) {
+        ensureLoginUser(data.session.user.email ?? email);
         setLocalSession();
       }
       toast.success(mode === "signin" ? "Signed in" : "Check your email to confirm the account");

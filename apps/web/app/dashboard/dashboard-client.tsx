@@ -11,7 +11,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
-const stages = ["initial", "review", "quote_prep", "repricing", "sent", "po"] as const;
 const finalStages = new Set(["quote_prep", "repricing", "sent", "po"]);
 
 function pct(value: number) {
@@ -60,7 +59,7 @@ export function DashboardClient() {
         <MetricCard label="Win rate" value={pct(metrics?.win_rate ?? 0)} hint={`Conversion ${pct(metrics?.conversion_rate ?? 0)}`} />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
+      <div>
         {active.length ? (
           <Card>
             <CardHeader>
@@ -86,20 +85,6 @@ export function DashboardClient() {
             action={{ label: "Open quotes", href: "/quotes" }}
           />
         )}
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Pipeline</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {stages.map((stage) => (
-              <div key={stage} className="flex items-center justify-between rounded-md border px-3 py-2">
-                <span className="text-sm font-medium">{stage.replace("_", " ")}</span>
-                <span className="text-sm text-muted-foreground">{metrics?.stage_counts?.[stage] ?? 0}</span>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -123,7 +108,7 @@ export function DashboardClient() {
         <div className="grid gap-4">
           <EmptyState
             icon={FileText}
-            title="Quote drafts"
+            title="Quote enquiries"
             body={`${quotes.filter((quote) => quote.stage === "quote_prep").length} quotation(s) are in quote preparation.`}
           />
           <EmptyState

@@ -6,7 +6,7 @@ from core.formatter import format_description
 from core.rules import apply_rules
 
 from app.db import repo
-from app.deps import CurrentUser, get_current_user
+from app.deps import CurrentUser, can_approve, get_current_user
 from app.schemas.common import APIMessage, SignedUrlResponse, StageHistoryEntry
 from app.schemas.quotes import (
     BulkItemsRequest,
@@ -29,6 +29,16 @@ def _quote_or_404(org_id: str, quote_id: str) -> QuoteRead:
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
     return quote
+
+
+def _is_quote_approved(quote: QuoteRead) -> bool:
+    approval = (quote.stage_meta or {}).get("approval") or {}
+    return isinstance(approval, dict) and approval.get("status") == "approved"
+
+
+def _require_export_allowed(quote: QuoteRead, user: CurrentUser) -> None:
+    if not (can_approve(user) or _is_quote_approved(quote)):
+        raise HTTPException(status_code=403, detail="Quotation must be approved before export")
 
 
 @router.get("/quotes", response_model=list[QuoteRead])
@@ -166,6 +176,7 @@ def export_pdf(
     user: CurrentUser = Depends(get_current_user),
 ) -> SignedUrlResponse:
     quote = _quote_or_404(user.org_id, quote_id)
+    _require_export_allowed(quote, user)
     content = build_pdf(quote.items, quote.quote_data)
     filename = f"{(quote.quote_no or 'quotation').replace('/', '-')}.pdf"
     token = repo.save_export(user.org_id, content, filename, "application/pdf", quote_id=quote_id, export_type="pdf")
@@ -183,6 +194,7 @@ def export_xlsx(
     user: CurrentUser = Depends(get_current_user),
 ) -> SignedUrlResponse:
     quote = _quote_or_404(user.org_id, quote_id)
+    _require_export_allowed(quote, user)
     content = build_xlsx(quote.items, quote.quote_data)
     filename = f"{(quote.quote_no or 'quotation').replace('/', '-')}.xlsx"
     token = repo.save_export(
@@ -220,6 +232,9 @@ def advance_stage(
     payload: StageAdvanceRequest,
     user: CurrentUser = Depends(get_current_user),
 ) -> QuoteRead:
+    current = _quote_or_404(user.org_id, quote_id)
+    if payload.stage == "sent" and not (can_approve(user) or _is_quote_approved(current)):
+        raise HTTPException(status_code=403, detail="Quotation must be approved before it can be marked sent")
     quote = repo.advance_stage(
         user.org_id,
         quote_id,

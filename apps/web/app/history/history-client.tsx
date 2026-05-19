@@ -41,7 +41,7 @@ function quoteHref(quote: Quote) {
 }
 
 function stageLabel(stage: QuoteStage) {
-  if (stage === "initial") return "Draft";
+  if (stage === "initial") return "Enquiry";
   if (stage === "quote_prep") return "Quote prep";
   return stage.replace("_", " ");
 }

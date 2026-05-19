@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { FileText, Send, Trash2, Upload, X } from "lucide-react";
+import { Bot, FileText, Loader2, MessageSquare, Send, Trash2, Upload, User, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { askDocAssistant, clearDocAssistantSession, removeDocAssistantDocument, uploadDocAssistantSession } from "@/lib/api";
@@ -11,13 +11,22 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
 const quickQuestions = [
-  "Summarise this document",
-  "List all gasket-related requirements",
-  "What technical exceptions or risks should we clarify?",
-  "Extract customer, project, and enquiry references",
+  "Summarise the document for quotation review",
+  "Extract gasket line items and technical requirements",
+  "List missing details, exceptions, and commercial risks",
+  "Find customer, project, enquiry, and revision references",
 ];
 
 type Message = { role: "user" | "assistant"; content: string };
+
+function formatAnswer(text: string) {
+  return text.split("\n").map((line, index) => (
+    <React.Fragment key={index}>
+      {line}
+      {index < text.split("\n").length - 1 && <br />}
+    </React.Fragment>
+  ));
+}
 
 export function DocAssistantClient() {
   const [sessionId, setSessionId] = React.useState("");
@@ -25,6 +34,12 @@ export function DocAssistantClient() {
   const [chat, setChat] = React.useState<Message[]>([]);
   const [question, setQuestion] = React.useState("");
   const [loading, setLoading] = React.useState(false);
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+  const chatEndRef = React.useRef<HTMLDivElement | null>(null);
+
+  React.useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ block: "end" });
+  }, [chat, loading]);
 
   async function upload(files: FileList | null) {
     if (!files?.length) return;
@@ -35,23 +50,27 @@ export function DocAssistantClient() {
       setSessionId(session.id);
       setDocuments(session.document_names);
       setChat([]);
+      setQuestion("");
       toast.success(`${session.document_names.length} document(s) loaded`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Upload failed");
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
 
   async function ask(text: string) {
+    const trimmed = text.trim();
     if (!sessionId) {
       toast.error("Upload at least one document first");
       return;
     }
-    if (!text.trim()) return;
+    if (!trimmed || loading) return;
     setLoading(true);
-    setChat((prev) => [...prev, { role: "user", content: text }]);
+    setChat((prev) => [...prev, { role: "user", content: trimmed }]);
     setQuestion("");
     try {
-      const response = await askDocAssistant(sessionId, text);
+      const response = await askDocAssistant(sessionId, trimmed);
       setChat((prev) => [...prev, { role: "assistant", content: response.answer }]);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Assistant failed");
@@ -85,72 +104,143 @@ export function DocAssistantClient() {
     setSessionId("");
     setDocuments([]);
     setChat([]);
+    setQuestion("");
   }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
-      <Card>
-        <CardHeader>
-          <CardTitle>Documents</CardTitle>
+    <div className="grid min-h-[calc(100vh-8rem)] gap-4 xl:grid-cols-[340px_minmax(0,1fr)_300px]">
+      <Card className="overflow-hidden">
+        <CardHeader className="border-b">
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle>Documents</CardTitle>
+            <Badge variant={sessionId ? "secondary" : "muted"}>{documents.length} loaded</Badge>
+          </div>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <Input type="file" multiple accept=".pdf,.docx,.xlsx,.xls,.xlsm,.csv,.txt" onChange={(event) => upload(event.target.files)} />
+        <CardContent className="space-y-4 p-4">
+          <div className="rounded-md border border-dashed bg-muted/20 p-4">
+            <Input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".pdf,.docx,.xlsx,.xls,.xlsm,.csv,.txt"
+              onChange={(event) => upload(event.target.files)}
+            />
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button variant="secondary" size="sm" onClick={() => fileInputRef.current?.click()}>
+                <Upload className="h-4 w-4" />
+                Upload
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => setChat([])} disabled={!chat.length}>
+                <Trash2 className="h-4 w-4" />
+                Clear chat
+              </Button>
+            </div>
+          </div>
+
           <div className="space-y-2">
             {documents.map((name) => (
-              <div key={name} className="flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm">
+              <div key={name} className="flex items-center justify-between gap-2 rounded-md border bg-background px-3 py-2 text-sm">
                 <div className="flex min-w-0 items-center gap-2">
-                  <FileText className="h-4 w-4 text-muted-foreground" />
+                  <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
                   <span className="truncate">{name}</span>
                 </div>
-                  <Button variant="ghost" size="icon" onClick={() => removeDocument(name)} aria-label={`Remove ${name}`}>
+                <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={() => removeDocument(name)} aria-label={`Remove ${name}`}>
                   <X className="h-4 w-4" />
                 </Button>
               </div>
             ))}
-            {!documents.length && <div className="rounded-md border p-3 text-sm text-muted-foreground">No document loaded.</div>}
+            {!documents.length && (
+              <div className="rounded-md border bg-background p-3 text-sm text-muted-foreground">No document loaded.</div>
+            )}
           </div>
-          <div className="grid gap-2">
-            {quickQuestions.map((item) => (
-              <Button key={item} variant="secondary" className="justify-start" onClick={() => ask(item)}>
-                {item}
+
+          <Button variant="destructive" onClick={resetAll} disabled={!sessionId && !documents.length && !chat.length} className="w-full">
+            Reset workspace
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card className="flex min-h-0 flex-col overflow-hidden">
+        <CardHeader className="border-b">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <CardTitle>Document Q&A</CardTitle>
+              <div className="text-sm text-muted-foreground">Answers use the loaded document text and cite filenames where possible.</div>
+            </div>
+            <Badge variant="outline">GPT-5.2 default</Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="flex min-h-0 flex-1 flex-col gap-4 p-4">
+          <div className="min-h-0 flex-1 overflow-auto rounded-md border bg-background p-4">
+            <div className="space-y-4">
+              {chat.map((message, index) => (
+                <div key={index} className={`flex gap-3 ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+                  {message.role === "assistant" && (
+                    <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border bg-muted">
+                      <Bot className="h-4 w-4" />
+                    </div>
+                  )}
+                  <div className={`max-w-[84%] rounded-md border px-3 py-2 text-sm leading-6 ${message.role === "user" ? "bg-primary text-primary-foreground" : "bg-muted/50"}`}>
+                    <div className="whitespace-pre-wrap">{formatAnswer(message.content)}</div>
+                  </div>
+                  {message.role === "user" && (
+                    <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border bg-primary text-primary-foreground">
+                      <User className="h-4 w-4" />
+                    </div>
+                  )}
+                </div>
+              ))}
+              {loading && (
+                <div className="flex items-center gap-3 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Reading documents
+                </div>
+              )}
+              {!chat.length && !loading && (
+                <div className="flex h-[360px] items-center justify-center rounded-md border border-dashed bg-muted/20 text-sm text-muted-foreground">
+                  <div className="flex items-center gap-2">
+                    <MessageSquare className="h-4 w-4" />
+                    Upload documents and ask a question.
+                  </div>
+                </div>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+          </div>
+
+          <div className="rounded-md border bg-card p-3">
+            <textarea
+              className="min-h-24 w-full resize-none rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+              value={question}
+              onChange={(event) => setQuestion(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  ask(question);
+                }
+              }}
+              placeholder="Ask about specifications, missing details, risks, or quoted requirements"
+            />
+            <div className="mt-3 flex justify-end">
+              <Button onClick={() => ask(question)} disabled={loading || !question.trim()}>
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                Ask
               </Button>
-            ))}
-          </div>
-          <div className="flex gap-2">
-            <Button variant="secondary" onClick={() => setChat([])} className="flex-1">
-              <Trash2 className="h-4 w-4" />
-              Clear conversation
-            </Button>
-            <Button variant="destructive" onClick={resetAll} className="flex-1">
-              Reset
-            </Button>
+            </div>
           </div>
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader className="flex-row items-center justify-between space-y-0">
-          <CardTitle>Document Q&A</CardTitle>
-          <Badge variant={sessionId ? "secondary" : "muted"}>{sessionId ? "Loaded" : "Waiting"}</Badge>
+      <Card className="overflow-hidden">
+        <CardHeader className="border-b">
+          <CardTitle>Prompts</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="min-h-[420px] rounded-md border bg-background p-4">
-            <div className="space-y-3">
-              {chat.map((message, index) => (
-                <div key={index} className={`rounded-md px-3 py-2 text-sm ${message.role === "user" ? "ml-auto max-w-[80%] bg-primary text-primary-foreground" : "mr-auto max-w-[88%] bg-muted"}`}>
-                  <div className="whitespace-pre-wrap">{message.content}</div>
-                </div>
-              ))}
-              {!chat.length && <div className="flex h-72 items-center justify-center text-sm text-muted-foreground">Upload documents and ask a question.</div>}
-            </div>
-          </div>
-          <div className="grid gap-2 md:grid-cols-[1fr_auto]">
-            <Input value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") ask(question); }} placeholder="Ask about the loaded documents" />
-            <Button onClick={() => ask(question)} disabled={loading}>
-              {loading ? <Upload className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-              Ask
+        <CardContent className="space-y-2 p-4">
+          {quickQuestions.map((item) => (
+            <Button key={item} variant="secondary" className="h-auto w-full justify-start whitespace-normal text-left" onClick={() => ask(item)} disabled={!sessionId || loading}>
+              {item}
             </Button>
-          </div>
+          ))}
         </CardContent>
       </Card>
     </div>

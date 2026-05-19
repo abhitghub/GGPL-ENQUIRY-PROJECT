@@ -69,7 +69,7 @@ def render_material_plan_section(items: list[dict]) -> None:
 
     plan = st.session_state.get("_material_plan")
     if not plan:
-        st.caption("Create a material plan from the current working list when the draft is ready for production review.")
+        st.caption("Create a material plan from the current working list when the enquiry is ready for production review.")
         return
 
     totals = plan.get("totals", {})
@@ -107,7 +107,7 @@ def render_material_plan_section(items: list[dict]) -> None:
 
     rows_df = pd.DataFrame(plan.get("rows") or [])
     if rows_df.empty:
-        st.info("No plannable items found in this draft.")
+        st.info("No plannable items found in this enquiry.")
         return
 
     display_cols = [

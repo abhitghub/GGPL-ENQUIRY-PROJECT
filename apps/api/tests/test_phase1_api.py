@@ -1,5 +1,6 @@
 import io
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -51,6 +52,16 @@ def test_quote_workflow_exports_and_tenant_isolation():
     assert recomputed.status_code == 200
     assert "SIZE : 4\"" in recomputed.json()[0]["ggpl_description"]
 
+    locked_pdf = client.post(f"/api/v1/quotes/{quote_id}/exports/pdf", headers=headers)
+    assert locked_pdf.status_code == 403
+
+    approved = client.patch(
+        f"/api/v1/quotes/{quote_id}",
+        headers=headers,
+        json={"stage_meta": {"approval": {"status": "approved", "decided_by": "approver"}}},
+    )
+    assert approved.status_code == 200
+
     pdf = client.post(f"/api/v1/quotes/{quote_id}/exports/pdf", headers=headers)
     assert pdf.status_code == 200
     assert pdf.json()["content_type"] == "application/pdf"
@@ -97,6 +108,36 @@ def test_converter_endpoint_uses_core_converter():
     )
     assert rating.status_code == 200
     assert rating.json()["display"] == "PN 20"
+
+
+def test_user_roles_are_persisted_and_not_trusted_from_header():
+    client = TestClient(app)
+    org_id = f"org-users-{uuid.uuid4().hex}"
+    user_email = f"estimator-{uuid.uuid4().hex}@example.com"
+    spoofed_admin = {"X-Org-Id": org_id, "X-User-Id": "not-admin", "X-User-Role": "admin"}
+    denied = client.post(
+        "/api/v1/users",
+        headers=spoofed_admin,
+        json={"name": "Bad Admin", "email": "bad@example.com", "role": "admin", "active": True},
+    )
+    assert denied.status_code == 403
+
+    admin_headers = {"X-Org-Id": org_id, "X-User-Id": "shashnam@flosil.com"}
+    created = client.post(
+        "/api/v1/users",
+        headers=admin_headers,
+        json={"name": "Estimator", "email": user_email, "role": "sales", "active": True},
+    )
+    assert created.status_code == 201
+    assert created.json()["role"] == "sales"
+
+    promoted = client.patch(
+        f"/api/v1/users/{user_email}",
+        headers=admin_headers,
+        json={"role": "approver"},
+    )
+    assert promoted.status_code == 200
+    assert promoted.json()["role"] == "approver"
 
 
 def test_doc_assistant_upload_session_extracts_txt():

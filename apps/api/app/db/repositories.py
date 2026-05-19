@@ -14,6 +14,7 @@ from sqlalchemy import (
     JSON,
     Column,
     DateTime,
+    Boolean,
     Integer,
     LargeBinary,
     MetaData,
@@ -36,6 +37,7 @@ from app.config import get_settings
 from app.schemas.common import StageHistoryEntry
 from app.schemas.jobs import JobRead
 from app.schemas.quotes import QuoteCreate, QuotePatch, QuoteRead
+from app.schemas.users import AppUserCreate, AppUserPatch, AppUserRead
 
 
 metadata = MetaData()
@@ -112,6 +114,30 @@ doc_sessions_table = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
+app_users_table = Table(
+    "app_users",
+    metadata,
+    Column("org_id", uuid_type, primary_key=True),
+    Column("user_id", Text, primary_key=True),
+    Column("name", Text, nullable=False, default=""),
+    Column("email", Text, nullable=False, default=""),
+    Column("role", Text, nullable=False, default="sales"),
+    Column("active", Boolean, nullable=False, default=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+
+DEFAULT_APP_USERS = [
+    {
+        "id": "shashnam@flosil.com",
+        "name": "Shashnam",
+        "email": "shashnam@flosil.com",
+        "role": "admin",
+        "active": True,
+    },
+]
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -182,6 +208,7 @@ class LocalJsonRepository:
             "jobs": {},
             "exports": {},
             "doc_sessions": {},
+            "app_users": {},
         }
         self._load()
 
@@ -191,7 +218,7 @@ class LocalJsonRepository:
         try:
             self._state.update(json.loads(self._path.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError):
-            self._state = {"quotes": {}, "jobs": {}, "exports": {}, "doc_sessions": {}}
+            self._state = {"quotes": {}, "jobs": {}, "exports": {}, "doc_sessions": {}, "app_users": {}}
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -210,6 +237,20 @@ class LocalJsonRepository:
         row["created_at"] = _parse_dt(row["created_at"])
         row["updated_at"] = _parse_dt(row["updated_at"])
         return JobRead(**row)
+
+    def _app_user_from_data(self, data: dict[str, Any]) -> AppUserRead:
+        row = dict(data)
+        row["created_at"] = _parse_dt(row["created_at"])
+        row["updated_at"] = _parse_dt(row["updated_at"])
+        return AppUserRead(**row)
+
+    def _ensure_app_users(self, org_id: str) -> None:
+        now = _now().isoformat()
+        users = self._state.setdefault("app_users", {})
+        for seed in DEFAULT_APP_USERS:
+            key = f"{org_id}:{seed['id']}"
+            if key not in users:
+                users[key] = {"org_id": org_id, "created_at": now, "updated_at": now, **seed}
 
     def create_quote(self, org_id: str, user_id: str, payload: QuoteCreate) -> QuoteRead:
         now = _now()
@@ -232,6 +273,53 @@ class LocalJsonRepository:
             self._state["quotes"][quote_id] = stored
             self._save()
         return deepcopy(quote)
+
+    def list_app_users(self, org_id: str) -> list[AppUserRead]:
+        with self._lock:
+            self._ensure_app_users(org_id)
+            rows = [
+                self._app_user_from_data(deepcopy(user))
+                for user in self._state["app_users"].values()
+                if user.get("org_id") == org_id
+            ]
+            self._save()
+        return sorted(rows, key=lambda user: user.email)
+
+    def create_app_user(self, org_id: str, payload: AppUserCreate) -> AppUserRead:
+        now = _now().isoformat()
+        user_id = (payload.user_id or payload.email).strip().lower()
+        data = {"id": user_id, "org_id": org_id, "created_at": now, "updated_at": now, **payload.model_dump(exclude={"user_id"})}
+        data["email"] = str(data["email"]).lower()
+        with self._lock:
+            self._ensure_app_users(org_id)
+            self._state["app_users"][f"{org_id}:{user_id}"] = data
+            self._save()
+        return self._app_user_from_data(deepcopy(data))
+
+    def update_app_user(self, org_id: str, user_id: str, payload: AppUserPatch) -> AppUserRead | None:
+        with self._lock:
+            self._ensure_app_users(org_id)
+            key = f"{org_id}:{user_id}"
+            user = self._state["app_users"].get(key)
+            if not user:
+                return None
+            changes = payload.model_dump(exclude_unset=True)
+            if "email" in changes and changes["email"] is not None:
+                changes["email"] = str(changes["email"]).lower()
+            user.update(changes)
+            user["updated_at"] = _now().isoformat()
+            self._save()
+            return self._app_user_from_data(deepcopy(user))
+
+    def delete_app_user(self, org_id: str, user_id: str) -> bool:
+        with self._lock:
+            self._ensure_app_users(org_id)
+            key = f"{org_id}:{user_id}"
+            if key not in self._state["app_users"]:
+                return False
+            del self._state["app_users"][key]
+            self._save()
+            return True
 
     def list_quotes(self, org_id: str) -> list[QuoteRead]:
         with self._lock:
@@ -449,6 +537,7 @@ class PostgresRepository:
                 conn.execute(text("alter table quotes add column if not exists version int not null default 1"))
                 conn.execute(text("create index if not exists quotes_org_created_idx on quotes (org_id, created_at desc)"))
                 conn.execute(text("create index if not exists generated_exports_org_created_idx on generated_exports (org_id, created_at desc)"))
+                conn.execute(text("create index if not exists app_users_org_email_idx on app_users (org_id, email)"))
 
     def _quote_from_row(self, row: Any) -> QuoteRead:
         data = dict(row._mapping if hasattr(row, "_mapping") else row)
@@ -492,6 +581,44 @@ class PostgresRepository:
             updated_at=data["updated_at"],
         )
 
+    def _app_user_from_row(self, row: Any) -> AppUserRead:
+        data = dict(row._mapping if hasattr(row, "_mapping") else row)
+        return AppUserRead(
+            id=data["user_id"],
+            org_id=str(data["org_id"]),
+            name=data["name"] or "",
+            email=data["email"] or "",
+            role=data["role"] or "sales",
+            active=bool(data["active"]),
+            created_at=data["created_at"],
+            updated_at=data["updated_at"],
+        )
+
+    def _ensure_app_users(self, org_id: str) -> None:
+        org_uuid = _tenant_uuid(org_id)
+        now = _now()
+        with self._engine.begin() as conn:
+            for seed in DEFAULT_APP_USERS:
+                row = conn.execute(
+                    select(app_users_table.c.user_id).where(
+                        app_users_table.c.org_id == org_uuid,
+                        app_users_table.c.user_id == seed["id"],
+                    )
+                ).first()
+                if not row:
+                    conn.execute(
+                        insert(app_users_table).values(
+                            org_id=org_uuid,
+                            user_id=seed["id"],
+                            name=seed["name"],
+                            email=seed["email"],
+                            role=seed["role"],
+                            active=seed["active"],
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+
     def create_quote(self, org_id: str, user_id: str, payload: QuoteCreate) -> QuoteRead:
         now = _now()
         quote_id = uuid.uuid4()
@@ -514,6 +641,70 @@ class PostgresRepository:
         with self._engine.begin() as conn:
             row = conn.execute(insert(quotes_table).values(**values).returning(quotes_table)).first()
         return self._quote_from_row(row)
+
+    def list_app_users(self, org_id: str) -> list[AppUserRead]:
+        self._ensure_app_users(org_id)
+        stmt = (
+            select(app_users_table)
+            .where(app_users_table.c.org_id == _tenant_uuid(org_id))
+            .order_by(app_users_table.c.email.asc())
+        )
+        with self._engine.begin() as conn:
+            return [self._app_user_from_row(row) for row in conn.execute(stmt)]
+
+    def create_app_user(self, org_id: str, payload: AppUserCreate) -> AppUserRead:
+        self._ensure_app_users(org_id)
+        now = _now()
+        user_id = (payload.user_id or str(payload.email)).strip().lower()
+        stmt = (
+            insert(app_users_table)
+            .values(
+                org_id=_tenant_uuid(org_id),
+                user_id=user_id,
+                name=payload.name,
+                email=str(payload.email).lower(),
+                role=payload.role,
+                active=payload.active,
+                created_at=now,
+                updated_at=now,
+            )
+            .returning(app_users_table)
+        )
+        with self._engine.begin() as conn:
+            row = conn.execute(stmt).first()
+        return self._app_user_from_row(row)
+
+    def update_app_user(self, org_id: str, user_id: str, payload: AppUserPatch) -> AppUserRead | None:
+        self._ensure_app_users(org_id)
+        changes = payload.model_dump(exclude_unset=True)
+        if "email" in changes and changes["email"] is not None:
+            changes["email"] = str(changes["email"]).lower()
+        if not changes:
+            stmt = select(app_users_table).where(
+                app_users_table.c.org_id == _tenant_uuid(org_id),
+                app_users_table.c.user_id == user_id,
+            )
+        else:
+            changes["updated_at"] = _now()
+            stmt = (
+                update(app_users_table)
+                .where(app_users_table.c.org_id == _tenant_uuid(org_id), app_users_table.c.user_id == user_id)
+                .values(**changes)
+                .returning(app_users_table)
+            )
+        with self._engine.begin() as conn:
+            row = conn.execute(stmt).first()
+        return self._app_user_from_row(row) if row else None
+
+    def delete_app_user(self, org_id: str, user_id: str) -> bool:
+        self._ensure_app_users(org_id)
+        stmt = delete(app_users_table).where(
+            app_users_table.c.org_id == _tenant_uuid(org_id),
+            app_users_table.c.user_id == user_id,
+        )
+        with self._engine.begin() as conn:
+            result = conn.execute(stmt)
+        return result.rowcount > 0
 
     def list_quotes(self, org_id: str) -> list[QuoteRead]:
         org_uuid = _tenant_uuid(org_id)
