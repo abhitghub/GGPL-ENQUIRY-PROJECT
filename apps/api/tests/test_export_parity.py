@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import io
 import sys
 from pathlib import Path
+
+import openpyxl
 
 from core.quote_exporter import build_quotation_excel
 from core.quote_pdf import build_quotation_pdf
@@ -9,7 +12,7 @@ from core.quote_pdf import build_quotation_pdf
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.modules.pop("app", None)
 
-from app.services.export_parity import compare_excel, compare_pdf_text
+from app.services.export_parity import compare_excel, compare_pdf_text, extract_pdf_text
 from app.services.export_service import _logo_path, build_pdf, build_xlsx
 
 
@@ -17,6 +20,8 @@ def _sample_items() -> list[dict]:
     return [
         {
             "line_no": 1,
+            "customer_sl_no": "C-10",
+            "customer_item_code": "ITEM-777",
             "quantity": 2,
             "uom": "NOS",
             "raw_description": '4" 150# CNAF RF gasket 3mm ASME B16.21',
@@ -28,6 +33,8 @@ def _sample_items() -> list[dict]:
         },
         {
             "line_no": 2,
+            "customer_sl_no": "C-11",
+            "customer_item_code": "ITEM-888",
             "quantity": 1,
             "uom": "NOS",
             "raw_description": '8" 300# RTJ R45 SS316',
@@ -86,6 +93,10 @@ def test_excel_export_service_matches_current_python_exporter():
     wrapped = build_xlsx(items, quote_data)
     diffs = compare_excel(direct, wrapped)
     assert diffs == []
+    workbook = openpyxl.load_workbook(io.BytesIO(direct), data_only=True)
+    values = [cell for row in workbook.active.iter_rows(values_only=True) for cell in row]
+    assert "C-10" in values
+    assert "ITEM-777" in values
 
 
 def test_pdf_export_service_text_matches_current_python_exporter():
@@ -95,3 +106,6 @@ def test_pdf_export_service_text_matches_current_python_exporter():
     wrapped = build_pdf(items, quote_data)
     matched, expected, actual = compare_pdf_text(direct, wrapped)
     assert matched, f"Expected PDF text:\n{expected}\n\nActual PDF text:\n{actual}"
+    text = extract_pdf_text(direct)
+    assert "C-10" in text
+    assert "ITEM-777" in text

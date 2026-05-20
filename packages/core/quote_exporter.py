@@ -305,8 +305,8 @@ def build_quotation_excel(
         ws.set_row(row, max(20, min(60, 15 + len(ggpl_desc) // 8)))
 
         ws.write(row, 0, idx + 1,              rfmt_num)
-        ws.write(row, 1, idx + 1,              rfmt_num)   # cust sl no (same)
-        ws.write(row, 2, '',                   rfmt_num)   # customer item code (blank)
+        ws.write(row, 1, item.get('customer_sl_no') or '', rfmt_num)
+        ws.write(row, 2, item.get('customer_item_code') or '', rfmt_num)
         ws.write(row, 3, ggpl_desc,            rfmt_desc)
         ws.write(row, 4, qty,                  rfmt_num)
         ws.write(row, 5, uom,                  rfmt_num)

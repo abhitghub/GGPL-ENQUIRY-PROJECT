@@ -8,6 +8,12 @@ export type JobStatus = "queued" | "running" | "succeeded" | "failed";
 
 export type GasketItem = Record<string, unknown> & {
   line_no?: number | null;
+  customer_sl_no?: string | number | null;
+  customer_item_code?: string | null;
+  clarification_note?: string | null;
+  drawing_required?: boolean | null;
+  is_non_gasket?: boolean | null;
+  duplicate_group_id?: string | null;
   quantity?: number | null;
   uom?: string;
   raw_description?: string;
@@ -59,6 +65,27 @@ export type Quote = {
   n_regret: number;
 };
 
+export type VendorEnquiryStatus = "draft" | "sent" | "replied" | "selected" | "rejected";
+
+export type VendorEnquiry = {
+  id: string;
+  quote_id: string;
+  quote_no: string;
+  customer: string;
+  vendor_name: string;
+  contact: string;
+  material_group: string;
+  quantity: number;
+  required_date: string;
+  status: VendorEnquiryStatus;
+  quoted_price: number;
+  lead_time_days: number;
+  remarks: string;
+  source: "quote_items" | "material_plan";
+  created_at: string;
+  updated_at: string;
+};
+
 export type JobRead = {
   id: string;
   org_id: string;
@@ -105,6 +132,15 @@ export type DashboardMetrics = {
   total_quote_value: number;
   stage_counts: Record<string, number>;
   gasket_type_distribution: Record<string, number>;
+  new_enquiries_today?: number;
+  clarification_required?: number;
+  delayed_enquiries?: number;
+  pending_approval?: number;
+  high_value_enquiries?: number;
+  owner_workload?: Array<{ owner_id: string; owner_name: string; open_count: number; delayed_count: number; value: number }>;
+  due_today?: number;
+  open_quote_value?: number;
+  generated_at?: string;
 };
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
@@ -114,6 +150,12 @@ const USER_ID = process.env.NEXT_PUBLIC_USER_ID ?? "local-user";
 
 export const ITEM_FIELDS = [
   "line_no",
+  "customer_sl_no",
+  "customer_item_code",
+  "clarification_note",
+  "drawing_required",
+  "is_non_gasket",
+  "duplicate_group_id",
   "quantity",
   "uom",
   "raw_description",

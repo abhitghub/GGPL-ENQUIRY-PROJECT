@@ -333,8 +333,8 @@ def _make_items_table(items_slice: list[dict], prices_slice: list[float], start_
         total = qty * unit
         rows.append([
             str(start_serial + i),         # Sl. No. — continuous across pages
-            "",                            # Cust SL.NO (blank)
-            "",                            # Item Code  (blank)
+            str(item.get("customer_sl_no") or ""),       # Cust SL.NO
+            str(item.get("customer_item_code") or ""),   # Customer item code
             _description_cell(item),       # GGPL desc + customer ref
             _fmt_qty(qty),                 # Quantity
             item.get("uom") or "NOS",      # UOM

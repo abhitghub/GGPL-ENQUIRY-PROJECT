@@ -1,15 +1,18 @@
 "use client";
 
 import * as React from "react";
-import { ClipboardList, FileText, History, RefreshCw } from "lucide-react";
+import { AlertTriangle, CalendarClock, ClipboardList, FileText, History, RefreshCw, Users } from "lucide-react";
 import { toast } from "sonner";
 
 import { DashboardMetrics, Quote, getDashboardMetrics, listQuotes } from "@/lib/api";
+import { formatCurrencyValue, quoteAgeDays, quoteDueState, quoteEstimatedValue, quoteNextAction } from "@/components/quotes/queue-utils";
+import { stageLabel } from "@/components/quotes/stage-utils";
 import { EmptyState } from "@/components/app-shell/empty-state";
 import { MetricCard } from "@/components/app-shell/metric-card";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 const finalStages = new Set(["quote_prep", "repricing", "sent", "po"]);
 
@@ -19,6 +22,13 @@ function pct(value: number) {
 
 function quoteHref(quote: Quote) {
   return finalStages.has(quote.stage) ? `/quotes/final?quote=${quote.id}` : `/quotes?quote=${quote.id}`;
+}
+
+function dueLabel(quote: Quote) {
+  const state = quoteDueState(quote);
+  if (state === "delayed") return "Delayed";
+  if (state === "today") return "Today";
+  return String(quote.stage_meta?.due_date || "-");
 }
 
 export function DashboardClient() {
@@ -39,42 +49,82 @@ export function DashboardClient() {
     refresh();
   }, []);
 
-  const active = quotes.filter((quote) => !["sent", "po"].includes(quote.stage)).slice(0, 6);
+  const openQuotes = quotes.filter((quote) => !["sent", "po"].includes(quote.stage));
+  const urgent = [...openQuotes]
+    .sort((left, right) => {
+      const dueRank = { delayed: 0, today: 1, future: 2, none: 3 };
+      const leftRank = dueRank[quoteDueState(left)];
+      const rightRank = dueRank[quoteDueState(right)];
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return quoteEstimatedValue(right) - quoteEstimatedValue(left);
+    })
+    .slice(0, 8);
+  const stageMax = Math.max(1, ...Object.values(metrics?.stage_counts ?? {}));
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-end">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-normal">Operations dashboard</h1>
+          <div className="text-sm text-muted-foreground">
+            {metrics?.generated_at ? `Updated ${new Date(metrics.generated_at).toLocaleString("en-GB")}` : "Quote control room"}
+          </div>
+        </div>
         <Button variant="secondary" onClick={refresh}>
           <RefreshCw className="h-4 w-4" />
           Refresh
         </Button>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
-        <MetricCard label="Total quotes" value={String(metrics?.total_quotes ?? 0)} hint="Saved workspaces" />
-        <MetricCard label="Items processed" value={String(metrics?.items_processed ?? 0)} hint="Across all quotes" />
-        <MetricCard label="Pending review" value={String(metrics?.pending_review ?? 0)} hint="Initial and review stages" />
-        <MetricCard label="Quotes sent" value={String(metrics?.quotes_sent ?? 0)} hint="Sent or PO" />
-        <MetricCard label="Won quotes" value={String(metrics?.converted_to_po ?? 0)} hint="PO stage" />
-        <MetricCard label="Win rate" value={pct(metrics?.win_rate ?? 0)} hint={`Conversion ${pct(metrics?.conversion_rate ?? 0)}`} />
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+        <MetricCard label="Intake" value={String(metrics?.new_enquiries_today ?? 0)} hint="New enquiries today" />
+        <MetricCard label="Review" value={String(metrics?.pending_review ?? 0)} hint="Pending technical review" />
+        <MetricCard label="Blocked" value={String(metrics?.clarification_required ?? 0)} hint="Clarifications required" />
+        <MetricCard label="Delayed" value={String(metrics?.delayed_enquiries ?? 0)} hint={`${metrics?.due_today ?? 0} due today`} />
+        <MetricCard label="Open value" value={formatCurrencyValue(metrics?.open_quote_value ?? metrics?.total_quote_value ?? 0)} hint={`${metrics?.high_value_enquiries ?? 0} high-value enquiries`} />
       </div>
 
-      <div>
-        {active.length ? (
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
+        {urgent.length ? (
           <Card>
             <CardHeader>
-              <CardTitle>Active quotations</CardTitle>
+              <CardTitle className="flex items-center gap-2">
+                <CalendarClock className="h-5 w-5" />
+                Urgent work
+              </CardTitle>
             </CardHeader>
-            <CardContent className="space-y-2">
-              {active.map((quote) => (
-                <a key={quote.id} href={quoteHref(quote)} className="flex items-center justify-between rounded-md border px-3 py-2 text-sm hover:bg-muted">
-                  <div>
-                    <div className="font-medium">{quote.customer || "Untitled customer"}</div>
-                    <div className="text-xs text-muted-foreground">{quote.project_ref || quote.quote_no || quote.id}</div>
-                  </div>
-                  <Badge variant="outline">{quote.stage}</Badge>
-                </a>
-              ))}
+            <CardContent className="p-0">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Customer / enquiry</TableHead>
+                    <TableHead>Owner</TableHead>
+                    <TableHead>Stage</TableHead>
+                    <TableHead>Age</TableHead>
+                    <TableHead>Due</TableHead>
+                    <TableHead>Value</TableHead>
+                    <TableHead>Next action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {urgent.map((quote) => (
+                    <TableRow key={quote.id}>
+                      <TableCell>
+                        <a href={quoteHref(quote)} className="font-medium hover:underline">{quote.customer || "Untitled customer"}</a>
+                        <div className="text-xs text-muted-foreground">{quote.project_ref || quote.quote_no || quote.id}</div>
+                      </TableCell>
+                      <TableCell>{String(quote.stage_meta?.owner_name || "Unassigned")}</TableCell>
+                      <TableCell><Badge variant="outline">{stageLabel(quote.stage)}</Badge></TableCell>
+                      <TableCell>{quoteAgeDays(quote)}d</TableCell>
+                      <TableCell>
+                        <Badge variant={quoteDueState(quote) === "delayed" ? "warning" : quoteDueState(quote) === "today" ? "secondary" : "outline"}>{dueLabel(quote)}</Badge>
+                      </TableCell>
+                      <TableCell>{formatCurrencyValue(quoteEstimatedValue(quote))}</TableCell>
+                      <TableCell className="text-sm">{quoteNextAction(quote)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
             </CardContent>
           </Card>
         ) : (
@@ -85,9 +135,49 @@ export function DashboardClient() {
             action={{ label: "Open quotes", href: "/quotes" }}
           />
         )}
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Users className="h-5 w-5" />
+              Team workload
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {(metrics?.owner_workload ?? []).map((owner) => (
+              <div key={owner.owner_id} className="rounded-md border p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="font-medium">{owner.owner_name}</div>
+                  <Badge variant={owner.delayed_count ? "warning" : "outline"}>{owner.open_count} open</Badge>
+                </div>
+                <div className="mt-2 text-xs text-muted-foreground">
+                  {owner.delayed_count} delayed / {formatCurrencyValue(owner.value)} open value
+                </div>
+              </div>
+            ))}
+            {!(metrics?.owner_workload ?? []).length && <div className="text-sm text-muted-foreground">No open owner workload yet.</div>}
+          </CardContent>
+        </Card>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>Stage funnel</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {Object.entries(metrics?.stage_counts ?? {}).map(([stage, count]) => (
+              <div key={stage} className="flex items-center gap-3">
+                <div className="w-32 truncate text-sm">{stageLabel(stage)}</div>
+                <div className="h-2 flex-1 overflow-hidden rounded bg-muted">
+                  <div className="h-full bg-primary" style={{ width: `${Math.max(4, (count / stageMax) * 100)}%` }} />
+                </div>
+                <div className="w-10 text-right text-sm text-muted-foreground">{count}</div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
         <Card>
           <CardHeader>
             <CardTitle>Gasket type distribution</CardTitle>
@@ -105,18 +195,24 @@ export function DashboardClient() {
             {!Object.keys(metrics?.gasket_type_distribution ?? {}).length && <div className="text-sm text-muted-foreground">No item data yet.</div>}
           </CardContent>
         </Card>
-        <div className="grid gap-4">
-          <EmptyState
-            icon={FileText}
-            title="Quote enquiries"
-            body={`${quotes.filter((quote) => quote.stage === "quote_prep").length} quotation(s) are in quote preparation.`}
-          />
-          <EmptyState
-            icon={History}
-            title="Average time to sent"
-            body={`${(metrics?.avg_time_to_sent_days ?? 0).toFixed(1)} days across sent quotations.`}
-          />
-        </div>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-3">
+        <EmptyState
+          icon={FileText}
+          title="Quote preparation"
+          body={`${quotes.filter((quote) => quote.stage === "quote_prep").length} quotation(s) are in quote preparation.`}
+        />
+        <EmptyState
+          icon={AlertTriangle}
+          title="Approvals"
+          body={`${metrics?.pending_approval ?? 0} quotation(s) are waiting for approval.`}
+        />
+        <EmptyState
+          icon={History}
+          title="Average time to sent"
+          body={`${(metrics?.avg_time_to_sent_days ?? 0).toFixed(1)} days across sent quotations. Win rate ${pct(metrics?.win_rate ?? 0)}.`}
+        />
       </div>
     </div>
   );

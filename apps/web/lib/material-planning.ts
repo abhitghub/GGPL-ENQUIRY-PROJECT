@@ -87,6 +87,14 @@ export type StockPlanRow = {
   thickness_mm: number | null;
   reqd_qty_sheets: number | null;
   reqd_qty_kg: number | null;
+  available_qty: number;
+  reserved_qty: number;
+  shortage_qty: number;
+  suggested_purchase_qty: number;
+  lead_time_days: number;
+  preferred_vendor: string;
+  estimated_material_cost: number;
+  production_priority: "low" | "normal" | "high" | "urgent";
   notes: string;
   planner_notes: string;
   source_count: number;
@@ -104,6 +112,13 @@ export type MaterialPlan = {
     rows: number;
     sheets_required: number;
     total_weight_kg: number;
+  }>;
+  grouped_summary: Array<{
+    group: string;
+    rows: number;
+    shortage_qty: number;
+    suggested_purchase_qty: number;
+    estimated_material_cost: number;
   }>;
   assumptions: string[];
   warnings: string[];
@@ -479,6 +494,47 @@ function groupSummary(rows: StockPlanRow[]) {
   return Array.from(summaryMap.values()).sort((a, b) => a.type.localeCompare(b.type));
 }
 
+function groupPlanningSummary(rows: StockPlanRow[]) {
+  const summaryMap = new Map<string, { group: string; rows: number; shortage_qty: number; suggested_purchase_qty: number; estimated_material_cost: number }>();
+  for (const row of rows) {
+    const vendor = row.preferred_vendor || "Vendor TBD";
+    const group = `${row.type} / ${row.thickness_mm ?? "-"} mm / ${vendor}`;
+    const current = summaryMap.get(group) ?? {
+      group,
+      rows: 0,
+      shortage_qty: 0,
+      suggested_purchase_qty: 0,
+      estimated_material_cost: 0,
+    };
+    current.rows += 1;
+    current.shortage_qty += row.shortage_qty;
+    current.suggested_purchase_qty += row.suggested_purchase_qty;
+    current.estimated_material_cost += row.estimated_material_cost;
+    summaryMap.set(group, current);
+  }
+  return Array.from(summaryMap.values()).sort((a, b) => b.shortage_qty - a.shortage_qty || a.group.localeCompare(b.group));
+}
+
+function requiredPlanningQty(row: { reqd_qty_sheets: number | null; reqd_qty_kg: number | null }): number {
+  return row.reqd_qty_sheets ?? row.reqd_qty_kg ?? 0;
+}
+
+function enrichStockRow(row: Omit<StockPlanRow, "available_qty" | "reserved_qty" | "shortage_qty" | "suggested_purchase_qty" | "lead_time_days" | "preferred_vendor" | "estimated_material_cost" | "production_priority">): StockPlanRow {
+  const required = requiredPlanningQty(row);
+  const shortage = Math.max(0, required);
+  return {
+    ...row,
+    available_qty: 0,
+    reserved_qty: 0,
+    shortage_qty: shortage,
+    suggested_purchase_qty: shortage,
+    lead_time_days: 0,
+    preferred_vendor: "",
+    estimated_material_cost: 0,
+    production_priority: "normal",
+  };
+}
+
 function toStockRows(componentRows: MaterialPlanRow[], config: MaterialPlan["config"]): StockPlanRow[] {
   const grouped = new Map<string, {
     type: string;
@@ -559,7 +615,7 @@ function toStockRows(componentRows: MaterialPlanRow[], config: MaterialPlan["con
     grouped.set(key, current);
   }
 
-  return Array.from(grouped.values()).map((row, index) => ({
+  return Array.from(grouped.values()).map((row, index) => enrichStockRow({
     reviewed: false,
     sl_no: index + 1,
     type: row.type,
@@ -610,6 +666,7 @@ export function buildMaterialPlan(items: GasketItem[], inputConfig: MaterialPlan
     config,
     rows,
     summary: groupSummary(rows),
+    grouped_summary: groupPlanningSummary(rows),
     assumptions: Array.from(assumptions),
     warnings,
     totals: {

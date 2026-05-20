@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -11,7 +11,6 @@ import {
   ChevronDown,
   ChevronUp,
   Circle,
-  ClipboardList,
   Download,
   FileUp,
   FileSpreadsheet,
@@ -54,6 +53,12 @@ import {
 import { addBackgroundJob } from "@/lib/background-jobs";
 import { canApproveQuotes, getCurrentAppUser, roleLabels, USERS_CHANGED_EVENT } from "@/lib/auth/users";
 import { buildMaterialPlan, MaterialPlan, DEFAULT_NESTING_EFFICIENCY, DEFAULT_SHEET_LENGTH_MM, DEFAULT_SHEET_WIDTH_MM } from "@/lib/material-planning";
+import { getString, notesFor, validateItemField } from "@/components/quotes/item-validation";
+import { buildQuotePricingSummary } from "@/components/quotes/pricing-utils";
+import { evaluateQuoteQuality } from "@/components/quotes/quality-utils";
+import { itemMatchesSmartFilter, quoteDueState, quoteHasClarification, quoteIsHighRisk, quoteIsHighValue } from "@/components/quotes/queue-utils";
+import { QuoteSummaryRow } from "@/components/quotes/quote-summary-row";
+import { DRAFT_STAGES, FINAL_STAGES, MATERIAL_STAGES, QuoteSection, revisionLabel, stageLabel } from "@/components/quotes/stage-utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -76,9 +81,6 @@ const TYPE_OPTIONS = ["SOFT_CUT", "SPIRAL_WOUND", "RTJ", "KAMM", "DJI", "ISK", "
 const FACE_OPTIONS = ["RF", "FF", ""];
 const UOM_OPTIONS = ["NOS", "M"];
 const GROOVE_OPTIONS = ["OCT", "OVAL", ""];
-const DRAFT_STAGES = new Set(["initial", "review"]);
-const MATERIAL_STAGES = new Set(["initial", "review", "quote_prep", "repricing"]);
-const FINAL_STAGES = new Set(["quote_prep", "repricing", "sent", "po"]);
 
 const defaultFx: Record<string, number> = {
   INR: 1,
@@ -113,6 +115,10 @@ const quoteDefaults: Record<string, unknown> = {
   currency: "INR",
   fx_rate: 1,
   unit_prices: [],
+  cost_prices: [],
+  target_margins_pct: [],
+  discount_approval_pct: 10,
+  minimum_margin_pct: 15,
   discount_pct: 0,
   gst_type: "IGST",
   gst_pct: 18,
@@ -143,6 +149,8 @@ type TableColumn = {
 const TABLE_COLUMNS: TableColumn[] = [
   { label: "#", field: "line_no", kind: "readonly", width: "w-16" },
   { label: "Status", field: "status", kind: "readonly", width: "w-20" },
+  { label: "Cust Sl.No", field: "customer_sl_no", width: "w-28" },
+  { label: "Customer Item Code", field: "customer_item_code", width: "w-36" },
   { label: "GGPL Description", field: "ggpl_description", kind: "readonly", width: "min-w-96" },
   { label: "Notes / Flags", field: "flags", kind: "readonly", width: "min-w-80" },
   { label: "Qty", field: "quantity", kind: "number", width: "w-24" },
@@ -189,6 +197,8 @@ const TABLE_COLUMNS: TableColumn[] = [
 const COMPACT_TABLE_COLUMNS: TableColumn[] = [
   { label: "#", field: "line_no", kind: "readonly", width: "w-16" },
   { label: "Status", field: "status", kind: "readonly", width: "w-20" },
+  { label: "Cust Sl.No", field: "customer_sl_no", width: "w-28" },
+  { label: "Customer Item Code", field: "customer_item_code", width: "w-36" },
   { label: "GGPL Description", field: "ggpl_description", kind: "readonly", width: "min-w-96" },
   { label: "Notes / Flags", field: "flags", kind: "readonly", width: "min-w-72" },
   { label: "Qty", field: "quantity", kind: "number", width: "w-24" },
@@ -200,6 +210,24 @@ const COMPACT_TABLE_COLUMNS: TableColumn[] = [
   { label: "Face", field: "face_type", width: "w-24" },
   { label: "Thk", field: "thickness_mm", kind: "number", width: "w-24" },
 ];
+
+const COLUMN_PRESET_FIELDS: Record<string, string[]> = {
+  review: ["line_no", "status", "customer_sl_no", "customer_item_code", "ggpl_description", "flags", "quantity", "gasket_type", "size", "rating", "moc", "confidence"],
+  commercial: ["line_no", "status", "customer_sl_no", "customer_item_code", "ggpl_description", "quantity", "uom", "gasket_type", "size", "rating", "moc"],
+  soft_cut: ["line_no", "status", "ggpl_description", "quantity", "gasket_type", "size", "rating", "moc", "face_type", "thickness_mm", "standard", "confidence"],
+  spiral_wound: ["line_no", "status", "ggpl_description", "quantity", "size", "rating", "sw_winding_material", "sw_filler", "sw_outer_ring", "sw_inner_ring", "standard", "confidence"],
+  rtj: ["line_no", "status", "ggpl_description", "quantity", "ring_no", "rtj_groove_type", "moc", "rtj_hardness_bhn", "standard", "confidence"],
+  kammprofile: ["line_no", "status", "ggpl_description", "quantity", "size", "rating", "kamm_core_material", "kamm_surface_material", "kamm_covering_layer", "kamm_rib", "kamm_core_thk", "confidence"],
+  dji: ["line_no", "status", "ggpl_description", "quantity", "od_mm", "id_mm", "dji_filler", "dji_rib", "dji_face_type", "thickness_mm", "confidence"],
+  isk: ["line_no", "status", "ggpl_description", "quantity", "isk_gasket_material", "isk_core_material", "isk_sleeve_material", "isk_washer_material", "isk_primary_seal", "isk_secondary_seal", "confidence"],
+  full_technical: TABLE_COLUMNS.map((column) => column.field),
+};
+
+function columnsForPreset(preset: string, large: boolean): TableColumn[] {
+  if (large && preset === "review") return COMPACT_TABLE_COLUMNS;
+  const fields = COLUMN_PRESET_FIELDS[preset] ?? COLUMN_PRESET_FIELDS.review;
+  return fields.map((field) => TABLE_COLUMNS.find((column) => column.field === field)).filter(Boolean) as TableColumn[];
+}
 
 const BULK_DEFAULTS = {
   gasket_type: "(no change)",
@@ -244,12 +272,6 @@ function blankItem(lineNo: number): GasketItem {
   };
 }
 
-function getString(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (Array.isArray(value)) return value.join("; ");
-  return String(value);
-}
-
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -263,35 +285,34 @@ function todayDisplayDate(): string {
   return new Date().toLocaleDateString("en-GB");
 }
 
-function revisionLabel(quote: Quote): string {
-  const revNo = getString(quote.quote_data?.rev_no);
-  return revNo ? `Rev ${revNo}` : "";
-}
-
 function storedMaterialPlan(quote: Quote | null): MaterialPlan | null {
   const plan = quote?.stage_meta?.material_plan;
   if (!plan || typeof plan !== "object") return null;
   const candidate = plan as Partial<MaterialPlan>;
   if (!Array.isArray(candidate.rows) || !candidate.totals || !candidate.config) return null;
-  return candidate as MaterialPlan;
+  const rows = candidate.rows.map((row) => {
+    const required = row.reqd_qty_sheets ?? row.reqd_qty_kg ?? 0;
+    const available = toNumber(row.available_qty, 0);
+    const reserved = toNumber(row.reserved_qty, 0);
+    const shortage = row.shortage_qty ?? Math.max(0, required + reserved - available);
+    return {
+      ...row,
+      available_qty: available,
+      reserved_qty: reserved,
+      shortage_qty: shortage,
+      suggested_purchase_qty: row.suggested_purchase_qty ?? shortage,
+      lead_time_days: toNumber(row.lead_time_days, 0),
+      preferred_vendor: getString(row.preferred_vendor),
+      estimated_material_cost: toNumber(row.estimated_material_cost, 0),
+      production_priority: row.production_priority ?? "normal",
+    };
+  });
+  return {
+    ...(candidate as MaterialPlan),
+    rows,
+    grouped_summary: candidate.grouped_summary ?? [],
+  };
 }
-
-type QualityFinding = {
-  severity: "high" | "medium" | "low";
-  title: string;
-  detail: string;
-  rows?: number[];
-};
-
-type QualityReport = {
-  score: number;
-  readiness: number;
-  quoteScore: number;
-  technicalScore: number;
-  riskScore: number;
-  missing: string[];
-  risks: QualityFinding[];
-};
 
 type ApprovalState = {
   status: "draft" | "pending" | "approved" | "rejected";
@@ -302,110 +323,10 @@ type ApprovalState = {
   comments?: string;
   score?: number;
   risk_count?: number;
+  required?: boolean;
+  required_reasons?: string[];
+  required_changes?: string;
 };
-
-function hasText(value: unknown): boolean {
-  return getString(value).trim().length > 0;
-}
-
-function itemHasMaterial(item: GasketItem): boolean {
-  return [
-    item.moc,
-    item.sw_winding_material,
-    item.sw_filler,
-    item.sw_inner_ring,
-    item.sw_outer_ring,
-    item.rtj_hardness_spec,
-    item.isk_gasket_material,
-    item.isk_core_material,
-    item.kamm_core_material,
-    item.kamm_surface_material,
-    item.dji_filler,
-  ].some(hasText);
-}
-
-function itemHasSize(item: GasketItem): boolean {
-  return hasText(item.size) || hasText(item.size_norm) || Boolean(item.od_mm && item.id_mm) || hasText(item.ring_no);
-}
-
-function pushRisk(risks: QualityFinding[], finding: QualityFinding) {
-  const existing = risks.find((risk) => risk.title === finding.title && risk.detail === finding.detail);
-  if (existing) {
-    existing.rows = Array.from(new Set([...(existing.rows ?? []), ...(finding.rows ?? [])])).sort((a, b) => a - b);
-  } else {
-    risks.push(finding);
-  }
-}
-
-function evaluateQuoteQuality(quote: Quote | null, quoteItems: GasketItem[], quoteData: Record<string, unknown>): QualityReport {
-  const itemsToCheck = quoteItems.length ? quoteItems : [];
-  const totalItems = quote?.n_items ?? itemsToCheck.length;
-  const ready = quoteItems.length ? quoteItems.filter((item) => item.status === "ready").length : (quote?.n_ready ?? 0);
-  const check = quoteItems.length ? quoteItems.filter((item) => item.status === "check").length : (quote?.n_check ?? 0);
-  const missingCount = quoteItems.length ? quoteItems.filter((item) => item.status === "missing").length : (quote?.n_missing ?? 0);
-  const readiness = totalItems ? Math.round((ready / totalItems) * 100) : 0;
-  const quoteMissing = [
-    !hasText(quote?.customer) ? "Customer name" : "",
-    !hasText(quote?.project_ref) ? "Project / enquiry reference" : "",
-    !hasText(quoteData.customer_enq_no) ? "Customer enquiry no" : "",
-    !hasText(quoteData.attention) ? "Attention/contact person" : "",
-    !hasText(quoteData.currency) ? "Currency" : "",
-    !hasText(quoteData.delivery) ? "Delivery terms/time" : "",
-    !hasText(quoteData.payment_terms) ? "Payment terms" : "",
-  ].filter(Boolean);
-  const quoteScore = Math.max(0, Math.round(((7 - quoteMissing.length) / 7) * 100));
-  const technicalScore = totalItems ? Math.max(0, Math.round(100 - ((missingCount * 1.6 + check * 0.7) / totalItems) * 100)) : 0;
-  const risks: QualityFinding[] = [];
-
-  if (!totalItems) {
-    pushRisk(risks, { severity: "high", title: "No line items", detail: "The enquiry has no parsed or manual gasket items yet." });
-  }
-  if (missingCount > 0) {
-    pushRisk(risks, { severity: "high", title: "Missing technical fields", detail: `${missingCount} line item(s) are marked missing.` });
-  }
-  if (check > 0) {
-    pushRisk(risks, { severity: "medium", title: "Defaults or review flags used", detail: `${check} line item(s) need review before quotation.` });
-  }
-
-  itemsToCheck.forEach((item, index) => {
-    const row = index + 1;
-    const type = getString(item.gasket_type).toUpperCase();
-    const text = [item.raw_description, item.standard, item.rating, item.special].map(getString).join(" ").toUpperCase();
-    if (!hasText(type)) {
-      pushRisk(risks, { severity: "high", title: "Unknown gasket type", detail: "Gasket type is blank.", rows: [row] });
-    }
-    if (!itemHasSize(item)) {
-      pushRisk(risks, { severity: "high", title: "Missing dimensions", detail: "Size, normalized size, OD/ID, or ring number is missing.", rows: [row] });
-    }
-    if (!itemHasMaterial(item)) {
-      pushRisk(risks, { severity: "medium", title: "Missing material", detail: "Material/MOC is not clear enough for procurement or pricing.", rows: [row] });
-    }
-    if (!hasText(item.rating) && !hasText(item.standard) && type !== "RTJ") {
-      pushRisk(risks, { severity: "medium", title: "Pressure class unclear", detail: "Rating/standard is missing.", rows: [row] });
-    }
-    if ((text.includes("ASME") || text.includes("ANSI")) && (text.includes("DIN") || text.includes("EN 1092"))) {
-      pushRisk(risks, { severity: "high", title: "Standard mismatch", detail: "ASME/ANSI and DIN/EN references appear on the same line.", rows: [row] });
-    }
-    if (type === "RTJ" && (!hasText(item.rtj_groove_type) || !hasText(item.ring_no))) {
-      pushRisk(risks, { severity: "medium", title: "RTJ details incomplete", detail: "Ring number and groove type should be checked.", rows: [row] });
-    }
-    if (type === "SPIRAL_WOUND" && (!hasText(item.sw_winding_material) || !hasText(item.sw_filler))) {
-      pushRisk(risks, { severity: "medium", title: "Spiral wound material incomplete", detail: "Winding and filler material should be present.", rows: [row] });
-    }
-    if (toNumber(item.quantity, 0) <= 0) {
-      pushRisk(risks, { severity: "high", title: "Invalid quantity", detail: "Quantity must be greater than zero.", rows: [row] });
-    }
-    if (text.includes("SPECIAL") || text.includes("CUSTOM") || text.includes("NON STANDARD") || text.includes("DRAWING")) {
-      pushRisk(risks, { severity: "medium", title: "Non-standard item", detail: "Drawing/custom/non-standard wording requires engineering review.", rows: [row] });
-    }
-  });
-
-  const highRiskPenalty = risks.filter((risk) => risk.severity === "high").length * 18;
-  const mediumRiskPenalty = risks.filter((risk) => risk.severity === "medium").length * 8;
-  const riskScore = Math.max(0, 100 - highRiskPenalty - mediumRiskPenalty);
-  const score = Math.round(quoteScore * 0.3 + technicalScore * 0.5 + riskScore * 0.2);
-  return { score, readiness, quoteScore, technicalScore, riskScore, missing: quoteMissing, risks };
-}
 
 function approvalState(quote: Quote | null): ApprovalState {
   const approval = quote?.stage_meta?.approval;
@@ -442,85 +363,6 @@ function quoteSummary(quote: Quote): Quote {
   return { ...quote, items: [] };
 }
 
-function uniqueNotes(notes: string[]): string[] {
-  return Array.from(new Set(notes.map((note) => note.trim()).filter(Boolean)));
-}
-
-function derivedNotesFor(item: GasketItem): string[] {
-  const notes: string[] = [];
-  const type = getString(item.gasket_type).toUpperCase();
-  const status = getString(item.status);
-
-  if (!hasText(item.raw_description) && !hasText(item.ggpl_description)) {
-    notes.push("Customer description is empty");
-  }
-  if (!hasText(type)) {
-    notes.push("Gasket type missing");
-  }
-  if (!itemHasSize(item)) {
-    notes.push("Size/dimensions missing");
-  }
-  if (!itemHasMaterial(item)) {
-    notes.push("Material/MOC missing or unclear");
-  }
-  if (!hasText(item.rating) && !hasText(item.standard) && type !== "RTJ") {
-    notes.push("Rating/standard missing");
-  }
-  if (toNumber(item.quantity, 0) <= 0) {
-    notes.push("Quantity missing or zero");
-  }
-
-  if (type === "SOFT_CUT") {
-    if (!hasText(item.thickness_mm)) notes.push("Thickness missing");
-    if (!hasText(item.face_type)) notes.push("Face type missing");
-  }
-  if (type === "SPIRAL_WOUND") {
-    if (!hasText(item.sw_winding_material)) notes.push("SW winding material missing");
-    if (!hasText(item.sw_filler)) notes.push("SW filler missing");
-    if (!hasText(item.sw_outer_ring)) notes.push("SW outer ring missing");
-    if (!hasText(item.sw_inner_ring)) notes.push("SW inner ring not specified - confirm if required");
-  }
-  if (type === "RTJ") {
-    if (!hasText(item.ring_no)) notes.push("RTJ ring number missing");
-    if (!hasText(item.rtj_groove_type)) notes.push("RTJ groove type missing");
-    if (!hasText(item.rtj_hardness_bhn) && !hasText(item.rtj_hardness_spec)) notes.push("RTJ hardness missing");
-  }
-  if (type === "KAMM") {
-    if (!hasText(item.kamm_core_material)) notes.push("Kamm core material missing");
-    if (!hasText(item.kamm_surface_material) && !hasText(item.kamm_covering_layer)) notes.push("Kamm facing/surface material missing");
-  }
-  if (type === "DJI") {
-    if (!hasText(item.od_mm) || !hasText(item.id_mm)) notes.push("DJI OD/ID dimensions missing");
-    if (!hasText(item.dji_filler)) notes.push("DJI filler missing");
-    if (!hasText(item.thickness_mm)) notes.push("DJI thickness missing");
-  }
-  if (type === "ISK" || type === "ISK_RTJ") {
-    if (!hasText(item.isk_gasket_material)) notes.push("ISK gasket material missing");
-    if (!hasText(item.isk_core_material)) notes.push("ISK core material missing");
-    if (!hasText(item.isk_sleeve_material)) notes.push("ISK sleeve material missing");
-    if (!hasText(item.isk_primary_seal)) notes.push("ISK primary seal missing");
-  }
-
-  if (!notes.length && status === "missing") {
-    notes.push("Marked missing by rules - review row fields");
-  }
-  if (!notes.length && status === "check") {
-    notes.push("Review required - defaults, assumptions, or non-standard detail may be present");
-  }
-  return uniqueNotes(notes);
-}
-
-function notesFor(item: GasketItem): string {
-  const flags = Array.isArray(item.flags) ? item.flags : [];
-  const defaults = Array.isArray(item.applied_defaults) ? item.applied_defaults as unknown[] : [];
-  const notes = [
-    ...flags.map(String),
-    ...defaults.map((value) => `[default] ${String(value)}`),
-    ...derivedNotesFor(item).map((value) => `[missing] ${value}`),
-  ];
-  return uniqueNotes(notes).join("; ");
-}
-
 function summaryKey(item: GasketItem): string {
   if (item.status === "regret") return "";
   const type = getString(item.gasket_type || "SOFT_CUT").toUpperCase();
@@ -546,16 +388,18 @@ function statusClass(status: string | null | undefined) {
   return "";
 }
 
-function stageLabel(stage: string) {
-  const labels: Record<string, string> = {
-    initial: "Enquiry",
-    review: "Review",
-    quote_prep: "Quotation prep",
-    repricing: "Repricing",
-    sent: "Sent",
-    po: "PO",
-  };
-  return labels[stage] ?? stage.replace("_", " ");
+function validationClass(severity?: "blocker" | "review" | "optional") {
+  if (severity === "blocker") return "bg-red-100/80 text-red-950 dark:bg-red-950/40 dark:text-red-100";
+  if (severity === "review") return "bg-amber-100/80 text-amber-950 dark:bg-amber-950/40 dark:text-amber-100";
+  if (severity === "optional") return "bg-muted/50 text-muted-foreground";
+  return "";
+}
+
+function confidenceClass(value: unknown) {
+  const confidence = toNumber(value, 1);
+  if (confidence >= 0.85) return "bg-emerald-100/80 text-emerald-950 dark:bg-emerald-950/40 dark:text-emerald-100";
+  if (confidence >= 0.65) return "bg-amber-100/80 text-amber-950 dark:bg-amber-950/40 dark:text-amber-100";
+  return "bg-red-100/80 text-red-950 dark:bg-red-950/40 dark:text-red-100";
 }
 
 function Field({
@@ -624,14 +468,13 @@ function ProgressBar({ value }: { value: number }) {
   );
 }
 
-type QuoteSection = "drafts" | "material" | "final";
-
 export function QuotesClient({ section = "drafts" }: { section?: QuoteSection }) {
   const params = useSearchParams();
   const router = useRouter();
   const [quotes, setQuotes] = React.useState<Quote[]>([]);
   const [quote, setQuote] = React.useState<Quote | null>(null);
   const [search, setSearch] = React.useState("");
+  const [queueFilter, setQueueFilter] = React.useState("all");
   const [emailText, setEmailText] = React.useState("");
   const [excelFile, setExcelFile] = React.useState<File | null>(null);
   const [manualItem, setManualItem] = React.useState<GasketItem>(blankItem(1));
@@ -639,6 +482,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [previewUrl, setPreviewUrl] = React.useState("");
   const [selectedRows, setSelectedRows] = React.useState<Set<number>>(new Set());
   const [statusFilter, setStatusFilter] = React.useState("all");
+  const [columnPreset, setColumnPreset] = React.useState("review");
   const [draftPage, setDraftPage] = React.useState(0);
   const [finalPage, setFinalPage] = React.useState(0);
   const [bulkValues, setBulkValues] = React.useState<Record<string, string>>(BULK_DEFAULTS);
@@ -665,13 +509,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const qd = React.useMemo(() => ({ ...quoteDefaults, ...(quote?.quote_data ?? {}) }), [quote?.quote_data]);
   const items = React.useMemo(() => quote?.items ?? [], [quote?.items]);
   const isLargeDraft = items.length > LARGE_DRAFT_THRESHOLD;
-  const activeTableColumns = isLargeDraft ? COMPACT_TABLE_COLUMNS : TABLE_COLUMNS;
+  const activeTableColumns = columnsForPreset(columnPreset, isLargeDraft);
   const displayIndices = items
     .map((item, index) => ({ item, index }))
     .filter(({ item }) => {
       if (statusFilter === "issues") return item.status === "check" || item.status === "missing";
       if (statusFilter === "missing") return item.status === "missing";
       if (statusFilter === "regret") return item.status === "regret";
+      if (statusFilter !== "all") return itemMatchesSmartFilter(item, statusFilter);
       return true;
     })
     .map(({ index }) => index);
@@ -801,6 +646,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     setSelectedRows(new Set());
     setPreviewUrl("");
     setStatusFilter("all");
+    setQueueFilter("all");
+    setColumnPreset("review");
     setBulkValues(BULK_DEFAULTS);
     setRfiText("");
     setSaving(false);
@@ -843,6 +690,22 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       toast.success("Quote deleted");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Delete failed");
+    }
+  }
+
+  async function updateQueueMeta(row: Quote, patch: Record<string, unknown>) {
+    const nextStageMeta = { ...(row.stage_meta ?? {}), ...patch };
+    setQuotes((prev) => prev.map((item) => (item.id === row.id ? { ...item, stage_meta: nextStageMeta } : item)));
+    if (quote?.id === row.id) {
+      setQuote((current) => (current ? { ...current, stage_meta: nextStageMeta } : current));
+    }
+    try {
+      const updated = await patchQuote(row.id, { stage_meta: nextStageMeta } as Partial<Quote>);
+      setQuotes((prev) => prev.map((item) => (item.id === updated.id ? quoteSummary(updated) : item)));
+      if (quote?.id === updated.id) setQuote(updated);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Workflow metadata save failed");
+      refreshQuotes(quote?.id).catch((refreshError) => toast.error(refreshError.message));
     }
   }
 
@@ -990,6 +853,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       comments: approvalComment.trim(),
       score: qualityReport.score,
       risk_count: qualityReport.risks.length,
+      required: pricingSummary.approvalRequired,
+      required_reasons: pricingSummary.approvalReasons,
+      required_changes: pricingSummary.approvalReasons.join("; "),
     };
     await savePatch(
       {
@@ -1016,6 +882,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       comments: approvalComment.trim() || approval.comments,
       score: qualityReport.score,
       risk_count: qualityReport.risks.length,
+      required: pricingSummary.approvalRequired,
+      required_reasons: pricingSummary.approvalReasons,
+      required_changes: status === "rejected" ? approvalComment.trim() || "Revise pricing or resolve approval blockers" : "",
     };
     await savePatch(
       {
@@ -1187,32 +1056,59 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     setQuote((current) => (current ? { ...current, quote_data: next, quote_no: getString(next.quote_no) } : current));
   }
 
-  const unitPrices = Array.isArray(qd.unit_prices) ? qd.unit_prices.map((value) => toNumber(value)) : [];
+  const unitPrices = React.useMemo(() => Array.isArray(qd.unit_prices) ? qd.unit_prices.map((value) => toNumber(value)) : [], [qd.unit_prices]);
+  const costPrices = React.useMemo(() => Array.isArray(qd.cost_prices) ? qd.cost_prices.map((value) => toNumber(value)) : [], [qd.cost_prices]);
+  const targetMargins = React.useMemo(() => Array.isArray(qd.target_margins_pct) ? qd.target_margins_pct.map((value) => toNumber(value, 15)) : [], [qd.target_margins_pct]);
   const currency = getString(qd.currency) || "INR";
   const fxRate = toNumber(qd.fx_rate, defaultFx[currency] ?? 1);
   const discountPct = toNumber(qd.discount_pct);
   const gstPct = currency === "INR" ? toNumber(qd.gst_pct, 18) : 0;
-  const subtotal = items.reduce((sum, item, index) => {
-    if (item.status === "regret") return sum;
-    return sum + toNumber(item.quantity, 0) * (unitPrices[index] ?? 0) / (currency === "INR" ? 1 : fxRate || 1);
-  }, 0);
-  const discount = subtotal * discountPct / 100;
-  const taxable = subtotal - discount;
-  const gst = taxable * gstPct / 100;
-  const grandTotal = taxable + gst;
+  const discountApprovalPct = toNumber(qd.discount_approval_pct, 10);
+  const minimumMarginPct = toNumber(qd.minimum_margin_pct, 15);
+  const qualityReport = React.useMemo(() => evaluateQuoteQuality(quote, items, qd), [items, qd, quote]);
+  const pricingSummary = React.useMemo(
+    () => buildQuotePricingSummary({
+      items,
+      unitPrices,
+      costPrices,
+      targetMargins,
+      discountPct,
+      gstPct,
+      riskCount: qualityReport.risks.filter((risk) => risk.severity === "high").length,
+      fxRate,
+      isForeignCurrency: currency !== "INR",
+      discountApprovalPct,
+      minimumMarginPct,
+    }),
+    [costPrices, currency, discountApprovalPct, discountPct, fxRate, gstPct, items, minimumMarginPct, qualityReport.risks, targetMargins, unitPrices],
+  );
+  const subtotal = pricingSummary.subtotal;
+  const discount = pricingSummary.discount;
+  const gst = pricingSummary.gst;
+  const grandTotal = pricingSummary.grandTotal;
   const readyCount = items.filter((item) => item.status === "ready").length;
   const checkCount = items.filter((item) => item.status === "check").length;
   const missingCount = items.filter((item) => item.status === "missing").length;
   const actionCount = checkCount + missingCount;
   const readiness = items.length ? Math.round((readyCount / items.length) * 100) : 0;
-  const qualityReport = React.useMemo(() => evaluateQuoteQuality(quote, items, qd), [items, qd, quote]);
   const approval = approvalState(quote);
   const canApprove = canApproveQuotes(currentUser.role);
-  const canExportFinal = approval.status === "approved" || canApprove;
+  const canExportFinal = approval.status === "approved" || !pricingSummary.approvalRequired;
   const visibleQuotes = quotes.filter((row) => {
-    if (isFinalSection && !FINAL_STAGES.has(row.stage)) return false;
-    else if (isMaterialSection && !MATERIAL_STAGES.has(row.stage)) return false;
-    else if (!DRAFT_STAGES.has(row.stage)) return false;
+    if (isFinalSection) {
+      if (!FINAL_STAGES.has(row.stage)) return false;
+    } else if (isMaterialSection) {
+      if (!MATERIAL_STAGES.has(row.stage)) return false;
+    } else if (!DRAFT_STAGES.has(row.stage)) {
+      return false;
+    }
+    if (queueFilter === "my_work" && row.stage_meta?.owner_id !== currentUser.id && row.stage_meta?.owner_name !== currentUser.name) return false;
+    if (queueFilter === "due_today" && quoteDueState(row) !== "today") return false;
+    if (queueFilter === "delayed" && quoteDueState(row) !== "delayed") return false;
+    if (queueFilter === "clarification" && !quoteHasClarification(row)) return false;
+    if (queueFilter === "high_risk" && !quoteIsHighRisk(row)) return false;
+    if (queueFilter === "high_value" && !quoteIsHighValue(row)) return false;
+    if (queueFilter.startsWith("stage:") && row.stage !== queueFilter.slice("stage:".length)) return false;
     const term = search.toLowerCase();
     return !term || row.customer.toLowerCase().includes(term) || row.project_ref.toLowerCase().includes(term) || row.quote_no.toLowerCase().includes(term);
   });
@@ -1232,6 +1128,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
 
   function renderGridCell(index: number, item: GasketItem, column: TableColumn) {
     const rawValue = item[column.field];
+    const validation = validateItemField(item, column.field);
+    const cellClass = column.field === "confidence" ? confidenceClass(rawValue) : validationClass(validation?.severity);
     if (column.field === "status") {
       return (
         <div className="flex h-7 items-center gap-1.5 px-2 text-xs">
@@ -1243,37 +1141,40 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     if (column.field === "flags") {
       return (
         <textarea
-          className={`${GRID_TEXTAREA_CLASS} ${GRID_READONLY_CLASS}`}
+          className={`${GRID_TEXTAREA_CLASS} ${GRID_READONLY_CLASS} ${cellClass}`}
           value={notesFor(item)}
           readOnly
+          title={validation?.message}
         />
       );
     }
     if (column.field === "line_no" || column.field === "confidence") {
-      return <Input className={`${GRID_INPUT_CLASS} ${GRID_READONLY_CLASS}`} value={getString(rawValue)} readOnly />;
+      return <Input className={`${GRID_INPUT_CLASS} ${GRID_READONLY_CLASS} ${cellClass}`} value={getString(rawValue)} readOnly title={validation?.message} />;
     }
     if (column.field === "ggpl_description" || column.kind === "readonly") {
       return (
         <textarea
-          className={`${GRID_TEXTAREA_CLASS} ${GRID_READONLY_CLASS}`}
+          className={`${GRID_TEXTAREA_CLASS} ${GRID_READONLY_CLASS} ${cellClass}`}
           value={getString(rawValue)}
           readOnly
+          title={validation?.message}
         />
       );
     }
     if (column.kind === "textarea") {
       return (
         <textarea
-          className={GRID_TEXTAREA_CLASS}
+          className={`${GRID_TEXTAREA_CLASS} ${cellClass}`}
           value={getString(rawValue)}
           onChange={(event) => updateItem(index, column.field, event.target.value)}
+          title={validation?.message}
         />
       );
     }
     if (column.kind === "select") {
       return (
         <Select value={getString(rawValue) || BLANK_SELECT_VALUE} onValueChange={(value) => updateItem(index, column.field, value === BLANK_SELECT_VALUE ? "" : value)}>
-          <SelectTrigger className={`${GRID_INPUT_CLASS} min-w-28 justify-between`}>
+          <SelectTrigger className={`${GRID_INPUT_CLASS} ${cellClass} min-w-28 justify-between`} title={validation?.message}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -1301,10 +1202,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     }
     return (
       <Input
-        className={GRID_INPUT_CLASS}
+        className={`${GRID_INPUT_CLASS} ${cellClass}`}
         type={column.kind === "number" ? "number" : "text"}
         value={getString(rawValue)}
         onChange={(event) => updateItem(index, column.field, event.target.value)}
+        title={validation?.message}
       />
     );
   }
@@ -1351,8 +1253,39 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   function updatePlanRow(index: number, patch: Partial<MaterialPlan["rows"][number]>) {
     setMaterialPlan((current) => {
       if (!current) return current;
-      const nextRows = current.rows.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row));
-      return { ...current, rows: nextRows };
+      const nextRows = current.rows.map((row, rowIndex) => {
+        if (rowIndex !== index) return row;
+        const nextRow = { ...row, ...patch };
+        const required = nextRow.reqd_qty_sheets ?? nextRow.reqd_qty_kg ?? 0;
+        const available = toNumber(nextRow.available_qty, 0);
+        const reserved = toNumber(nextRow.reserved_qty, 0);
+        const shortage = Math.max(0, required + reserved - available);
+        return {
+          ...nextRow,
+          shortage_qty: shortage,
+          suggested_purchase_qty: patch.suggested_purchase_qty === undefined ? shortage : toNumber(nextRow.suggested_purchase_qty, shortage),
+        };
+      });
+      const grouped = nextRows.reduce<MaterialPlan["grouped_summary"]>((acc, row) => {
+        const group = `${row.type} / ${row.thickness_mm ?? "-"} mm / ${row.preferred_vendor || "Vendor TBD"}`;
+        const currentGroup = acc.find((item) => item.group === group);
+        if (currentGroup) {
+          currentGroup.rows += 1;
+          currentGroup.shortage_qty += row.shortage_qty;
+          currentGroup.suggested_purchase_qty += row.suggested_purchase_qty;
+          currentGroup.estimated_material_cost += row.estimated_material_cost;
+        } else {
+          acc.push({
+            group,
+            rows: 1,
+            shortage_qty: row.shortage_qty,
+            suggested_purchase_qty: row.suggested_purchase_qty,
+            estimated_material_cost: row.estimated_material_cost,
+          });
+        }
+        return acc;
+      }, []);
+      return { ...current, rows: nextRows, grouped_summary: grouped };
     });
   }
 
@@ -1410,104 +1343,6 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           </div>
         </div>
 
-        {isFinalSection && (
-          <Card>
-            <CardHeader className="gap-3 border-b md:flex-row md:items-center md:justify-between md:space-y-0">
-              <div className="space-y-1">
-                <CardTitle>Final quotation queue</CardTitle>
-                <div className="text-sm text-muted-foreground">{visibleQuotes.length} quotation{visibleQuotes.length === 1 ? "" : "s"}</div>
-              </div>
-              <div className="relative w-full md:max-w-sm">
-                <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-                <Input className="pl-9" placeholder="Search customer, project, quote no" value={search} onChange={(event) => setSearch(event.target.value)} />
-              </div>
-            </CardHeader>
-            <CardContent className="p-0">
-              <div className="overflow-hidden">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Workspace</TableHead>
-                      <TableHead className="w-48">Readiness</TableHead>
-                      <TableHead className="w-28">Items</TableHead>
-                      <TableHead className="w-40">Updated</TableHead>
-                      <TableHead className="w-28 text-right">Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {visibleQuotes.map((row) => {
-                      const rowQuality = evaluateQuoteQuality(row, row.items, row.quote_data ?? {});
-                      const highRisks = rowQuality.risks.filter((risk) => risk.severity === "high").length;
-                      return (
-                        <TableRow key={row.id} className="cursor-pointer hover:bg-muted/60" onClick={() => openQuote(row)}>
-                          <TableCell>
-                            <div className="flex items-start gap-3">
-                              <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md border bg-background">
-                                <FileSpreadsheet className="h-4 w-4" />
-                              </div>
-                              <div className="min-w-0">
-                                <div className="truncate font-medium">{row.custom_label || row.customer || row.quote_no || "Untitled quote"}</div>
-                                <div className="truncate text-xs text-muted-foreground">{row.project_ref || row.quote_no || row.id}</div>
-                                <div className="mt-2 flex flex-wrap gap-1.5">
-                                  <Badge variant={row.stage === "po" ? "secondary" : "outline"}>{stageLabel(row.stage)}</Badge>
-                                  {revisionLabel(row) && <Badge variant="outline">{revisionLabel(row)}</Badge>}
-                                  <Badge variant="outline">Version {row.version}</Badge>
-                                  {highRisks > 0 && <Badge variant="warning">{highRisks} high risk</Badge>}
-                                </div>
-                              </div>
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <div className="space-y-1">
-                              <ProgressBar value={rowQuality.score} />
-                              <div className="text-xs text-muted-foreground">{rowQuality.score}% ready</div>
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <div className="font-medium">{row.n_items}</div>
-                            <div className="text-xs text-muted-foreground">{row.n_missing + row.n_check} need review</div>
-                          </TableCell>
-                          <TableCell className="text-sm text-muted-foreground">{new Date(row.updated_at).toLocaleString("en-GB")}</TableCell>
-                          <TableCell className="text-right">
-                            <div className="flex justify-end gap-1">
-                              <Button variant="ghost" size="sm" onClick={(event) => { event.stopPropagation(); openQuote(row); }}>
-                                <ArrowRight className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  removeQuote(row);
-                                }}
-                                aria-label={`Delete ${row.customer || row.quote_no || row.id}`}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
-                    {!visibleQuotes.length && (
-                      <TableRow>
-                        <TableCell colSpan={5} className="py-14 text-center">
-                          <div className="mx-auto flex max-w-sm flex-col items-center gap-3 text-sm text-muted-foreground">
-                            <div className="flex h-10 w-10 items-center justify-center rounded-md border bg-background">
-                              <FileSpreadsheet className="h-5 w-5" />
-                            </div>
-                            <div>No quotes are ready for final quotation yet.</div>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
         <Card>
           <CardHeader className="gap-3 border-b md:flex-row md:items-center md:justify-between md:space-y-0">
             <div className="space-y-1">
@@ -1518,86 +1353,48 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input className="pl-9" placeholder="Search customer, project, quote no" value={search} onChange={(event) => setSearch(event.target.value)} />
             </div>
+            <Select value={queueFilter} onValueChange={setQueueFilter}>
+              <SelectTrigger className="w-full md:w-48"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All work</SelectItem>
+                <SelectItem value="my_work">My work</SelectItem>
+                <SelectItem value="due_today">Due today</SelectItem>
+                <SelectItem value="delayed">Delayed</SelectItem>
+                <SelectItem value="clarification">Clarification</SelectItem>
+                <SelectItem value="high_risk">High risk</SelectItem>
+                <SelectItem value="high_value">High value</SelectItem>
+                <SelectItem value="stage:initial">Stage: enquiry</SelectItem>
+                <SelectItem value="stage:review">Stage: review</SelectItem>
+                <SelectItem value="stage:quote_prep">Stage: quote prep</SelectItem>
+              </SelectContent>
+            </Select>
           </CardHeader>
           <CardContent className="p-0">
             <div className="overflow-hidden">
               <Table>
                 <TableHeader>
-                  <TableRow>
-                    <TableHead>Workspace</TableHead>
-                    <TableHead className="w-48">Readiness</TableHead>
-                    <TableHead className="w-28">Items</TableHead>
-                    <TableHead className="w-40">Updated</TableHead>
-                    <TableHead className="w-28 text-right">Actions</TableHead>
+                    <TableRow>
+                      <TableHead>Workspace</TableHead>
+                      <TableHead className="w-36">Owner</TableHead>
+                      <TableHead className="w-32">Priority</TableHead>
+                      <TableHead className="w-40">Due / age</TableHead>
+                      <TableHead className="w-48">Readiness</TableHead>
+                      <TableHead className="w-28">Items</TableHead>
+                      <TableHead className="w-44">Value / next action</TableHead>
+                      <TableHead className="w-40">Updated</TableHead>
+                      <TableHead className="w-28 text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {visibleQuotes.map((row) => {
-                    const rowQuality = evaluateQuoteQuality(row, row.items, row.quote_data ?? {});
-                    const highRisks = rowQuality.risks.filter((risk) => risk.severity === "high").length;
-                    return (
-                      <TableRow key={row.id} className="cursor-pointer hover:bg-muted/60" onClick={() => openQuote(row)}>
-                        <TableCell>
-                          <div className="flex items-start gap-3">
-                            <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md border bg-background">
-                              {isFinalSection ? <FileSpreadsheet className="h-4 w-4" /> : isMaterialSection ? <Layers3 className="h-4 w-4" /> : <ClipboardList className="h-4 w-4" />}
-                            </div>
-                            <div className="min-w-0">
-                              <div className="truncate font-medium">{row.custom_label || row.customer || row.quote_no || "Untitled quote"}</div>
-                              <div className="truncate text-xs text-muted-foreground">{row.project_ref || row.quote_no || row.id}</div>
-                              <div className="mt-2 flex flex-wrap gap-1.5">
-                                <Badge variant={row.stage === "po" ? "secondary" : "outline"}>{stageLabel(row.stage)}</Badge>
-                                {revisionLabel(row) && <Badge variant="outline">{revisionLabel(row)}</Badge>}
-                                <Badge variant="outline">Version {row.version}</Badge>
-                              </div>
-                            </div>
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                          <div className="space-y-2">
-                            <div className="flex items-center justify-between text-xs">
-                              <span className="text-muted-foreground">RFQ score</span>
-                              <span className="font-medium">{rowQuality.score}%</span>
-                            </div>
-                            <ProgressBar value={rowQuality.score} />
-                            <div className="flex flex-wrap gap-1">
-                              <Badge variant={highRisks ? "warning" : "muted"}>{highRisks} high risk</Badge>
-                              <Badge variant="outline">{rowQuality.readiness}% ready</Badge>
-                            </div>
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                          <div className="font-medium">{row.n_items}</div>
-                          <div className="text-xs text-muted-foreground">{row.n_missing + row.n_check} need review</div>
-                        </TableCell>
-                        <TableCell className="text-sm text-muted-foreground">{new Date(row.updated_at).toLocaleString("en-GB")}</TableCell>
-                        <TableCell className="text-right">
-                          <div className="flex justify-end gap-1">
-                            <Button variant="ghost" size="sm" onClick={(event) => { event.stopPropagation(); openQuote(row); }}>
-                              <ArrowRight className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                removeQuote(row);
-                              }}
-                              aria-label={`Delete ${row.customer || row.quote_no || row.id}`}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
+                  {visibleQuotes.map((row) => (
+                    <QuoteSummaryRow key={row.id} quote={row} section={section} onOpen={openQuote} onDelete={removeQuote} onMetaChange={updateQueueMeta} />
+                  ))}
                   {!visibleQuotes.length && (
                     <TableRow>
-                      <TableCell colSpan={5} className="py-14 text-center">
+                      <TableCell colSpan={9} className="py-14 text-center">
                         <div className="mx-auto flex max-w-sm flex-col items-center gap-3 text-sm text-muted-foreground">
                           <div className="flex h-10 w-10 items-center justify-center rounded-md border bg-background">
-                            {isMaterialSection ? <Layers3 className="h-5 w-5" /> : <Inbox className="h-5 w-5" />}
+                            {isFinalSection ? <FileSpreadsheet className="h-5 w-5" /> : isMaterialSection ? <Layers3 className="h-5 w-5" /> : <Inbox className="h-5 w-5" />}
                           </div>
                           <div>{isFinalSection ? "No quotes are ready for final quotation yet." : isMaterialSection ? "No enquiries are ready for material planning." : "No enquiries match the current search."}</div>
                           {isDraftSection && (
@@ -1860,12 +1657,33 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  <Select value={columnPreset} onValueChange={setColumnPreset}>
+                    <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="review">Review columns</SelectItem>
+                      <SelectItem value="commercial">Commercial</SelectItem>
+                      <SelectItem value="soft_cut">Soft cut</SelectItem>
+                      <SelectItem value="spiral_wound">Spiral wound</SelectItem>
+                      <SelectItem value="rtj">RTJ</SelectItem>
+                      <SelectItem value="kammprofile">Kammprofile</SelectItem>
+                      <SelectItem value="dji">DJI</SelectItem>
+                      <SelectItem value="isk">ISK</SelectItem>
+                      <SelectItem value="full_technical">Full technical</SelectItem>
+                    </SelectContent>
+                  </Select>
                   <Select value={statusFilter} onValueChange={setStatusFilter}>
                     <SelectTrigger className="w-48"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="all">All</SelectItem>
                       <SelectItem value="issues">Issues</SelectItem>
                       <SelectItem value="missing">Missing</SelectItem>
+                      <SelectItem value="missing_size">Missing size</SelectItem>
+                      <SelectItem value="missing_material">Missing material</SelectItem>
+                      <SelectItem value="missing_rating">Missing rating/class</SelectItem>
+                      <SelectItem value="low_confidence">Low confidence</SelectItem>
+                      <SelectItem value="drawing_required">Drawing required</SelectItem>
+                      <SelectItem value="duplicate_likely">Duplicate likely</SelectItem>
+                      <SelectItem value="non_gasket">Non-gasket</SelectItem>
                       <SelectItem value="regret">Regret</SelectItem>
                     </SelectContent>
                   </Select>
@@ -2093,7 +1911,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               </div>
 
               {selectedIndices.length === 1 && items[selectedIndices[0]] && (
-                <div className="grid gap-3 rounded-md border bg-muted/20 p-3 lg:grid-cols-3">
+                <div className="grid gap-3 rounded-md border bg-muted/20 p-3 lg:grid-cols-4">
                   <Field
                     label="Customer description"
                     value={getString(items[selectedIndices[0]].raw_description)}
@@ -2114,6 +1932,12 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       readOnly
                     />
                   </div>
+                  <Field
+                    label="Clarification note"
+                    value={getString(items[selectedIndices[0]].clarification_note)}
+                    onChange={(value) => updateItem(selectedIndices[0], "clarification_note", value)}
+                    textarea
+                  />
                 </div>
               )}
 
@@ -2255,7 +2079,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   </div>
                 </div>
 
-                <div className="grid gap-3 md:grid-cols-3">
+                <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
                   <div className="rounded-md border p-3">
                     <div className="text-xs text-muted-foreground">Components</div>
                     <div className="text-lg font-semibold">{materialPlan.totals.component_count}</div>
@@ -2267,6 +2091,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <div className="rounded-md border p-3">
                     <div className="text-xs text-muted-foreground">Estimated purchase weight</div>
                     <div className="text-lg font-semibold">{materialPlan.totals.total_weight_kg.toFixed(3)} kg</div>
+                  </div>
+                  <div className="rounded-md border p-3">
+                    <div className="text-xs text-muted-foreground">Shortage rows</div>
+                    <div className="text-lg font-semibold">{materialPlan.rows.filter((row) => row.shortage_qty > 0).length}</div>
+                  </div>
+                  <div className="rounded-md border p-3">
+                    <div className="text-xs text-muted-foreground">Suggested purchase</div>
+                    <div className="text-lg font-semibold">{materialPlan.rows.reduce((sum, row) => sum + row.suggested_purchase_qty, 0).toFixed(2)}</div>
+                  </div>
+                  <div className="rounded-md border p-3">
+                    <div className="text-xs text-muted-foreground">Material cost impact</div>
+                    <div className="text-lg font-semibold">{materialPlan.rows.reduce((sum, row) => sum + row.estimated_material_cost, 0).toFixed(2)}</div>
                   </div>
                 </div>
 
@@ -2281,6 +2117,45 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   </div>
                 )}
 
+                {materialPlan.rows.some((row) => row.shortage_qty > 0) && (
+                  <div className="rounded-md border border-red-200 bg-red-50/60 p-3 text-sm text-red-950 dark:border-red-900 dark:bg-red-950/25 dark:text-red-100">
+                    <div className="font-medium">Shortage warning</div>
+                    <div className="mt-1">
+                      {materialPlan.rows.filter((row) => row.shortage_qty > 0).length} stock row(s) need purchase or reservation review before production release.
+                    </div>
+                  </div>
+                )}
+
+                {(materialPlan.grouped_summary ?? []).length > 0 && (
+                  <details className="rounded-md border p-3">
+                    <summary className="cursor-pointer text-sm font-medium">Grouped purchase summary</summary>
+                    <div className="mt-3 overflow-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Material / thickness / vendor</TableHead>
+                            <TableHead className="w-24">Rows</TableHead>
+                            <TableHead className="w-32">Shortage</TableHead>
+                            <TableHead className="w-40">Suggested purchase</TableHead>
+                            <TableHead className="w-36">Est. cost</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {(materialPlan.grouped_summary ?? []).map((row) => (
+                            <TableRow key={row.group}>
+                              <TableCell className="font-medium">{row.group}</TableCell>
+                              <TableCell>{row.rows}</TableCell>
+                              <TableCell>{row.shortage_qty.toFixed(2)}</TableCell>
+                              <TableCell>{row.suggested_purchase_qty.toFixed(2)}</TableCell>
+                              <TableCell>{row.estimated_material_cost.toFixed(2)}</TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  </details>
+                )}
+
                 <div className="overflow-auto rounded-md border">
                   <Table>
                     <TableHeader>
@@ -2291,6 +2166,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                         <TableHead className="min-w-44">Stock size</TableHead>
                         <TableHead className="w-36">Planned qty</TableHead>
                         <TableHead className="w-40">Est. purchase wt.</TableHead>
+                        <TableHead className="w-32">Available</TableHead>
+                        <TableHead className="w-32">Reserved</TableHead>
+                        <TableHead className="w-32">Shortage</TableHead>
+                        <TableHead className="w-40">Suggested purchase</TableHead>
+                        <TableHead className="w-40">Vendor</TableHead>
+                        <TableHead className="w-32">Lead days</TableHead>
+                        <TableHead className="w-40">Material cost</TableHead>
+                        <TableHead className="w-36">Priority</TableHead>
                         <TableHead className="w-28">Source rows</TableHead>
                         <TableHead className="min-w-96">Notes / planner review</TableHead>
                       </TableRow>
@@ -2311,6 +2194,24 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                           <TableCell className="text-sm">{formatStockSize(row)}</TableCell>
                           <TableCell className="text-sm">{formatPlanQuantity(row)}</TableCell>
                           <TableCell className="text-sm">{row.reqd_qty_kg === null ? "Needs dimensions" : `${row.reqd_qty_kg.toFixed(2)} kg`}</TableCell>
+                          <TableCell><Input className="w-28" type="number" value={getString(row.available_qty)} onChange={(event) => updatePlanRow(index, { available_qty: Number(event.target.value) })} /></TableCell>
+                          <TableCell><Input className="w-28" type="number" value={getString(row.reserved_qty)} onChange={(event) => updatePlanRow(index, { reserved_qty: Number(event.target.value) })} /></TableCell>
+                          <TableCell className={row.shortage_qty > 0 ? "font-medium text-red-600" : "text-sm"}>{row.shortage_qty.toFixed(2)}</TableCell>
+                          <TableCell><Input className="w-32" type="number" value={getString(row.suggested_purchase_qty)} onChange={(event) => updatePlanRow(index, { suggested_purchase_qty: Number(event.target.value) })} /></TableCell>
+                          <TableCell><Input className="w-36" value={row.preferred_vendor} onChange={(event) => updatePlanRow(index, { preferred_vendor: event.target.value })} /></TableCell>
+                          <TableCell><Input className="w-24" type="number" value={getString(row.lead_time_days)} onChange={(event) => updatePlanRow(index, { lead_time_days: Number(event.target.value) })} /></TableCell>
+                          <TableCell><Input className="w-32" type="number" value={getString(row.estimated_material_cost)} onChange={(event) => updatePlanRow(index, { estimated_material_cost: Number(event.target.value) })} /></TableCell>
+                          <TableCell>
+                            <Select value={row.production_priority} onValueChange={(value) => updatePlanRow(index, { production_priority: value as MaterialPlan["rows"][number]["production_priority"] })}>
+                              <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="low">Low</SelectItem>
+                                <SelectItem value="normal">Normal</SelectItem>
+                                <SelectItem value="high">High</SelectItem>
+                                <SelectItem value="urgent">Urgent</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </TableCell>
                           <TableCell className="text-sm">{row.source_count}</TableCell>
                           <TableCell>
                             <div className="mb-2 text-xs leading-5 text-muted-foreground">{row.notes}</div>
@@ -2394,6 +2295,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     <div>Risks: <span className="font-medium text-foreground">{qualityReport.risks.length}</span></div>
                     <div>Quote value: <span className="font-medium text-foreground">{grandTotal.toFixed(2)} {currency}</span></div>
                   </div>
+                  {pricingSummary.approvalRequired && (
+                    <div className="mt-3 rounded-md border border-amber-200 bg-amber-50/70 p-2 text-xs text-amber-950 dark:border-amber-900 dark:bg-amber-950/25 dark:text-amber-100">
+                      <div className="font-medium">Approval required</div>
+                      <ul className="mt-1 space-y-1">
+                        {pricingSummary.approvalReasons.map((reason) => <li key={reason}>- {reason}</li>)}
+                      </ul>
+                    </div>
+                  )}
                   {approval.requested_by && (
                     <div className="mt-2 text-xs text-muted-foreground">
                       Requested by {approval.requested_by}{approval.requested_at ? ` on ${new Date(approval.requested_at).toLocaleString()}` : ""}
@@ -2405,6 +2314,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     </div>
                   )}
                   {approval.comments && <div className="mt-2 rounded-md bg-muted/40 p-2 text-xs">{approval.comments}</div>}
+                  {approval.required_changes && <div className="mt-2 rounded-md bg-muted/40 p-2 text-xs">Required changes: {approval.required_changes}</div>}
                 </div>
 
                 <div className="rounded-md border p-3">
@@ -2441,10 +2351,6 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 <Field label="Revision date" value={getString(qd.rev_date)} onChange={(value) => updateQd("rev_date", value)} />
               </div>
               <div className="grid gap-3 md:grid-cols-2">
-                <Field label="Customer code" value={getString(qd.customer_code)} onChange={(value) => updateQd("customer_code", value)} />
-                <Field label="Serial no" value={getString(qd.serial_no)} onChange={(value) => updateQd("serial_no", value)} />
-              </div>
-              <div className="grid gap-3 md:grid-cols-2">
                 <Field label="Buyer name/address" value={getString(qd.buyer_name_address)} onChange={(value) => updateQd("buyer_name_address", value)} textarea />
                 <div className="grid gap-3 md:grid-cols-2">
                   <Field label="Customer enquiry no" value={getString(qd.customer_enq_no)} onChange={(value) => updateQd("customer_enq_no", value)} />
@@ -2470,6 +2376,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 </div>
                 <Field label="FX rate" value={getString(qd.fx_rate)} onChange={(value) => updateQd("fx_rate", Number(value))} type="number" />
                 <Field label="Discount %" value={getString(qd.discount_pct)} onChange={(value) => updateQd("discount_pct", Number(value))} type="number" />
+                <Field label="Approval discount %" value={getString(qd.discount_approval_pct)} onChange={(value) => updateQd("discount_approval_pct", Number(value))} type="number" />
+                <Field label="Minimum margin %" value={getString(qd.minimum_margin_pct)} onChange={(value) => updateQd("minimum_margin_pct", Number(value))} type="number" />
                 <div className="space-y-1.5">
                   <Label>GST type</Label>
                   <Select value={getString(qd.gst_type || "IGST")} onValueChange={(value) => updateQd("gst_type", value)} disabled={currency !== "INR"}>
@@ -2514,11 +2422,17 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <TableHeader>
                     <TableRow>
                       <TableHead>#</TableHead>
+                      <TableHead>Cust Sl.No</TableHead>
+                      <TableHead>Customer item code</TableHead>
                       <TableHead>Description</TableHead>
                       <TableHead>Qty</TableHead>
                       <TableHead>UOM</TableHead>
+                      <TableHead>Cost/unit</TableHead>
+                      <TableHead>Target margin %</TableHead>
                       <TableHead>Base INR unit price</TableHead>
                       <TableHead>{currency} unit price</TableHead>
+                      <TableHead>Margin %</TableHead>
+                      <TableHead>Discount impact</TableHead>
                       <TableHead>Total {currency}</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -2528,12 +2442,39 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       const price = unitPrices[index] ?? 0;
                       const converted = currency === "INR" ? price : price / (fxRate || 1);
                       const total = item.status === "regret" ? 0 : converted * toNumber(item.quantity);
+                      const pricingLine = pricingSummary.lines[index];
                       return (
                         <TableRow key={index}>
                           <TableCell>{index + 1}</TableCell>
+                          <TableCell><Input className="w-24" value={getString(item.customer_sl_no)} onChange={(event) => updateItem(index, "customer_sl_no", event.target.value)} /></TableCell>
+                          <TableCell><Input className="w-36" value={getString(item.customer_item_code)} onChange={(event) => updateItem(index, "customer_item_code", event.target.value)} /></TableCell>
                           <TableCell className="min-w-96 text-xs">{item.status === "regret" ? "REGRET - CANNOT PRODUCE" : getString(item.ggpl_description || item.raw_description)}</TableCell>
                           <TableCell><Input className="w-24" type="number" value={getString(item.quantity)} onChange={(event) => updateItem(index, "quantity", event.target.value)} /></TableCell>
                           <TableCell>{getString(item.uom || "NOS")}</TableCell>
+                          <TableCell>
+                            <Input
+                              className="w-28"
+                              type="number"
+                              value={getString(costPrices[index] ?? 0)}
+                              onChange={(event) => {
+                                const next = [...costPrices];
+                                next[index] = Number(event.target.value);
+                                updateQd("cost_prices", next);
+                              }}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <Input
+                              className="w-28"
+                              type="number"
+                              value={getString(targetMargins[index] ?? minimumMarginPct)}
+                              onChange={(event) => {
+                                const next = [...targetMargins];
+                                next[index] = Number(event.target.value);
+                                updateQd("target_margins_pct", next);
+                              }}
+                            />
+                          </TableCell>
                           <TableCell>
                             <Input
                               className="w-32"
@@ -2547,6 +2488,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                             />
                           </TableCell>
                           <TableCell>{converted.toFixed(2)}</TableCell>
+                          <TableCell className={pricingLine?.marginPct !== null && pricingLine?.marginPct !== undefined && pricingLine.marginPct < minimumMarginPct ? "text-red-600" : ""}>
+                            {pricingLine?.marginPct === null || pricingLine?.marginPct === undefined ? "-" : pricingLine.marginPct.toFixed(1)}
+                          </TableCell>
+                          <TableCell>{(pricingLine?.discountImpact ?? 0).toFixed(2)}</TableCell>
                           <TableCell>{total.toFixed(2)}</TableCell>
                         </TableRow>
                       );
@@ -2554,11 +2499,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   </TableBody>
                 </Table>
               </div>
-              <div className="grid gap-3 md:grid-cols-4">
+              <div className="grid gap-3 md:grid-cols-4 xl:grid-cols-7">
                 <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">Subtotal</div><div className="text-lg font-semibold">{subtotal.toFixed(2)}</div></div>
                 <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">Discount</div><div className="text-lg font-semibold">{discount.toFixed(2)}</div></div>
                 <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">GST</div><div className="text-lg font-semibold">{gst.toFixed(2)}</div></div>
                 <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">Grand total</div><div className="text-lg font-semibold">{grandTotal.toFixed(2)}</div></div>
+                <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">Cost total</div><div className="text-lg font-semibold">{pricingSummary.costTotal.toFixed(2)}</div></div>
+                <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">Gross margin</div><div className="text-lg font-semibold">{pricingSummary.grossMarginPct === null ? "-" : `${pricingSummary.grossMarginPct.toFixed(1)}%`}</div></div>
+                <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">Lowest line margin</div><div className="text-lg font-semibold">{pricingSummary.lowestLineMarginPct === null ? "-" : `${pricingSummary.lowestLineMarginPct.toFixed(1)}%`}</div></div>
               </div>
 
               <div className="grid gap-3 md:grid-cols-2">

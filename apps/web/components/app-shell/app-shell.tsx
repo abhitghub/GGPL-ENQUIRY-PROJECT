@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { BarChart3, Calculator, FileCheck2, FileQuestion, FileText, Layers3, LayoutDashboard, Menu, Settings } from "lucide-react";
+import { BarChart3, Calculator, FileCheck2, FileQuestion, FileText, Layers3, LayoutDashboard, Menu, Settings, ShoppingCart } from "lucide-react";
 
 import { ThemeToggle } from "@/components/app-shell/theme-toggle";
 import { UserMenu } from "@/components/app-shell/user-menu";
@@ -18,6 +18,7 @@ const navItems: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/quotes", label: "Enquiry", icon: FileText },
   { href: "/material-planning", label: "Material Planning", icon: Layers3 },
+  { href: "/vendor-enquiries", label: "Vendor Enquiries", icon: ShoppingCart },
   { href: "/quotes/final", label: "Final Quotation", icon: FileCheck2 },
   { href: "/tools/converter", label: "Converter", icon: Calculator },
   { href: "/doc-assistant", label: "Doc Assistant", icon: FileQuestion },
