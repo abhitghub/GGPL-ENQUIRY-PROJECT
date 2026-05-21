@@ -215,6 +215,54 @@ const COMPACT_TABLE_COLUMNS: TableColumn[] = [
   { label: "Thk", field: "thickness_mm", kind: "number", width: "w-24" },
 ];
 
+const STREAMLIT_TABLE_FIELDS = [
+  "regret",
+  "line_no",
+  "customer_sl_no",
+  "customer_item_code",
+  "raw_description",
+  "gasket_type",
+  "size",
+  "size_norm",
+  "od_mm",
+  "id_mm",
+  "rating",
+  "standard",
+  "moc",
+  "face_type",
+  "series",
+  "thickness_mm",
+  "ring_no",
+  "rtj_groove_type",
+  "rtj_hardness_bhn",
+  "sw_winding_material",
+  "sw_filler",
+  "sw_outer_ring",
+  "sw_inner_ring",
+  "isk_gasket_material",
+  "isk_core_material",
+  "isk_sleeve_material",
+  "isk_washer_material",
+  "isk_primary_seal",
+  "isk_secondary_seal",
+  "isk_insulating_washer",
+  "kamm_core_material",
+  "kamm_surface_material",
+  "kamm_covering_layer",
+  "kamm_rib",
+  "kamm_core_thk",
+  "dji_filler",
+  "dji_rib",
+  "dji_face_type",
+  "quantity",
+  "uom",
+  "special",
+  "ggpl_description",
+  "status",
+  "confidence",
+  "flags",
+];
+
 const COLUMN_PRESET_FIELDS: Record<string, string[]> = {
   review: ["line_no", "status", "customer_sl_no", "customer_item_code", "ggpl_description", "flags", "quantity", "gasket_type", "size", "rating", "moc", "confidence"],
   commercial: ["line_no", "status", "customer_sl_no", "customer_item_code", "ggpl_description", "quantity", "uom", "gasket_type", "size", "rating", "moc"],
@@ -231,6 +279,10 @@ function columnsForPreset(preset: string, large: boolean): TableColumn[] {
   if (large && preset === "review") return COMPACT_TABLE_COLUMNS;
   const fields = COLUMN_PRESET_FIELDS[preset] ?? COLUMN_PRESET_FIELDS.review;
   return fields.map((field) => TABLE_COLUMNS.find((column) => column.field === field)).filter(Boolean) as TableColumn[];
+}
+
+function streamlitColumns(): TableColumn[] {
+  return STREAMLIT_TABLE_FIELDS.map((field) => TABLE_COLUMNS.find((column) => column.field === field)).filter(Boolean) as TableColumn[];
 }
 
 const BULK_DEFAULTS = {
@@ -263,6 +315,7 @@ const GRID_TEXTAREA_CLASS =
 const GRID_READONLY_CLASS = "bg-muted/30 text-muted-foreground";
 const FILTER_STORAGE_KEY = "gq_quote_saved_filters";
 const RECENT_QUOTES_KEY = "gq_recent_quotes";
+const DEFAULT_TABLE_MODE = "spreadsheet" as const;
 
 function blankItem(lineNo: number): GasketItem {
   return {
@@ -412,17 +465,24 @@ function storageAvailable() {
   return typeof window !== "undefined" && Boolean(window.localStorage);
 }
 
+type SavedQuoteFilters = {
+  queueFilter?: string;
+  statusFilter?: string;
+  columnPreset?: string;
+  tableMode?: "guided" | "spreadsheet";
+};
+
 function savedFiltersFor(section: QuoteSection) {
   if (!storageAvailable()) return null;
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(FILTER_STORAGE_KEY) || "{}") as Record<string, { queueFilter?: string; statusFilter?: string; columnPreset?: string }>;
+    const parsed = JSON.parse(window.localStorage.getItem(FILTER_STORAGE_KEY) || "{}") as Record<string, SavedQuoteFilters>;
     return parsed[`${section}:${getCurrentAppUser().role}`] ?? parsed[section] ?? null;
   } catch {
     return null;
   }
 }
 
-function persistSavedFilters(section: QuoteSection, filters: { queueFilter: string; statusFilter: string; columnPreset: string }) {
+function persistSavedFilters(section: QuoteSection, filters: { queueFilter: string; statusFilter: string; columnPreset: string; tableMode: "guided" | "spreadsheet" }) {
   if (!storageAvailable()) return;
   try {
     const parsed = JSON.parse(window.localStorage.getItem(FILTER_STORAGE_KEY) || "{}") as Record<string, unknown>;
@@ -528,6 +588,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [selectedRows, setSelectedRows] = React.useState<Set<number>>(new Set());
   const [statusFilter, setStatusFilter] = React.useState("all");
   const [columnPreset, setColumnPreset] = React.useState("review");
+  const [tableMode, setTableMode] = React.useState<"guided" | "spreadsheet">(DEFAULT_TABLE_MODE);
   const [draftPage, setDraftPage] = React.useState(0);
   const [finalPage, setFinalPage] = React.useState(0);
   const [bulkValues, setBulkValues] = React.useState<Record<string, string>>(BULK_DEFAULTS);
@@ -557,7 +618,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const qd = React.useMemo(() => ({ ...quoteDefaults, ...(quote?.quote_data ?? {}) }), [quote?.quote_data]);
   const items = React.useMemo(() => quote?.items ?? [], [quote?.items]);
   const isLargeDraft = items.length > LARGE_DRAFT_THRESHOLD;
-  const activeTableColumns = columnsForPreset(columnPreset, isLargeDraft);
+  const activeTableColumns = tableMode === "spreadsheet" ? streamlitColumns() : columnsForPreset(columnPreset, isLargeDraft);
   const displayIndices = items
     .map((item, index) => ({ item, index }))
     .filter(({ item }) => {
@@ -572,12 +633,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const safeDraftPage = Math.min(draftPage, pageCount - 1);
   const pagedDisplayIndices = displayIndices.slice(safeDraftPage * DRAFT_PAGE_SIZE, (safeDraftPage + 1) * DRAFT_PAGE_SIZE);
   const filteredItems = pagedDisplayIndices.map((index) => items[index]);
-  const virtualStart = Math.max(0, Math.floor(draftScrollTop / VIRTUAL_ROW_HEIGHT) - VIRTUAL_OVERSCAN);
-  const virtualCount = Math.ceil(VIRTUAL_VIEWPORT_HEIGHT / VIRTUAL_ROW_HEIGHT) + VIRTUAL_OVERSCAN * 2;
+  const activeVirtualRowHeight = tableMode === "spreadsheet" ? 42 : VIRTUAL_ROW_HEIGHT;
+  const virtualStart = Math.max(0, Math.floor(draftScrollTop / activeVirtualRowHeight) - VIRTUAL_OVERSCAN);
+  const virtualCount = Math.ceil(VIRTUAL_VIEWPORT_HEIGHT / activeVirtualRowHeight) + VIRTUAL_OVERSCAN * 2;
   const virtualEnd = Math.min(pagedDisplayIndices.length, virtualStart + virtualCount);
   const virtualDisplayIndices = pagedDisplayIndices.slice(virtualStart, virtualEnd);
-  const virtualPaddingTop = virtualStart * VIRTUAL_ROW_HEIGHT;
-  const virtualPaddingBottom = Math.max(0, (pagedDisplayIndices.length - virtualEnd) * VIRTUAL_ROW_HEIGHT);
+  const virtualPaddingTop = virtualStart * activeVirtualRowHeight;
+  const virtualPaddingBottom = Math.max(0, (pagedDisplayIndices.length - virtualEnd) * activeVirtualRowHeight);
   const pageStart = displayIndices.length ? safeDraftPage * DRAFT_PAGE_SIZE + 1 : 0;
   const pageEnd = Math.min(displayIndices.length, (safeDraftPage + 1) * DRAFT_PAGE_SIZE);
   const finalPageCount = Math.max(1, Math.ceil(items.length / FINAL_PAGE_SIZE));
@@ -654,13 +716,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     if (saved?.queueFilter) setQueueFilter(saved.queueFilter);
     if (saved?.statusFilter) setStatusFilter(saved.statusFilter);
     if (saved?.columnPreset) setColumnPreset(saved.columnPreset);
+    if (saved?.tableMode === "spreadsheet") setTableMode(saved.tableMode);
     filtersLoaded.current = true;
   }, [currentUser.role, section]);
 
   React.useEffect(() => {
     if (!filtersLoaded.current) return;
-    persistSavedFilters(section, { queueFilter, statusFilter, columnPreset });
-  }, [columnPreset, queueFilter, section, statusFilter]);
+    persistSavedFilters(section, { queueFilter, statusFilter, columnPreset, tableMode });
+  }, [columnPreset, queueFilter, section, statusFilter, tableMode]);
 
   React.useEffect(() => {
     const hasProgress = Boolean(quote && (items.length > 0 || isFinalSection));
@@ -710,6 +773,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     setStatusFilter("all");
     setQueueFilter("all");
     setColumnPreset("review");
+    setTableMode(DEFAULT_TABLE_MODE);
     setBulkValues(BULK_DEFAULTS);
     setRfiText("");
     setSaving(false);
@@ -1276,6 +1340,12 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     const rawValue = item[column.field];
     const validation = validateItemField(item, column.field);
     const cellClass = column.field === "confidence" ? confidenceClass(rawValue) : validationClass(validation?.severity);
+    const inputClass = tableMode === "spreadsheet"
+      ? "h-8 w-full min-w-0 rounded-none border-0 bg-transparent px-2 py-1 text-xs shadow-none focus-visible:ring-1 focus-visible:ring-ring"
+      : GRID_INPUT_CLASS;
+    const textareaClass = tableMode === "spreadsheet"
+      ? "h-8 w-full min-w-0 resize-none rounded-none border-0 bg-transparent px-2 py-1 text-xs shadow-none outline-none focus:ring-1 focus:ring-ring"
+      : GRID_TEXTAREA_CLASS;
     if (column.field === "status") {
       return (
         <div className="flex h-7 items-center gap-1.5 px-2 text-xs">
@@ -1287,7 +1357,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     if (column.field === "flags") {
       return (
         <textarea
-          className={`${GRID_TEXTAREA_CLASS} ${GRID_READONLY_CLASS} ${cellClass}`}
+          className={`${textareaClass} ${GRID_READONLY_CLASS} ${cellClass}`}
           value={notesFor(item)}
           readOnly
           title={validation?.message}
@@ -1295,12 +1365,12 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       );
     }
     if (column.field === "line_no" || column.field === "confidence") {
-      return <Input className={`${GRID_INPUT_CLASS} ${GRID_READONLY_CLASS} ${cellClass}`} value={getString(rawValue)} readOnly title={validation?.message} />;
+      return <Input className={`${inputClass} ${GRID_READONLY_CLASS} ${cellClass}`} value={getString(rawValue)} readOnly title={validation?.message} />;
     }
     if (column.field === "ggpl_description" || column.kind === "readonly") {
       return (
         <textarea
-          className={`${GRID_TEXTAREA_CLASS} ${GRID_READONLY_CLASS} ${cellClass}`}
+          className={`${textareaClass} ${GRID_READONLY_CLASS} ${cellClass}`}
           value={getString(rawValue)}
           readOnly
           title={validation?.message}
@@ -1310,7 +1380,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     if (column.kind === "textarea") {
       return (
         <textarea
-          className={`${GRID_TEXTAREA_CLASS} ${cellClass}`}
+          className={`${textareaClass} ${cellClass}`}
           value={getString(rawValue)}
           onChange={(event) => updateItem(index, column.field, event.target.value)}
           title={validation?.message}
@@ -1320,7 +1390,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     if (column.kind === "select") {
       return (
         <Select value={getString(rawValue) || BLANK_SELECT_VALUE} onValueChange={(value) => updateItem(index, column.field, value === BLANK_SELECT_VALUE ? "" : value)}>
-          <SelectTrigger className={`${GRID_INPUT_CLASS} ${cellClass} min-w-28 justify-between`} title={validation?.message}>
+          <SelectTrigger className={`${inputClass} ${cellClass} min-w-28 justify-between`} title={validation?.message}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -1348,7 +1418,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     }
     return (
       <Input
-        className={`${GRID_INPUT_CLASS} ${cellClass}`}
+        className={`${inputClass} ${cellClass}`}
         type={column.kind === "number" ? "number" : "text"}
         value={getString(rawValue)}
         onChange={(event) => updateItem(index, column.field, event.target.value)}
@@ -1792,17 +1862,21 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
 
       {isDraftSection && (
         <>
-          <TechnicalIssuesPanel
-            items={items}
-            onSelectRow={(index) => {
-              setSelectedRows(new Set([index]));
-              setStatusFilter("all");
-            }}
-            onBuildClarification={buildClarificationEmail}
-          />
-          <QuoteTimeline quote={quote} />
-          <Card>
-            <CardHeader className="sticky top-16 z-20 border-b bg-card/95 backdrop-blur">
+          {tableMode === "guided" && (
+            <>
+              <TechnicalIssuesPanel
+                items={items}
+                onSelectRow={(index) => {
+                  setSelectedRows(new Set([index]));
+                  setStatusFilter("all");
+                }}
+                onBuildClarification={buildClarificationEmail}
+              />
+              <QuoteTimeline quote={quote} />
+            </>
+          )}
+          <Card className={tableMode === "spreadsheet" ? "rounded-none shadow-none" : ""}>
+            <CardHeader className={`sticky top-16 z-20 border-b bg-card/95 backdrop-blur ${tableMode === "spreadsheet" ? "px-3 py-3" : ""}`}>
               <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
                 <div className="space-y-1">
                   <CardTitle>Enquiry items</CardTitle>
@@ -1811,23 +1885,37 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     <span>{readyCount} ready</span>
                     <span>{actionCount} need review</span>
                     {selectedIndices.length > 0 && <Badge variant="outline">{selectedIndices.length} selected</Badge>}
+                    {tableMode === "spreadsheet" && <Badge variant="muted">Streamlit-style editor</Badge>}
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Select value={columnPreset} onValueChange={setColumnPreset}>
+                  <Select value={tableMode} onValueChange={(value) => setTableMode(value as "guided" | "spreadsheet")}>
                     <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="review">Review columns</SelectItem>
-                      <SelectItem value="commercial">Commercial</SelectItem>
-                      <SelectItem value="soft_cut">Soft cut</SelectItem>
-                      <SelectItem value="spiral_wound">Spiral wound</SelectItem>
-                      <SelectItem value="rtj">RTJ</SelectItem>
-                      <SelectItem value="kammprofile">Kammprofile</SelectItem>
-                      <SelectItem value="dji">DJI</SelectItem>
-                      <SelectItem value="isk">ISK</SelectItem>
-                      <SelectItem value="full_technical">Full technical</SelectItem>
+                      <SelectItem value="spreadsheet">Classic full table</SelectItem>
+                      <SelectItem value="guided">Guided review</SelectItem>
                     </SelectContent>
                   </Select>
+                  {tableMode === "guided" ? (
+                    <Select value={columnPreset} onValueChange={setColumnPreset}>
+                      <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="review">Review columns</SelectItem>
+                        <SelectItem value="commercial">Commercial</SelectItem>
+                        <SelectItem value="soft_cut">Soft cut</SelectItem>
+                        <SelectItem value="spiral_wound">Spiral wound</SelectItem>
+                        <SelectItem value="rtj">RTJ</SelectItem>
+                        <SelectItem value="kammprofile">Kammprofile</SelectItem>
+                        <SelectItem value="dji">DJI</SelectItem>
+                        <SelectItem value="isk">ISK</SelectItem>
+                        <SelectItem value="full_technical">Full technical</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <Badge variant="outline" className="h-10 rounded-none px-3 text-xs">
+                      {activeTableColumns.length} columns
+                    </Badge>
+                  )}
                   <Select value={statusFilter} onValueChange={setStatusFilter}>
                     <SelectTrigger className="w-48"><SelectValue /></SelectTrigger>
                     <SelectContent>
@@ -1861,22 +1949,22 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 </div>
               </div>
             </CardHeader>
-            <CardContent className="space-y-4 pt-5">
-              <div className="flex flex-wrap gap-2">
+            <CardContent className={tableMode === "spreadsheet" ? "space-y-3 p-3" : "space-y-4 pt-5"}>
+              <div className={`flex flex-wrap gap-2 ${tableMode === "spreadsheet" ? "rounded-none border bg-muted/20 p-2" : ""}`}>
                 <Button variant="secondary" onClick={() => recomputeRows(selectedIndices.length ? selectedIndices : displayIndices)}>
                   <RefreshCw className="h-4 w-4" />
-                  Update {selectedIndices.length ? "selected" : "visible"}
+                  {tableMode === "spreadsheet" ? "Update Descriptions" : `Update ${selectedIndices.length ? "selected" : "visible"}`}
                 </Button>
                 <Button variant="secondary" onClick={() => reprocessRows()}>
                   {startingExtraction ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-                  Smart Parse {selectedIndices.length ? "selected" : "visible"}
+                  {tableMode === "spreadsheet" ? "Reprocess Text" : `Smart Parse ${selectedIndices.length ? "selected" : "visible"}`}
                 </Button>
                 <Button variant="destructive" onClick={deleteSelectedRows} disabled={!selectedIndices.length}>
                   <Trash2 className="h-4 w-4" />
-                  Delete {selectedIndices.length ? `(${selectedIndices.length})` : ""}
+                  {tableMode === "spreadsheet" ? `Delete (${selectedIndices.length || "none selected"})` : `Delete ${selectedIndices.length ? `(${selectedIndices.length})` : ""}`}
                 </Button>
                 <Button variant="secondary" onClick={toggleRegretSelected} disabled={!selectedIndices.length}>
-                  Toggle regret
+                  {tableMode === "spreadsheet" ? `Regret (${selectedIndices.length || "none selected"})` : "Toggle regret"}
                 </Button>
                 {undoItems && (
                   <Button variant="secondary" onClick={restoreUndoItems}>
@@ -1886,7 +1974,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 )}
               </div>
 
-              <details className="rounded-md border p-3">
+              <details className={tableMode === "spreadsheet" ? "border p-2" : "rounded-md border p-3"}>
                 <summary className="cursor-pointer text-sm font-medium">
                   Bulk Edit - targeting {selectedIndices.length ? `${selectedIndices.length} selected row(s)` : `all ${displayIndices.length} visible rows`}
                 </summary>
@@ -1946,10 +2034,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 </div>
               </details>
 
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/30 px-3 py-2 text-sm">
+              <div className={`flex flex-wrap items-center justify-between gap-3 border bg-muted/30 px-3 py-2 text-sm ${tableMode === "spreadsheet" ? "rounded-none" : "rounded-md"}`}>
                 <div className="text-muted-foreground">
                   Showing {pageStart}-{pageEnd} of {displayIndices.length} visible row(s).
-                  {isLargeDraft ? " Compact columns are shown for large enquiries; select one row to edit all fields below." : " Large enquiries are paged to keep the browser responsive."}
+                  {tableMode === "spreadsheet"
+                    ? " Spreadsheet mode keeps the old Streamlit-style full-column order while preserving validation, filters, undo, and bulk actions."
+                    : isLargeDraft
+                      ? " Compact columns are shown for large enquiries; select one row to edit all fields below."
+                      : " Large enquiries are paged to keep the browser responsive."}
                 </div>
                 <div className="flex items-center gap-2">
                   <Button
@@ -1974,16 +2066,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
 
               <div
                 ref={draftGridRef}
-                className="max-h-[620px] overflow-auto rounded-md border"
+                className={`max-h-[620px] overflow-auto border ${tableMode === "spreadsheet" ? "rounded-none bg-background" : "rounded-md"}`}
                 onScroll={(event) => setDraftScrollTop(event.currentTarget.scrollTop)}
               >
-                <Table className="w-max min-w-full border-collapse text-xs">
-                  <TableHeader className="sticky top-0 z-30 bg-card">
+                <Table className={`w-max min-w-full border-collapse text-xs ${tableMode === "spreadsheet" ? "[&_td]:border-r [&_td]:border-b [&_th]:border-r [&_th]:border-b" : ""}`}>
+                  <TableHeader className={tableMode === "spreadsheet" ? "sticky top-0 z-30 bg-muted" : "sticky top-0 z-30 bg-card"}>
                     <TableRow className="hover:bg-transparent">
-                      <TableHead className="sticky left-0 z-40 h-8 w-10 border-r bg-card px-2 text-center">Sel</TableHead>
-                      <TableHead className="sticky left-10 z-40 h-8 w-20 border-r bg-card px-2 text-center">Tools</TableHead>
+                      <TableHead className={`sticky left-0 z-40 h-8 w-10 border-r px-2 text-center ${tableMode === "spreadsheet" ? "bg-muted" : "bg-card"}`}>
+                        {tableMode === "spreadsheet" ? "☑" : "Sel"}
+                      </TableHead>
+                      {tableMode !== "spreadsheet" && <TableHead className="sticky left-10 z-40 h-8 w-20 border-r bg-card px-2 text-center">Tools</TableHead>}
                       {activeTableColumns.map((column) => (
-                        <TableHead key={column.label} className={`${column.width ?? "min-w-36"} h-8 whitespace-nowrap border-r bg-card px-2 text-xs font-semibold`}>
+                        <TableHead key={column.label} className={`${column.width ?? "min-w-36"} h-8 whitespace-nowrap border-r px-2 text-xs font-semibold ${tableMode === "spreadsheet" ? "bg-muted" : "bg-card"}`}>
                           {column.label}
                         </TableHead>
                       ))}
@@ -1992,7 +2086,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <TableBody>
                     {virtualPaddingTop > 0 && (
                       <TableRow className="hover:bg-transparent">
-                        <TableCell colSpan={activeTableColumns.length + 2} style={{ height: virtualPaddingTop }} className="border-0 p-0" />
+                        <TableCell colSpan={activeTableColumns.length + (tableMode === "spreadsheet" ? 1 : 2)} style={{ height: virtualPaddingTop }} className="border-0 p-0" />
                       </TableRow>
                     )}
                     {virtualDisplayIndices.map((index) => {
@@ -2002,14 +2096,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       return (
                         <TableRow
                           key={`${index}-${item.line_no ?? ""}`}
-                          style={{ height: VIRTUAL_ROW_HEIGHT }}
-                          className={`${statusClass(item.status)} ${selected ? "outline outline-1 outline-primary" : ""}`}
+                          style={{ height: activeVirtualRowHeight }}
+                          className={`${tableMode === "spreadsheet" ? "hover:bg-muted/30" : statusClass(item.status)} ${selected ? "outline outline-1 outline-primary" : ""}`}
                           onClick={() => {
                             if (selectedRows.size === 1 && selected) return;
                             setSelectedRows(new Set([index]));
                           }}
                         >
-                          <TableCell className="sticky left-0 z-20 border-r bg-card p-0 text-center align-middle">
+                          <TableCell className={`sticky left-0 z-20 border-r p-0 text-center align-middle ${tableMode === "spreadsheet" ? "bg-background" : "bg-card"}`}>
                             <input
                               type="checkbox"
                               checked={selected}
@@ -2023,34 +2117,36 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                               aria-label={`Select row ${index + 1}`}
                             />
                           </TableCell>
-                          <TableCell className="sticky left-10 z-20 border-r bg-card p-0 align-middle">
-                            <div className="flex h-full items-center justify-center gap-1 px-1">
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-7 w-7"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  recomputeRows([index]);
-                                }}
-                                title="Update row"
-                              >
-                                <RefreshCw className="h-3.5 w-3.5" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-7 w-7"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  reprocessRows([index]);
-                                }}
-                                title="Smart Parse row"
-                              >
-                                <RotateCcw className="h-3.5 w-3.5" />
-                              </Button>
-                            </div>
-                          </TableCell>
+                          {tableMode !== "spreadsheet" && (
+                            <TableCell className="sticky left-10 z-20 border-r bg-card p-0 align-middle">
+                              <div className="flex h-full items-center justify-center gap-1 px-1">
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    recomputeRows([index]);
+                                  }}
+                                  title="Update row"
+                                >
+                                  <RefreshCw className="h-3.5 w-3.5" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    reprocessRows([index]);
+                                  }}
+                                  title="Smart Parse row"
+                                >
+                                  <RotateCcw className="h-3.5 w-3.5" />
+                                </Button>
+                              </div>
+                            </TableCell>
+                          )}
                           {activeTableColumns.map((column) => (
                             <TableCell key={column.label} className="border-r p-0 align-top">
                               {renderGridCell(index, item, column)}
@@ -2061,20 +2157,37 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     })}
                     {virtualPaddingBottom > 0 && (
                       <TableRow className="hover:bg-transparent">
-                        <TableCell colSpan={activeTableColumns.length + 2} style={{ height: virtualPaddingBottom }} className="border-0 p-0" />
+                        <TableCell colSpan={activeTableColumns.length + (tableMode === "spreadsheet" ? 1 : 2)} style={{ height: virtualPaddingBottom }} className="border-0 p-0" />
                       </TableRow>
                     )}
                     {!filteredItems.length && (
                       <TableRow>
-                        <TableCell colSpan={activeTableColumns.length + 2} className="py-8 text-center text-sm text-muted-foreground">No items match this filter.</TableCell>
+                        <TableCell colSpan={activeTableColumns.length + (tableMode === "spreadsheet" ? 1 : 2)} className="py-8 text-center text-sm text-muted-foreground">No items match this filter.</TableCell>
                       </TableRow>
                     )}
                   </TableBody>
                 </Table>
               </div>
 
+              {tableMode === "spreadsheet" && (
+                <details className="border p-2">
+                  <summary className="cursor-pointer text-sm font-medium">Advanced review panels</summary>
+                  <div className="mt-3 space-y-3">
+                    <TechnicalIssuesPanel
+                      items={items}
+                      onSelectRow={(index) => {
+                        setSelectedRows(new Set([index]));
+                        setStatusFilter("all");
+                      }}
+                      onBuildClarification={buildClarificationEmail}
+                    />
+                    <QuoteTimeline quote={quote} />
+                  </div>
+                </details>
+              )}
+
               {selectedIndices.length === 1 && items[selectedIndices[0]] && (
-                <div className="grid gap-3 rounded-md border bg-muted/20 p-3 lg:grid-cols-4">
+                <div className={`grid gap-3 border bg-muted/20 p-3 lg:grid-cols-4 ${tableMode === "spreadsheet" ? "rounded-none" : "rounded-md"}`}>
                   <Field
                     label="Customer description"
                     value={getString(items[selectedIndices[0]].raw_description)}
