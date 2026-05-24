@@ -32,6 +32,7 @@ export type GasketItem = Record<string, unknown> & {
   rtj_hardness_bhn?: number | null;
   ggpl_description?: string;
   status?: string | null;
+  status_source?: string | null;
   flags?: string[];
   regret?: boolean;
 };

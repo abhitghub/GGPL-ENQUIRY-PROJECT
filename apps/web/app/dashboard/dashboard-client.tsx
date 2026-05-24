@@ -5,6 +5,7 @@ import { AlertTriangle, CalendarClock, ClipboardList, FileText, History, Refresh
 import { toast } from "sonner";
 
 import { DashboardMetrics, Quote, getDashboardMetrics, listQuotes } from "@/lib/api";
+import { canEditQuotes, getCurrentAppUser, USERS_CHANGED_EVENT } from "@/lib/auth/users";
 import { formatCurrencyValue, quoteAgeDays, quoteDueState, quoteEstimatedValue, quoteNextAction } from "@/components/quotes/queue-utils";
 import { stageLabel } from "@/components/quotes/stage-utils";
 import { EmptyState } from "@/components/app-shell/empty-state";
@@ -35,6 +36,7 @@ function dueLabel(quote: Quote) {
 export function DashboardClient() {
   const [metrics, setMetrics] = React.useState<DashboardMetrics | null>(null);
   const [quotes, setQuotes] = React.useState<Quote[]>([]);
+  const [currentUser, setCurrentUser] = React.useState(() => getCurrentAppUser());
 
   async function refresh() {
     try {
@@ -48,6 +50,16 @@ export function DashboardClient() {
 
   React.useEffect(() => {
     refresh();
+  }, []);
+
+  React.useEffect(() => {
+    const refreshUser = () => setCurrentUser(getCurrentAppUser());
+    window.addEventListener(USERS_CHANGED_EVENT, refreshUser);
+    window.addEventListener("storage", refreshUser);
+    return () => {
+      window.removeEventListener(USERS_CHANGED_EVENT, refreshUser);
+      window.removeEventListener("storage", refreshUser);
+    };
   }, []);
 
   const openQuotes = quotes.filter((quote) => !["sent", "po"].includes(quote.stage));
@@ -140,7 +152,7 @@ export function DashboardClient() {
             icon={ClipboardList}
             title="No active quotations"
             body="Create a quote workspace when the first enquiry is ready for intake."
-            action={{ label: "Open quotes", href: "/quotes" }}
+            action={canEditQuotes(currentUser.role) ? { label: "New enquiry", href: "/quotes?new=1" } : undefined}
           />
         )}
 

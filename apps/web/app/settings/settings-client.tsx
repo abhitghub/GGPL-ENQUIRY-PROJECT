@@ -11,12 +11,13 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { createAppUser, deleteAppUser, listAppUsers, patchAppUser } from "@/lib/api";
-import { AppRole, AppUser, canManageUsers, getAppUsers, getCurrentAppUser, roleLabels, saveAppUsers, setCurrentAppUser, USERS_CHANGED_EVENT } from "@/lib/auth/users";
+import { AppRole, AppUser, canManageUsers, getAppUsers, getCurrentAppUser, roleLabels, saveAppUsers, USERS_CHANGED_EVENT } from "@/lib/auth/users";
 
 const blankUser: AppUser = {
   id: "",
   name: "",
   email: "",
+  password: "",
   role: "sales",
   active: true,
 };
@@ -64,18 +65,24 @@ export function SettingsClient() {
   }
 
   async function addUser() {
-    const email = draftUser.email.trim().toLowerCase();
-    if (!email) {
-      toast.error("Enter an email for the user");
+    const username = draftUser.id.trim().toLowerCase();
+    const password = String(draftUser.password || "").trim();
+    if (!username) {
+      toast.error("Enter a username for the user");
       return;
     }
-    if (users.some((user) => user.email.toLowerCase() === email || user.id === email)) {
+    if (!password) {
+      toast.error("Enter a password for the user");
+      return;
+    }
+    if (users.some((user) => user.id.toLowerCase() === username)) {
       toast.error("User already exists");
       return;
     }
     try {
-      const created = await createAppUser({ ...draftUser, id: email, email, name: draftUser.name.trim() || email.split("@")[0], active: true });
-      persistUsers([...users, created]);
+      const email = draftUser.email.trim().toLowerCase();
+      const created = await createAppUser({ ...draftUser, id: username, email, name: draftUser.name.trim() || username, active: true });
+      persistUsers([...users, { ...created, password }]);
       setDraftUser(blankUser);
       toast.success("User added");
     } catch (error) {
@@ -109,27 +116,14 @@ export function SettingsClient() {
           <div className="flex items-center justify-between rounded-md border px-3 py-2">
             <div>
               <div className="text-sm font-medium">Authentication</div>
-              <div className="text-sm text-muted-foreground">Supabase session or local dev session</div>
+              <div className="text-sm text-muted-foreground">Username and password sign in</div>
             </div>
             <Badge variant="secondary">Active</Badge>
           </div>
-          <div className="space-y-2">
-            <Label>Current app user</Label>
-            <Select value={currentUser.id} onValueChange={(value) => { setCurrentAppUser(value); setCurrentUserState(getCurrentAppUser()); }}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {users.filter((user) => user.active).map((user) => (
-                  <SelectItem key={user.id} value={user.id}>
-                    {user.name} - {roleLabels[user.role]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <div className="text-xs text-muted-foreground">
-              The selected user controls role-based approval actions in this workspace.
-            </div>
+          <div className="rounded-md border px-3 py-2">
+            <Label>Signed in user</Label>
+            <div className="mt-1 text-sm font-medium">{currentUser.id}</div>
+            <div className="text-xs text-muted-foreground">{currentUser.name} - {roleLabels[currentUser.role]}</div>
           </div>
         </CardContent>
       </Card>
@@ -168,14 +162,18 @@ export function SettingsClient() {
               <summary className="cursor-pointer text-sm font-medium">
                 <span className="inline-flex items-center gap-2"><Plus className="h-4 w-4" />Add user</span>
               </summary>
-              <div className="mt-3 grid gap-3 md:grid-cols-[1fr_1fr_180px_auto] md:items-end">
+              <div className="mt-3 grid gap-3 md:grid-cols-[1fr_1fr_1fr_180px_auto] md:items-end">
+                <div className="space-y-1.5">
+                  <Label>Username</Label>
+                  <Input value={draftUser.id} onChange={(event) => setDraftUser((user) => ({ ...user, id: event.target.value }))} />
+                </div>
                 <div className="space-y-1.5">
                   <Label>Name</Label>
                   <Input value={draftUser.name} onChange={(event) => setDraftUser((user) => ({ ...user, name: event.target.value }))} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Email</Label>
-                  <Input type="email" value={draftUser.email} onChange={(event) => setDraftUser((user) => ({ ...user, email: event.target.value }))} />
+                  <Label>Password</Label>
+                  <Input type="password" value={draftUser.password || ""} onChange={(event) => setDraftUser((user) => ({ ...user, password: event.target.value }))} />
                 </div>
                 <div className="space-y-1.5">
                   <Label>Role</Label>
@@ -199,7 +197,8 @@ export function SettingsClient() {
               <thead className="bg-muted/50 text-left">
                 <tr>
                   <th className="px-3 py-2 font-medium">User</th>
-                  <th className="px-3 py-2 font-medium">Email</th>
+                  <th className="px-3 py-2 font-medium">Username</th>
+                  <th className="px-3 py-2 font-medium">Password</th>
                   <th className="px-3 py-2 font-medium">Role</th>
                   <th className="px-3 py-2 font-medium">Active</th>
                   <th className="px-3 py-2 text-right font-medium">Actions</th>
@@ -215,7 +214,23 @@ export function SettingsClient() {
                         user.name
                       )}
                     </td>
-                    <td className="px-3 py-2 text-muted-foreground">{user.email || user.id}</td>
+                    <td className="px-3 py-2 font-mono text-xs">{user.id}</td>
+                    <td className="px-3 py-2">
+                      {canManage ? (
+                        <Input
+                          type="password"
+                          placeholder="Set new password"
+                          onBlur={(event) => {
+                            const password = event.target.value.trim();
+                            if (!password) return;
+                            updateUser(user.id, { password });
+                            event.target.value = "";
+                          }}
+                        />
+                      ) : (
+                        <span className="text-muted-foreground">Managed by admin</span>
+                      )}
+                    </td>
                     <td className="px-3 py-2">
                       {canManage ? (
                         <Select value={user.role} onValueChange={(value) => updateUser(user.id, { role: value as AppRole })}>

@@ -6,7 +6,18 @@ from typing import Literal
 from pydantic import BaseModel
 
 
-UserRole = Literal["admin", "management", "approver", "sales", "estimation", "technical", "planning", "purchase", "viewer"]
+UserRole = Literal[
+    "admin",
+    "management",
+    "approver",
+    "sales",
+    "estimation",
+    "technical",
+    "planning",
+    "material_planner",
+    "purchase",
+    "viewer",
+]
 
 
 class AppUserBase(BaseModel):

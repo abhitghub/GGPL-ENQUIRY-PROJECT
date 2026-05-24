@@ -21,6 +21,8 @@ import {
   Loader2,
   Mail,
   Layers3,
+  Maximize2,
+  Minimize2,
   PanelRight,
   Plus,
   RefreshCw,
@@ -34,6 +36,7 @@ import {
   Trash2,
   Undo2,
   Upload,
+  Users,
   WandSparkles,
   X,
 } from "lucide-react";
@@ -58,11 +61,9 @@ import {
   toNumber,
 } from "@/lib/api";
 import { addBackgroundJob } from "@/lib/background-jobs";
-import { canApproveQuotes, getAppUsers, getCurrentAppUser, roleLabels, USERS_CHANGED_EVENT } from "@/lib/auth/users";
+import { canApproveQuotes, canEditQuotes, getAppUsers, getCurrentAppUser, roleLabels, USERS_CHANGED_EVENT } from "@/lib/auth/users";
 import {
   buildMaterialBreakdown,
-  buildMaterialInputs,
-  buildMaterialPlan,
   DEFAULT_MATERIAL_PLANNING_INPUTS,
   DEFAULT_NESTING_EFFICIENCY,
   DEFAULT_SHEET_LENGTH_MM,
@@ -78,7 +79,7 @@ import { itemMatchesSmartFilter, quoteDueState, quoteHasClarification, quoteIsHi
 import { QuoteSummaryRow } from "@/components/quotes/quote-summary-row";
 import { appendActivity } from "@/components/quotes/activity-utils";
 import { QuoteTimeline } from "@/components/quotes/quote-timeline";
-import { DRAFT_STAGES, FINAL_STAGES, MATERIAL_STAGES, PO_STAGES, QuoteSection, revisionLabel, stageLabel } from "@/components/quotes/stage-utils";
+import { DRAFT_STAGES, ENQUIRY_STAGES, EnquiryStageId, FINAL_STAGES, PO_STAGES, QuoteSection, enquiryStageFromQuote, enquiryStageLabel, revisionLabel, stageLabel } from "@/components/quotes/stage-utils";
 import { issueBadgesForItem, TechnicalIssuesPanel } from "@/components/quotes/technical-issues-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -162,6 +163,23 @@ const quoteDefaults: Record<string, unknown> = {
   min_order_value: "Minimum Order Value is INR 10,000,No order can be processed below the same. If processed, INR 3,500 shall be paid extra on document charges.",
   technical_notes: "",
 };
+
+const SALES_DETAIL_QUOTE_DATA_FIELDS = new Set([
+  "buyer_name_address",
+  "customer_enq_no",
+  "attention",
+  "designation",
+  "contact_no",
+  "email",
+  "sales_notes",
+  "technical_notes",
+]);
+
+function pickSalesDetailQuoteData(data: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(data).filter(([key]) => SALES_DETAIL_QUOTE_DATA_FIELDS.has(key)),
+  );
+}
 
 type QuotationStageId =
   | "draft_preparation"
@@ -283,7 +301,7 @@ const COMPACT_TABLE_COLUMNS: TableColumn[] = [
 ];
 
 const STREAMLIT_TABLE_FIELDS = [
-  "regret",
+  "status",
   "line_no",
   "customer_sl_no",
   "customer_item_code",
@@ -325,7 +343,7 @@ const STREAMLIT_TABLE_FIELDS = [
   "quantity",
   "uom",
   "special",
-  "status",
+  "regret",
   "confidence",
   "flags",
 ];
@@ -360,6 +378,17 @@ function sameNumberSet(left: Set<number>, right: Set<number>) {
   return true;
 }
 
+function spreadsheetColumnName(index: number) {
+  let value = index + 1;
+  let name = "";
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    name = String.fromCharCode(65 + remainder) + name;
+    value = Math.floor((value - 1) / 26);
+  }
+  return name;
+}
+
 const BULK_DEFAULTS = {
   gasket_type: "(no change)",
   moc: "",
@@ -377,6 +406,7 @@ const BULK_DEFAULTS = {
 };
 const BLANK_SELECT_VALUE = "__blank__";
 const CUSTOM_SALES_REP_VALUE = "__custom_sales_rep__";
+const WITH_WHOM_OPTIONS = ["Ashwin sir", "GTQ", "Estimation", "Arun Sir"];
 const LARGE_DRAFT_THRESHOLD = 250;
 const DRAFT_PAGE_SIZE = 500;
 const FINAL_PAGE_SIZE = 50;
@@ -389,9 +419,139 @@ const GRID_INPUT_CLASS =
 const GRID_TEXTAREA_CLASS =
   "h-14 w-full min-w-0 resize-none rounded-none border-0 bg-transparent px-2 py-1 text-xs shadow-none outline-none focus:ring-1 focus:ring-ring";
 const GRID_READONLY_CLASS = "bg-muted/30 text-muted-foreground";
+const SHEET_TABLE_CLASS = "w-max min-w-full border-collapse text-xs [&_td]:border-r [&_td]:border-b [&_th]:border-r [&_th]:border-b";
+const SHEET_HEADER_CLASS = "sticky top-0 z-20 bg-[#f3f3f3] dark:bg-muted";
+const SHEET_HEAD_CLASS = "h-8 whitespace-nowrap bg-[#f3f3f3] px-2 py-1 text-xs font-semibold text-foreground dark:bg-muted";
+const SHEET_ROW_HEADER_CLASS = "sticky left-0 z-10 h-8 w-10 bg-[#f3f3f3] px-2 py-1 text-center text-xs text-muted-foreground dark:bg-muted";
+const SHEET_CELL_CLASS = "h-8 whitespace-nowrap px-2 py-1 text-xs";
+const SHEET_INPUT_CLASS = "h-8 rounded-none border-0 bg-transparent px-2 py-1 text-xs shadow-none focus-visible:ring-1 focus-visible:ring-emerald-600";
+const SHEET_SELECT_CLASS = "h-8 rounded-none border-0 bg-transparent px-2 py-1 text-xs shadow-none focus:ring-1 focus:ring-emerald-600";
+const SHEET_TEXTAREA_CLASS = "min-h-8 w-full min-w-80 resize-none rounded-none border-0 bg-transparent px-2 py-1 text-xs shadow-none outline-none focus:ring-1 focus:ring-emerald-600";
+const STATUS_OPTIONS = ["ready", "check", "missing", "regret"] as const;
+const MATERIAL_PHASE2_UOMS = ["SHEETS", "KG", "COIL", "RINGS", "NOS"] as const;
 const FILTER_STORAGE_KEY = "gq_quote_saved_filters";
 const RECENT_QUOTES_KEY = "gq_recent_quotes";
 const DEFAULT_TABLE_MODE = "spreadsheet" as const;
+
+type MaterialPhase2Row = MaterialPlan["rows"][number];
+
+function materialPhase2RequiredQty(row: MaterialPhase2Row) {
+  return row.reqd_qty_sheets ?? row.reqd_qty_kg ?? 0;
+}
+
+function summarizeMaterialPhase2Rows(rows: MaterialPhase2Row[]) {
+  return rows.reduce<MaterialPlan["grouped_summary"]>((acc, row) => {
+    const group = `${row.type || "Material TBD"} / ${row.purchase_uom} / ${row.thickness_mm ?? "-"} mm / ${row.preferred_vendor || "Vendor TBD"}`;
+    const currentGroup = acc.find((item) => item.group === group);
+    if (currentGroup) {
+      currentGroup.rows += 1;
+      currentGroup.shortage_qty += row.shortage_qty;
+      currentGroup.suggested_purchase_qty += row.suggested_purchase_qty;
+      currentGroup.estimated_material_cost += row.estimated_material_cost;
+    } else {
+      acc.push({
+        group,
+        rows: 1,
+        shortage_qty: row.shortage_qty,
+        suggested_purchase_qty: row.suggested_purchase_qty,
+        estimated_material_cost: row.estimated_material_cost,
+      });
+    }
+    return acc;
+  }, []);
+}
+
+function materialPlanWithRows(plan: MaterialPlan, rows: MaterialPhase2Row[]): MaterialPlan {
+  const normalizedRows = rows.map((row, index) => {
+    const required = materialPhase2RequiredQty(row);
+    const available = toNumber(row.available_qty, 0);
+    const reserved = toNumber(row.reserved_qty, 0);
+    const shortage = Math.max(0, required + reserved - available);
+    return {
+      ...row,
+      sl_no: index + 1,
+      available_qty: available,
+      reserved_qty: reserved,
+      shortage_qty: shortage,
+      suggested_purchase_qty: toNumber(row.suggested_purchase_qty, shortage),
+      lead_time_days: toNumber(row.lead_time_days, 0),
+      estimated_material_cost: toNumber(row.estimated_material_cost, 0),
+      production_priority: row.production_priority ?? "normal",
+    };
+  });
+  return {
+    ...plan,
+    rows: normalizedRows,
+    grouped_summary: summarizeMaterialPhase2Rows(normalizedRows),
+    totals: {
+      component_count: normalizedRows.length,
+      sheet_count: normalizedRows.reduce((sum, row) => sum + (row.reqd_qty_sheets || 0), 0),
+      total_weight_kg: normalizedRows.reduce((sum, row) => sum + (row.purchase_uom === "NOS" ? 0 : row.reqd_qty_kg || 0), 0),
+    },
+  };
+}
+
+function blankMaterialPhase2Row(slNo: number): MaterialPhase2Row {
+  return {
+    reviewed: false,
+    sl_no: slNo,
+    type: "",
+    purchase_uom: "KG",
+    width_mm: null,
+    length_mm: null,
+    thickness_mm: null,
+    reqd_qty_sheets: null,
+    reqd_qty_kg: 0,
+    available_qty: 0,
+    reserved_qty: 0,
+    shortage_qty: 0,
+    suggested_purchase_qty: 0,
+    lead_time_days: 0,
+    preferred_vendor: "",
+    estimated_material_cost: 0,
+    production_priority: "normal",
+    notes: "",
+    planner_notes: "",
+    source_count: 0,
+  };
+}
+
+function materialPhase2RowsFromBreakdown(breakdown: MaterialBreakdownRow[]): MaterialPhase2Row[] {
+  return breakdown.map((row, index) => {
+    const material = [row.winding, row.inner_ring, row.outer_ring, row.filler].filter(Boolean).join(" / ");
+    const stockType = [material || row.gasket_type || "Material TBD", row.thickness].filter(Boolean).join(" ");
+    const quantity = toNumber(row.qty, 0);
+    return {
+      ...blankMaterialPhase2Row(index + 1),
+      type: stockType,
+      purchase_uom: "NOS",
+      reqd_qty_kg: quantity,
+      source_count: row.source_rows || 1,
+      notes: [
+        row.size_inch ? `Size ${row.size_inch}` : "",
+        row.pressure_rating,
+        row.series,
+        row.remarks,
+      ].filter(Boolean).join(" / "),
+    };
+  });
+}
+
+function createManualMaterialPlan(rows: MaterialPhase2Row[], config: MaterialPlan["config"]): MaterialPlan {
+  return materialPlanWithRows({
+    config,
+    rows: [],
+    summary: [],
+    grouped_summary: [],
+    assumptions: ["Phase 2 is manually maintained by the material planner."],
+    warnings: [],
+    totals: {
+      component_count: 0,
+      sheet_count: 0,
+      total_weight_kg: 0,
+    },
+  }, rows);
+}
 
 function blankItem(lineNo: number): GasketItem {
   return {
@@ -588,6 +748,15 @@ function setItemValue(item: GasketItem, field: string, value: string): GasketIte
   if (field === "special") {
     return { ...item, special: value, ggpl_description: descriptionWithSpecial(item, value) };
   }
+  if (field === "status") {
+    const nextStatus = value.trim() || "missing";
+    return {
+      ...item,
+      status: nextStatus,
+      regret: nextStatus === "regret",
+      status_source: "manual",
+    };
+  }
   if (["line_no", "quantity", "thickness_mm", "rtj_hardness_bhn", "od_mm", "id_mm", "kamm_core_thk"].includes(field)) {
     return { ...item, [field]: value === "" ? null : Number(value) };
   }
@@ -607,8 +776,8 @@ function columnValue(item: GasketItem, column: TableColumn): string {
 }
 
 function isEditableGridColumn(column: TableColumn): boolean {
-  if (column.field === "line_no" || column.field === "status" || column.field === "confidence" || column.field === "flags" || column.field === "ggpl_description") return false;
-  return column.kind !== "readonly";
+  if (column.field === "line_no" || column.field === "confidence" || column.field === "flags" || column.field === "ggpl_description") return false;
+  return column.field === "status" || column.kind !== "readonly";
 }
 
 function parseClipboardTable(text: string): string[][] {
@@ -757,12 +926,14 @@ function Field({
   onChange,
   textarea,
   type = "text",
+  disabled = false,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   textarea?: boolean;
   type?: string;
+  disabled?: boolean;
 }) {
   return (
     <div className="space-y-1.5">
@@ -772,9 +943,10 @@ function Field({
           className="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
           value={value}
           onChange={(event) => onChange(event.target.value)}
+          disabled={disabled}
         />
       ) : (
-        <Input type={type} value={value} onChange={(event) => onChange(event.target.value)} />
+        <Input type={type} value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled} />
       )}
     </div>
   );
@@ -833,6 +1005,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [statusFilter, setStatusFilter] = React.useState("all");
   const [columnPreset, setColumnPreset] = React.useState("review");
   const [tableMode, setTableMode] = React.useState<"guided" | "spreadsheet">(DEFAULT_TABLE_MODE);
+  const [spreadsheetFullscreen, setSpreadsheetFullscreen] = React.useState(false);
   const [draftPage, setDraftPage] = React.useState(0);
   const [finalPage, setFinalPage] = React.useState(0);
   const [bulkValues, setBulkValues] = React.useState<Record<string, string>>(BULK_DEFAULTS);
@@ -856,6 +1029,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [undoItems, setUndoItems] = React.useState<{ label: string; items: GasketItem[] } | null>(null);
   const [hasUnsavedLocalEdits, setHasUnsavedLocalEdits] = React.useState(false);
   const [activeCell, setActiveCell] = React.useState<GridCell | null>(null);
+  const [editingCell, setEditingCell] = React.useState<GridCell | null>(null);
   const [selectionAnchor, setSelectionAnchor] = React.useState<GridCell | null>(null);
   const [selectionFocus, setSelectionFocus] = React.useState<GridCell | null>(null);
   const [isSelectingCells, setIsSelectingCells] = React.useState(false);
@@ -867,9 +1041,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const isPoSection = section === "po";
   const isQuotationSection = isFinalSection || isPoSection;
   const sectionBasePath = isPoSection ? "/purchase-orders" : isFinalSection ? "/quotes/final" : isMaterialSection ? "/material-planning" : "/quotes";
+  const canEditQuote = canEditQuotes(currentUser.role);
+  const canAddDetails = canEditQuote || currentUser.role === "sales";
+  const canEditLineItems = canEditQuote;
+  const canEditWorkflow = canEditQuote;
+  const canEditQuotation = canEditQuote;
+  const canRunMaterialPhase1 = canEditWorkflow;
+  const canEditMaterialPhase2 = currentUser.role === "material_planner";
   const loadedQuoteId = React.useRef<string | null>(null);
   const draftGridRef = React.useRef<HTMLDivElement | null>(null);
   const filtersLoaded = React.useRef(false);
+  const initialRouteLoaded = React.useRef(false);
+  const newQuoteRequest = React.useRef<string | null>(null);
 
   const qd = React.useMemo(() => ({ ...quoteDefaults, ...(quote?.quote_data ?? {}) }), [quote?.quote_data]);
   const items = React.useMemo(() => quote?.items ?? [], [quote?.items]);
@@ -883,6 +1066,25 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       }),
     [appUsers],
   );
+  const selectedEnquiryOwnerId = getString(quote?.stage_meta?.owner_id);
+  const selectedEnquiryOwnerValue = salesRepUsers.some((user) => user.id === selectedEnquiryOwnerId) ? selectedEnquiryOwnerId : CUSTOM_SALES_REP_VALUE;
+  const createdByUser = React.useMemo(() => {
+    if (!quote?.created_by) return undefined;
+    const createdBy = quote.created_by.toLowerCase();
+    return appUsers.find((user) => user.id.toLowerCase() === createdBy || user.email.toLowerCase() === createdBy);
+  }, [appUsers, quote?.created_by]);
+  const createdByUsernameFromMeta = getString(quote?.stage_meta?.created_by_username);
+  const createdByNameFromMeta = getString(quote?.stage_meta?.created_by_name);
+  const createdByRoleFromMeta = getString(quote?.stage_meta?.created_by_role);
+  const createdByRoleLabel = createdByRoleFromMeta && createdByRoleFromMeta in roleLabels
+    ? roleLabels[createdByRoleFromMeta as keyof typeof roleLabels]
+    : createdByUser?.role ? roleLabels[createdByUser.role] : "User";
+  const createdByUsername = createdByUsernameFromMeta || createdByUser?.id || getString(quote?.created_by);
+  const createdByLabel = createdByUsername
+    ? `${createdByUsername} - ${createdByRoleLabel}`
+    : createdByNameFromMeta || "Not recorded";
+  const currentEnquiryStage = quote ? enquiryStageFromQuote(quote) : "draft";
+  const effectiveQuoteNo = getString(qd.quote_no || quote?.quote_no);
   const isLargeDraft = items.length > LARGE_DRAFT_THRESHOLD;
   const activeTableColumns = React.useMemo(
     () => (tableMode === "spreadsheet" ? streamlitColumns() : columnsForPreset(columnPreset, isLargeDraft)),
@@ -959,6 +1161,12 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const selectedIndices = selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : [];
   const selectedRowIndex = selectedIndices.length === 1 ? selectedIndices[0] : null;
   const selectedItem = selectedRowIndex !== null ? items[selectedRowIndex] : null;
+  const activeGridColumn = activeCell ? activeTableColumns[activeCell.colIndex] : undefined;
+  const activeGridItem = activeCell ? items[activeCell.rowIndex] : undefined;
+  const activeCellAddress = activeCell && activeGridColumn
+    ? `${spreadsheetColumnName(activeCell.colIndex)}${(displayIndexPositions.get(activeCell.rowIndex) ?? activeCell.rowIndex) + 1}`
+    : "";
+  const activeCellValue = activeGridItem && activeGridColumn ? columnValue(activeGridItem, activeGridColumn) : "";
   const selectedItemBadges = selectedItem ? issueBadgesForItem(selectedItem) : [];
   const extractionSummary = React.useMemo(() => {
     const summary = items.reduce<Record<string, number>>((acc, item) => {
@@ -968,11 +1176,45 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     }, {});
     return Object.entries(summary).sort((left, right) => right[1] - left[1]);
   }, [items]);
-  const shownSummary = extractionSummary.slice(0, SUMMARY_LIMIT);
-  const hiddenSummaryCount = Math.max(0, extractionSummary.length - shownSummary.length);
+  const extractionSummaryNotes = quote?.stage_meta?.extraction_summary_notes as Record<string, { note1?: string; note2?: string }> | undefined;
 
   function invalidateMaterialPlan() {
     setMaterialPlan(null);
+  }
+
+  function isSalesDetailPayload(payload: Partial<Quote>) {
+    if (currentUser.role !== "sales") return false;
+    const allowedQuoteKeys = new Set(["customer", "project_ref", "custom_label", "quote_data", "stage_meta"]);
+    if (Object.keys(payload).some((key) => !allowedQuoteKeys.has(key))) return false;
+    return true;
+  }
+
+  function canSavePayload(payload: Partial<Quote>) {
+    return canEditQuote || isSalesDetailPayload(payload);
+  }
+
+  async function saveSalesDetails(success = "Details saved") {
+    if (!quote || !canAddDetails) return undefined;
+    const salesNotes = getString(quote.stage_meta?.sales_notes);
+    const stageMeta = appendActivity(
+      { ...(quote.stage_meta ?? {}), sales_notes: salesNotes },
+      {
+        kind: "workflow",
+        title: "Sales details updated",
+        detail: salesNotes ? "Sales notes saved" : "Customer details saved",
+        user: currentUser.name || currentUser.id,
+      },
+    );
+    return savePatch(
+      {
+        customer: quote.customer,
+        project_ref: quote.project_ref,
+        custom_label: quote.custom_label,
+        quote_data: { ...(quote.quote_data ?? {}), ...pickSalesDetailQuoteData(qd) },
+        stage_meta: stageMeta,
+      } as Partial<Quote>,
+      success,
+    );
   }
 
   async function refreshQuotes(activeId?: string) {
@@ -987,10 +1229,22 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   React.useEffect(() => {
+    if (params.get("new") === "1") {
+      const requestKey = params.toString();
+      if (newQuoteRequest.current !== requestKey) {
+        newQuoteRequest.current = requestKey;
+        initialRouteLoaded.current = true;
+        void startQuote();
+      }
+      return;
+    }
+    if (initialRouteLoaded.current) return;
+    initialRouteLoaded.current = true;
     refreshQuotes(params.get("quote") ?? undefined).catch((error) => toast.error(error.message));
     // The initial quote id is read once from the URL so resume links open deterministically.
+    // The new enquiry flag remains reactive so the global header button works on this page.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [params]);
 
   React.useEffect(() => {
     if (quote?.id === loadedQuoteId.current) return;
@@ -1029,14 +1283,25 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     if (draftGridRef.current) {
       draftGridRef.current.scrollTop = 0;
     }
+    setEditingCell(null);
   }, [columnFilters, gridSort, safeDraftPage, statusFilter, quote?.id]);
 
   React.useEffect(() => {
     setActiveCell(null);
+    setEditingCell(null);
     setSelectionAnchor(null);
     setSelectionFocus(null);
     setIsSelectingCells(false);
   }, [columnPreset, quote?.id, tableMode]);
+
+  React.useEffect(() => {
+    if (!spreadsheetFullscreen) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [spreadsheetFullscreen]);
 
   React.useEffect(() => {
     if (!isSelectingCells) return undefined;
@@ -1085,6 +1350,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }, [items.length, quote, isQuotationSection]);
 
   async function startQuote() {
+    if (!canEditQuote) {
+      toast.error("Sales users can view enquiries and add notes, but cannot create enquiry workspaces.");
+      router.replace("/quotes");
+      return;
+    }
     setSaving(true);
     try {
       invalidateMaterialPlan();
@@ -1094,6 +1364,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         items: [],
         quote_data: quoteDefaults,
         stage: "initial",
+        stage_meta: {
+          enquiry_stage: "draft",
+          created_by_username: currentUser.id,
+          created_by_name: currentUser.name,
+          created_by_role: currentUser.role,
+          created_by_email: currentUser.email,
+        },
       } as Partial<Quote>);
       setQuote(created);
       await refreshQuotes(created.id);
@@ -1130,11 +1407,15 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function openQuotationScreen() {
+    if (!canEditQuotation) {
+      toast.error("Sales users can view quotations, but cannot create or update quotation work.");
+      return;
+    }
     if (!quote) return;
     const linkedQuoteId = getString(quote.stage_meta?.linked_quote_id);
     if (linkedQuoteId) {
       if (hasUnsavedLocalEdits) {
-        const savedEnquiry = await savePatch({ items, quote_data: qd, quote_no: getString(qd.quote_no) } as Partial<Quote>);
+        const savedEnquiry = await savePatch({ items, quote_data: qd, quote_no: effectiveQuoteNo } as Partial<Quote>);
         if (savedEnquiry) await syncLinkedQuotationFromEnquiry(savedEnquiry, savedEnquiry.items);
       }
       const linked = await getQuote(linkedQuoteId);
@@ -1144,7 +1425,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       router.replace(`/quotes/final?quote=${linked.id}`);
       return;
     }
-    const savedEnquiry = await savePatch({ items, quote_data: qd, quote_no: getString(qd.quote_no) } as Partial<Quote>);
+    const savedEnquiry = await savePatch({ items, quote_data: qd, quote_no: effectiveQuoteNo } as Partial<Quote>);
     if (!savedEnquiry) return;
     const now = new Date().toISOString();
     const quotationMeta = appendActivity(
@@ -1244,6 +1525,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function removeQuote(row: Quote) {
+    if (!canEditQuote) {
+      toast.error("Sales users cannot delete quote workspaces.");
+      return;
+    }
     if (!window.confirm(`Delete ${row.customer || row.quote_no || row.id}?`)) return;
     try {
       await deleteQuote(row.id);
@@ -1264,13 +1549,17 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function updateQueueMeta(row: Quote, patch: Record<string, unknown>) {
+    if (!canEditWorkflow) {
+      toast.error("Sales users cannot change workflow metadata.");
+      return;
+    }
     let nextStageMeta = { ...(row.stage_meta ?? {}), ...patch };
     const activityDetails = Object.entries(patch)
-      .filter(([key]) => ["owner_id", "owner_name", "owner_email", "owner_role", "priority", "due_date", "clarification_status"].includes(key))
+      .filter(([key]) => ["owner_id", "owner_name", "owner_email", "owner_role", "priority", "due_date", "clarification_status", "with_whom", "enquiry_stage", "material_planning_enabled", "material_planning_enabled_at"].includes(key))
       .map(([key, value]) => `${key.replaceAll("_", " ")}: ${String(value || "blank")}`);
     if (activityDetails.length) {
       nextStageMeta = appendActivity(nextStageMeta, {
-        kind: patch.clarification_status ? "clarification" : patch.owner_id || patch.owner_name ? "owner" : patch.priority ? "priority" : "due_date",
+        kind: patch.clarification_status || patch.with_whom ? "clarification" : patch.owner_id || patch.owner_name ? "owner" : patch.priority ? "priority" : patch.enquiry_stage || patch.material_planning_enabled ? "workflow" : "due_date",
         title: "Queue metadata updated",
         detail: activityDetails.join(", "),
         user: currentUser.name || currentUser.id,
@@ -1292,6 +1581,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
 
   async function savePatch(payload: Partial<Quote>, success?: string): Promise<Quote | undefined> {
     if (!quote) return undefined;
+    if (!canSavePayload(payload)) {
+      toast.error("Sales users can save customer details and notes only.");
+      return undefined;
+    }
     setSaving(true);
     try {
       const updated = await patchQuote(quote.id, payload);
@@ -1309,12 +1602,20 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function updateItems(nextItems: GasketItem[], success?: string) {
+    if (!canEditLineItems) {
+      toast.error("Sales users cannot edit line items.");
+      return;
+    }
     invalidateMaterialPlan();
     const updated = await savePatch({ items: nextItems } as Partial<Quote>, success);
     if (updated) await syncLinkedQuotationFromEnquiry(updated, nextItems);
   }
 
   async function runExtraction(sourceType: "email" | "excel", file?: File | null) {
+    if (!canEditQuote) {
+      toast.error("Sales users cannot run enquiry extraction.");
+      return;
+    }
     if (!quote) {
       toast.error("Create a quote workspace first");
       return;
@@ -1355,6 +1656,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function addManualItem() {
+    if (!canEditLineItems) {
+      toast.error("Sales users cannot add line items.");
+      return;
+    }
     if (!quote) return;
     const nextLineNo = items.length + 1;
     const fallbackItem: GasketItem = {
@@ -1379,6 +1684,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function recomputeRows(indices: number[] = selectedIndices) {
+    if (!canEditLineItems) {
+      toast.error("Sales users cannot update line items.");
+      return;
+    }
     if (!quote) return;
     const target = indices.length ? indices : items.map((_, idx) => idx);
     const rows = target.map((idx) => items[idx]).filter(Boolean);
@@ -1386,14 +1695,28 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     const next = [...items];
     target.forEach((idx, offset) => {
       if (next[idx] && recomputed[offset]) {
-        const wasRegret = next[idx]?.status === "regret" || next[idx]?.regret === true;
-        next[idx] = wasRegret ? { ...recomputed[offset], regret: true, status: "regret" } : recomputed[offset];
+        const current = next[idx];
+        const wasRegret = current?.status === "regret" || current?.regret === true;
+        const isManualStatus = current?.status_source === "manual";
+        next[idx] = {
+          ...recomputed[offset],
+          ...(wasRegret ? { regret: true, status: "regret" } : {}),
+          ...(isManualStatus ? {
+            status: current?.status ?? recomputed[offset].status,
+            regret: current?.regret ?? (current?.status === "regret"),
+            status_source: "manual",
+          } : {}),
+        };
       }
     });
     await updateItems(next, "Rules and descriptions refreshed");
   }
 
   async function reprocessRows(indices?: number[]) {
+    if (!canEditLineItems) {
+      toast.error("Sales users cannot reprocess line items.");
+      return;
+    }
     if (!quote) return;
     const target = indices?.length ? indices : selectedIndices.length ? selectedIndices : displayIndices;
     const rowsWithText = target
@@ -1408,12 +1731,15 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     const next = [...items];
     rowsWithText.forEach(({ idx }, offset) => {
       if (extracted[offset]) {
-        const wasRegret = next[idx]?.status === "regret" || next[idx]?.regret === true;
+        const current = next[idx];
+        const wasRegret = current?.status === "regret" || current?.regret === true;
+        const isManualStatus = current?.status_source === "manual";
         next[idx] = {
           ...extracted[offset],
-          line_no: next[idx]?.line_no ?? idx + 1,
-          regret: wasRegret ? true : extracted[offset].regret,
-          status: wasRegret ? "regret" : extracted[offset].status,
+          line_no: current?.line_no ?? idx + 1,
+          regret: isManualStatus ? current?.regret : wasRegret ? true : extracted[offset].regret,
+          status: isManualStatus ? current?.status : wasRegret ? "regret" : extracted[offset].status,
+          status_source: isManualStatus ? "manual" : extracted[offset].status_source ?? current?.status_source,
         };
       }
     });
@@ -1421,6 +1747,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function buildClarificationEmail() {
+    if (!canEditWorkflow) {
+      toast.error("Sales users cannot change clarification workflow.");
+      return;
+    }
     if (!quote) return;
     try {
       const draft = await rfiDraft(quote.id);
@@ -1445,7 +1775,36 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     }
   }
 
+  async function updateExtractionSummaryNote(itemKey: string, noteField: "note1" | "note2", note: string) {
+    if (!quote) return;
+    const nextNotes = {
+      ...(quote.stage_meta?.extraction_summary_notes as Record<string, { note1?: string; note2?: string }> | undefined),
+      [itemKey]: {
+        ...(quote.stage_meta?.extraction_summary_notes as Record<string, { note1?: string; note2?: string }> | undefined)?.[itemKey],
+        [noteField]: note,
+      },
+    };
+    await savePatch(
+      {
+        stage_meta: appendActivity(
+          { ...(quote.stage_meta ?? {}), extraction_summary_notes: nextNotes },
+          {
+            kind: "items",
+            title: "Extraction summary note updated",
+            detail: itemKey,
+            user: currentUser.name || currentUser.id,
+          },
+        ),
+      } as Partial<Quote>,
+      "Extraction summary note saved",
+    );
+  }
+
   async function exportCurrent(type: "pdf" | "xlsx", mode: "preview" | "download" = "download") {
+    if (!canEditQuotation) {
+      toast.error("Sales users can view quotation details, but cannot export quotation documents.");
+      return;
+    }
     if (!quote) return;
     if (mode === "download" && !canExportFinal) {
       toast.error("Approval is required before downloading the quotation");
@@ -1453,7 +1812,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     }
     setExporting(type);
     try {
-      const saved = await savePatch({ items, quote_data: qd, quote_no: getString(qd.quote_no) } as Partial<Quote>);
+      const saved = await savePatch({ items, quote_data: qd, quote_no: effectiveQuoteNo } as Partial<Quote>);
       if (!saved) return;
       const response = await exportQuote(saved.id, type);
       const url = response.signed_url.startsWith("http") ? response.signed_url : `${API_BASE}${response.signed_url}`;
@@ -1472,6 +1831,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function requestApproval() {
+    if (!canEditQuotation) {
+      toast.error("Sales users cannot request quotation approval.");
+      return;
+    }
     if (!quote) return;
     const nextApproval: ApprovalState = {
       status: "pending",
@@ -1488,7 +1851,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       {
         items,
         quote_data: { ...qd, quotation_stage: "approval", quotation_stage_updated_at: new Date().toISOString() },
-        quote_no: getString(qd.quote_no),
+        quote_no: effectiveQuoteNo,
         stage_meta: appendActivity({ ...(quote.stage_meta ?? {}), approval: nextApproval }, {
           kind: "approval",
           title: "Approval requested",
@@ -1519,7 +1882,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       {
         items,
         quote_data: { ...qd, quotation_stage: status === "approved" ? "ready_to_send" : "revision", quotation_stage_updated_at: new Date().toISOString() },
-        quote_no: getString(qd.quote_no),
+        quote_no: effectiveQuoteNo,
         stage_meta: appendActivity({ ...(quote.stage_meta ?? {}), approval: nextApproval }, {
           kind: "approval",
           title: status === "approved" ? "Approval granted" : "Approval rejected",
@@ -1533,6 +1896,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function setQuotationStage(stage: QuotationStageId) {
+    if (!canEditWorkflow) {
+      toast.error("Sales users cannot change quotation workflow.");
+      return;
+    }
     if (!quote) return;
     if ((stage === "sent_to_customer" || stage === "po_received") && !canExportFinal) {
       toast.error("Approval is required before moving the quotation to this stage");
@@ -1561,7 +1928,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       detail: stageInfo.label,
       user: currentUser.name || currentUser.id,
     });
-    const saved = await savePatch({ quote_data: nextQuoteData, quote_no: getString(qd.quote_no), stage_meta: nextMeta } as Partial<Quote>, "Quotation stage updated");
+    const saved = await savePatch({ quote_data: nextQuoteData, quote_no: effectiveQuoteNo, stage_meta: nextMeta } as Partial<Quote>, "Quotation stage updated");
     if (!saved) return;
     if (stage === "sent_to_customer" && saved.stage !== "sent" && saved.stage !== "po") {
       const advanced = await advanceQuoteStage(saved.id, "sent", "Quotation sent to customer", saved.stage_meta);
@@ -1576,6 +1943,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function markSent() {
+    if (!canEditWorkflow) {
+      toast.error("Sales users cannot mark quotations as sent.");
+      return;
+    }
     if (!quote) return;
     if (approval.status !== "approved") {
       toast.error("Approve the quotation before marking it sent");
@@ -1592,7 +1963,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       quotation_stage: "sent_to_customer",
       quotation_stage_updated_at: new Date().toISOString(),
     };
-    const saved = await savePatch({ quote_data: nextQuoteData, quote_no: getString(qd.quote_no) } as Partial<Quote>);
+    const saved = await savePatch({ quote_data: nextQuoteData, quote_no: effectiveQuoteNo } as Partial<Quote>);
     if (!saved) return;
     const advanced = await advanceQuoteStage(saved.id, "sent", "Approved quotation sent", appendActivity(sentMeta, {
       kind: "workflow",
@@ -1606,6 +1977,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   function updateItem(index: number, field: string, value: string) {
+    if (!canEditLineItems) return;
     invalidateMaterialPlan();
     const next = [...items];
     next[index] = setItemValue(next[index] ?? blankItem(index + 1), field, value);
@@ -1618,6 +1990,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   function addBlankRow() {
+    if (!canEditLineItems) return;
     invalidateMaterialPlan();
     const next = [...items];
     const selectedVisible = displayIndices.filter((index) => selectedRows.has(index));
@@ -1629,6 +2002,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function deleteSelectedRows() {
+    if (!canEditLineItems) {
+      toast.error("Sales users cannot delete line items.");
+      return;
+    }
     if (!quote) return;
     invalidateMaterialPlan();
     const selected = new Set(selectedIndices);
@@ -1646,6 +2023,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function toggleRegretSelected() {
+    if (!canEditLineItems) {
+      toast.error("Sales users cannot change line-item regret status.");
+      return;
+    }
     if (!quote) return;
     invalidateMaterialPlan();
     const selected = new Set(selectedIndices);
@@ -1653,7 +2034,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     const next = items.map((item, index) => {
       if (!selected.has(index)) return item;
       const isRegret = item.status === "regret" || item.regret === true;
-      return { ...item, regret: !isRegret, status: isRegret ? "check" : "regret" };
+      return { ...item, regret: !isRegret, status: isRegret ? "check" : "regret", status_source: "manual" };
     });
     await savePatch({
       items: next,
@@ -1668,6 +2049,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function restoreUndoItems() {
+    if (!canEditLineItems) {
+      toast.error("Sales users cannot restore line-item changes.");
+      return;
+    }
     if (!quote || !undoItems) return;
     await savePatch({
       items: undoItems.items,
@@ -1682,6 +2067,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function applyBulkEdit() {
+    if (!canEditLineItems) {
+      toast.error("Sales users cannot bulk edit line items.");
+      return;
+    }
     invalidateMaterialPlan();
     const target = selectedIndices.length ? selectedIndices : displayIndices;
     const next = [...items];
@@ -1710,8 +2099,23 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function startNew() {
+    if (!canEditQuote) {
+      toast.error("Sales users can view enquiries and add notes, but cannot create enquiry workspaces.");
+      return;
+    }
     invalidateMaterialPlan();
-    const created = await createQuote({ items: [], quote_data: quoteDefaults, stage: "initial" } as Partial<Quote>);
+    const created = await createQuote({
+      items: [],
+      quote_data: quoteDefaults,
+      stage: "initial",
+      stage_meta: {
+        enquiry_stage: "draft",
+        created_by_username: currentUser.id,
+        created_by_name: currentUser.name,
+        created_by_role: currentUser.role,
+        created_by_email: currentUser.email,
+      },
+    } as Partial<Quote>);
     setQuote(created);
     setEmailText("");
     setExcelFile(null);
@@ -1723,6 +2127,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function createRevision() {
+    if (!canEditQuote) {
+      toast.error("Sales users cannot create enquiry revisions.");
+      return;
+    }
     if (!quote) return;
     setSaving(true);
     try {
@@ -1738,11 +2146,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       const revNo = nextRevisionNo(qd.rev_no);
       const revisionQuoteData = {
         ...cloneJson(qd),
+        quote_no: "",
         rev_no: revNo,
         rev_date: todayDisplayDate(),
       };
       const revision = await createQuote({
-        quote_no: saved.quote_no,
         customer: saved.customer,
         project_ref: saved.project_ref,
         custom_label: saved.custom_label,
@@ -1751,6 +2159,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         stage: "initial",
         stage_meta: {
           ...(saved.stage_meta ?? {}),
+          enquiry_stage: "draft",
+          created_by_username: currentUser.id,
+          created_by_name: currentUser.name,
+          created_by_role: currentUser.role,
+          created_by_email: currentUser.email,
           revision_of_quote_id: saved.id,
           revision_no: revNo,
           revision_created_from_version: saved.version,
@@ -1771,15 +2184,17 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   function updateQd(key: string, value: unknown) {
+    if (!canEditQuote && !(currentUser.role === "sales" && SALES_DETAIL_QUOTE_DATA_FIELDS.has(key))) return;
     const next = { ...qd, [key]: value };
     if (key === "currency") {
       next.fx_rate = defaultFx[getString(value)] ?? 1;
     }
-    setQuote((current) => (current ? { ...current, quote_data: next, quote_no: getString(qd.quote_no) } : current));
+    setQuote((current) => (current ? { ...current, quote_data: next, quote_no: effectiveQuoteNo } : current));
     setHasUnsavedLocalEdits(true);
   }
 
   function selectSalesRep(userId: string) {
+    if (!canEditQuotation) return;
     if (userId === CUSTOM_SALES_REP_VALUE) return;
     const user = salesRepUsers.find((row) => row.id === userId);
     if (!user) return;
@@ -1790,7 +2205,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       rep_email: user.email,
       rep_designation: roleLabels[user.role],
     };
-    setQuote((current) => (current ? { ...current, quote_data: next, quote_no: getString(qd.quote_no) } : current));
+    setQuote((current) => (current ? { ...current, quote_data: next, quote_no: effectiveQuoteNo } : current));
     setHasUnsavedLocalEdits(true);
   }
 
@@ -1832,6 +2247,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const approval = approvalState(quote);
   const canApprove = canApproveQuotes(currentUser.role);
   const canExportFinal = approval.status === "approved" || !pricingSummary.approvalRequired;
+  const materialPlanStatus = getString(quote?.stage_meta?.material_plan_status || (quote?.stage_meta?.material_plan_finished_at ? "finished" : materialPlan ? "draft" : ""));
+  const materialPhase2Finished = materialPlanStatus === "finished";
   const quotationStage = quotationStageFromData(qd, quote);
   const quotationStageIndex = QUOTATION_STAGE_INDEX.get(quotationStage) ?? 0;
   const quotationStageMeta = QUOTATION_STAGES[quotationStageIndex] ?? QUOTATION_STAGES[0];
@@ -1842,7 +2259,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     } else if (isFinalSection) {
       if (!FINAL_STAGES.has(row.stage)) return false;
     } else if (isMaterialSection) {
-      if (!MATERIAL_STAGES.has(row.stage)) return false;
+      if (row.stage_meta?.material_planning_enabled !== true) return false;
     } else if (!DRAFT_STAGES.has(row.stage)) {
       return false;
     }
@@ -1852,6 +2269,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     if (queueFilter === "clarification" && !quoteHasClarification(row)) return false;
     if (queueFilter === "high_risk" && !quoteIsHighRisk(row)) return false;
     if (queueFilter === "high_value" && !quoteIsHighValue(row)) return false;
+    if (queueFilter.startsWith("enquiry_stage:") && enquiryStageFromQuote(row) !== queueFilter.slice("enquiry_stage:".length)) return false;
     if (queueFilter.startsWith("stage:") && row.stage !== queueFilter.slice("stage:".length)) return false;
     const term = search.toLowerCase();
     return !term || row.customer.toLowerCase().includes(term) || row.project_ref.toLowerCase().includes(term) || row.quote_no.toLowerCase().includes(term);
@@ -1897,6 +2315,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     const nextCell = { rowIndex, colIndex };
     const anchor = extend && selectionAnchor ? selectionAnchor : nextCell;
     setActiveCell(nextCell);
+    setEditingCell(null);
     setSelectionAnchor(anchor);
     setSelectionFocus(nextCell);
     const anchorPosition = displayIndexPositions.get(anchor.rowIndex) ?? -1;
@@ -1912,12 +2331,58 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     setSelectedRows((current) => (sameNumberSet(current, nextSelectedRows) ? current : nextSelectedRows));
   }
 
-  function focusGridCell(rowIndex: number, colIndex: number) {
+  function focusGridCell(rowIndex: number, colIndex: number, edit = false) {
     window.requestAnimationFrame(() => {
       const cell = draftGridRef.current?.querySelector<HTMLElement>(`[data-grid-row="${rowIndex}"][data-grid-col="${colIndex}"]`);
-      const focusTarget = cell?.querySelector<HTMLElement>("input, textarea, button, [tabindex]");
-      (focusTarget ?? cell)?.focus();
+      if (edit) {
+        const focusTarget = cell?.querySelector<HTMLElement>("input, textarea, button, [tabindex]");
+        (focusTarget ?? cell)?.focus();
+        if (focusTarget instanceof HTMLInputElement || focusTarget instanceof HTMLTextAreaElement) {
+          focusTarget.select();
+        }
+        return;
+      }
+      cell?.focus();
     });
+  }
+
+  function isEditingGridCell(rowIndex: number, colIndex: number) {
+    return editingCell?.rowIndex === rowIndex && editingCell.colIndex === colIndex;
+  }
+
+  function startEditingGridCell(rowIndex: number, colIndex: number) {
+    const column = activeTableColumns[colIndex];
+    if (!column || !isEditableGridColumn(column)) return false;
+    setActiveCell({ rowIndex, colIndex });
+    setSelectionAnchor({ rowIndex, colIndex });
+    setSelectionFocus({ rowIndex, colIndex });
+    setSelectedRows(new Set([rowIndex]));
+    setEditingCell({ rowIndex, colIndex });
+    focusGridCell(rowIndex, colIndex, true);
+    return true;
+  }
+
+  function stopEditingGridCell(rowDelta = 0, colDelta = 0) {
+    const currentCell = editingCell ?? activeCell;
+    setEditingCell(null);
+    if (!currentCell) return;
+    if (rowDelta || colDelta) {
+      moveActiveGridCell(rowDelta, colDelta, false);
+      return;
+    }
+    focusGridCell(currentCell.rowIndex, currentCell.colIndex);
+  }
+
+  function toggleGridCheckbox(rowIndex: number, column: TableColumn) {
+    const item = items[rowIndex];
+    if (!item || column.kind !== "checkbox") return false;
+    const checked = !(item.status === "regret" || item.regret === true);
+    const next = [...items];
+    next[rowIndex] = { ...item, regret: checked, status: checked ? "regret" : "check" };
+    invalidateMaterialPlan();
+    setQuote((current) => (current ? { ...current, items: next } : current));
+    setHasUnsavedLocalEdits(true);
+    return true;
   }
 
   function moveActiveGridCell(rowDelta: number, colDelta: number, extend: boolean) {
@@ -2024,10 +2489,29 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   function handleGridKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (!canEditLineItems) return;
     if (tableMode !== "spreadsheet") return;
     const target = event.target as HTMLElement | null;
     const targetTag = target?.tagName;
-    const inDescriptionEditor = targetTag === "TEXTAREA";
+    const inCellEditor = Boolean(editingCell) || targetTag === "INPUT" || targetTag === "TEXTAREA" || targetTag === "BUTTON";
+    if (editingCell) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        stopEditingGridCell();
+        return;
+      }
+      if (event.key === "Tab") {
+        event.preventDefault();
+        stopEditingGridCell(0, event.shiftKey ? -1 : 1);
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        stopEditingGridCell(event.shiftKey ? -1 : 1, 0);
+        return;
+      }
+      return;
+    }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
       if (!displayIndices.length || !activeTableColumns.length) return;
       event.preventDefault();
@@ -2040,8 +2524,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       setSelectedRows((current) => (sameNumberSet(current, nextSelectedRows) ? current : nextSelectedRows));
       return;
     }
-    if ((event.key === "Delete" || event.key === "Backspace") && selectedCellCount > 1) {
+    if ((event.key === "Delete" || event.key === "Backspace") && selectedCellCount >= 1) {
       if (clearSelectedGridCells()) event.preventDefault();
+      return;
+    }
+    if (event.key === "F2" && activeCell) {
+      event.preventDefault();
+      startEditingGridCell(activeCell.rowIndex, activeCell.colIndex);
+      return;
+    }
+    if (event.key === " " && activeCell && activeGridColumn?.kind === "checkbox") {
+      event.preventDefault();
+      toggleGridCheckbox(activeCell.rowIndex, activeGridColumn);
       return;
     }
     if (event.key === "Escape") {
@@ -2054,12 +2548,19 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       moveActiveGridCell(0, event.shiftKey ? -1 : 1, false);
       return;
     }
-    if (event.key === "Enter" && !inDescriptionEditor) {
+    if (event.key === "Enter") {
       event.preventDefault();
       moveActiveGridCell(event.shiftKey ? -1 : 1, 0, false);
       return;
     }
-    if (inDescriptionEditor || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1 && activeCell && activeGridColumn && isEditableGridColumn(activeGridColumn) && activeGridColumn.kind !== "select" && activeGridColumn.kind !== "checkbox") {
+      event.preventDefault();
+      updateItem(activeCell.rowIndex, activeGridColumn.field, event.key);
+      setEditingCell(activeCell);
+      focusGridCell(activeCell.rowIndex, activeCell.colIndex, true);
+      return;
+    }
+    if (inCellEditor || event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key === "ArrowUp") {
       event.preventDefault();
       moveActiveGridCell(-1, 0, event.shiftKey);
@@ -2075,22 +2576,67 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     }
   }
 
-  function renderGridCell(index: number, item: GasketItem, column: TableColumn) {
+  function renderGridCell(index: number, item: GasketItem, column: TableColumn, colIndex: number) {
     const rawValue = item[column.field];
     const validation = validateItemField(item, column.field);
     const cellClass = column.field === "confidence" ? confidenceClass(rawValue) : validationClass(validation?.severity);
     const inputClass = tableMode === "spreadsheet"
-      ? "h-8 w-full min-w-0 rounded-none border-0 bg-transparent px-2 py-1 text-xs shadow-none focus-visible:ring-1 focus-visible:ring-ring"
+      ? "h-8 w-full min-w-0 rounded-none border-0 bg-white px-2 py-1 text-xs shadow-none focus-visible:ring-1 focus-visible:ring-primary dark:bg-background"
       : GRID_INPUT_CLASS;
     const textareaClass = tableMode === "spreadsheet"
-      ? "h-8 w-full min-w-0 resize-none rounded-none border-0 bg-transparent px-2 py-1 text-xs shadow-none outline-none focus:ring-1 focus:ring-ring"
+      ? "h-8 w-full min-w-0 resize-none rounded-none border-0 bg-white px-2 py-1 text-xs shadow-none outline-none focus:ring-1 focus:ring-primary dark:bg-background"
       : GRID_TEXTAREA_CLASS;
-    if (column.field === "status") {
+    const displayClass = `flex h-8 min-w-0 items-center overflow-hidden px-2 py-1 text-xs ${cellClass}`;
+    if (!canEditLineItems) {
+      const displayValue = column.field === "flags" ? notesFor(item) : columnValue(item, column);
       return (
-        <div className="flex h-7 items-center gap-1.5 px-2 text-xs">
-          {statusIcon[getString(item.status)]}
-          <span className="capitalize">{getString(item.status)}</span>
+        <div className={`${displayClass} bg-muted/30 text-muted-foreground`} title={validation?.message || displayValue}>
+          <span className="truncate">{displayValue}</span>
         </div>
+      );
+    }
+    if (tableMode === "spreadsheet" && !isEditingGridCell(index, colIndex)) {
+      if (column.field === "status") {
+        return (
+          <div className={`${displayClass} gap-1.5`} title={getString(item.status)}>
+            {statusIcon[getString(item.status)]}
+            <span className="truncate capitalize">{getString(item.status)}</span>
+          </div>
+        );
+      }
+      if (column.kind === "checkbox") {
+        const checked = item.status === "regret" || item.regret === true;
+        return (
+          <div className={`${displayClass} justify-center font-mono`} title={checked ? "TRUE" : "FALSE"}>
+            {checked ? "TRUE" : "FALSE"}
+          </div>
+        );
+      }
+      if (column.field === "status") {
+        return (
+          <div className={`${displayClass} gap-1.5`} title={getString(item.status)}>
+            {statusIcon[getString(item.status)]}
+            <span className="truncate capitalize">{getString(item.status)}</span>
+          </div>
+        );
+      }
+      const displayValue = column.field === "flags" ? notesFor(item) : columnValue(item, column);
+      return (
+        <div className={`${displayClass} ${!isEditableGridColumn(column) ? "bg-muted/30 text-muted-foreground" : ""}`} title={validation?.message || displayValue}>
+          <span className="truncate">{displayValue}</span>
+        </div>
+      );
+    }
+    if (column.field === "status" && tableMode === "spreadsheet") {
+      return (
+        <Select value={getString(rawValue) || "missing"} onValueChange={(value) => updateItem(index, "status", value)}>
+          <SelectTrigger className={`${SHEET_SELECT_CLASS} w-full min-w-0 justify-between ${cellClass}`} title={validation?.message}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {STATUS_OPTIONS.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}
+          </SelectContent>
+        </Select>
       );
     }
     if (column.field === "flags") {
@@ -2167,50 +2713,68 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function generateMaterialBreakdown() {
+    if (!canRunMaterialPhase1) {
+      toast.error("Sales users cannot change material planning.");
+      return;
+    }
     if (!quote) return;
     const nextBreakdown = buildMaterialBreakdown(items);
-    const nextInputs = buildMaterialInputs(nextBreakdown, { ...materialConfig, material_inputs: materialInputs });
     setMaterialBreakdown(nextBreakdown);
-    setMaterialInputs(nextInputs);
+    setMaterialInputs([]);
     setMaterialPlan(null);
     await savePatch(
       {
         stage_meta: {
           ...(quote.stage_meta ?? {}),
           material_breakdown: nextBreakdown,
-          material_inputs: nextInputs,
+          material_inputs: [],
           material_breakdown_updated_at: new Date().toISOString(),
           material_plan: null,
+          material_plan_status: "",
         },
       } as Partial<Quote>,
       "Material breakdown saved",
     );
   }
 
-  async function generateMaterialPlan() {
+  async function startManualMaterialPlan() {
+    if (!canEditMaterialPhase2) {
+      toast.error("Only material planner users can move to Phase 2.");
+      return;
+    }
     if (!quote) return;
     const nextBreakdown = materialBreakdown?.length ? materialBreakdown : buildMaterialBreakdown(items);
-    const nextInputs = buildMaterialInputs(nextBreakdown, { ...materialConfig, material_inputs: materialInputs });
-    const nextPlan = buildMaterialPlan(items, { ...materialConfig, material_inputs: nextInputs }, nextBreakdown);
+    const nextPlan = createManualMaterialPlan(materialPhase2RowsFromBreakdown(nextBreakdown), { ...materialConfig, material_inputs: [] });
     setMaterialBreakdown(nextBreakdown);
-    setMaterialInputs(nextInputs);
+    setMaterialInputs([]);
     setMaterialPlan(nextPlan);
     await savePatch(
       {
         stage_meta: {
           ...(quote.stage_meta ?? {}),
           material_breakdown: nextBreakdown,
-          material_inputs: nextInputs,
+          material_inputs: [],
           material_breakdown_updated_at: quote.stage_meta?.material_breakdown_updated_at ?? new Date().toISOString(),
           material_plan: nextPlan,
+          material_plan_status: "draft",
+          material_plan_started_at: quote.stage_meta?.material_plan_started_at ?? new Date().toISOString(),
+          material_plan_started_by: quote.stage_meta?.material_plan_started_by ?? currentUser.id,
           material_plan_updated_at: new Date().toISOString(),
         },
       } as Partial<Quote>,
-      "Material plan saved",
+      "Phase 2 manual plan started",
     );
   }
 
   async function saveMaterialPlan(plan: MaterialPlan | null = materialPlan) {
+    if (plan && !canEditMaterialPhase2) {
+      toast.error("Only material planner users can save Phase 2.");
+      return;
+    }
+    if (!plan && !canRunMaterialPhase1) {
+      toast.error("Sales users cannot change material planning.");
+      return;
+    }
     if (!quote && !plan) return;
     if (!quote) return;
     await savePatch(
@@ -2220,6 +2784,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           material_breakdown: materialBreakdown ?? [],
           material_inputs: materialInputs,
           material_plan: plan,
+          material_plan_status: plan ? materialPlanStatus || "draft" : "",
           material_plan_updated_at: new Date().toISOString(),
         },
       } as Partial<Quote>,
@@ -2228,6 +2793,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function clearMaterialPlan() {
+    if (!canEditMaterialPhase2) {
+      toast.error("Sales users cannot clear material planning.");
+      return;
+    }
     if (!quote) return;
     const nextStageMeta = { ...(quote.stage_meta ?? {}) };
     delete nextStageMeta.material_breakdown;
@@ -2235,6 +2804,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     delete nextStageMeta.material_breakdown_updated_at;
     delete nextStageMeta.material_plan;
     delete nextStageMeta.material_plan_updated_at;
+    delete nextStageMeta.material_plan_status;
+    delete nextStageMeta.material_plan_started_at;
+    delete nextStageMeta.material_plan_started_by;
+    delete nextStageMeta.material_plan_submitted_at;
+    delete nextStageMeta.material_plan_submitted_by;
+    delete nextStageMeta.material_plan_finished_at;
+    delete nextStageMeta.material_plan_finished_by;
     setMaterialBreakdown(null);
     setMaterialInputs([]);
     setMaterialPlan(null);
@@ -2242,6 +2818,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   function updateBreakdownRow(index: number, patch: Partial<MaterialBreakdownRow>) {
+    if (!canEditWorkflow) return;
     setMaterialBreakdown((current) => {
       if (!current) return current;
       return current.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row));
@@ -2250,13 +2827,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     setHasUnsavedLocalEdits(true);
   }
 
-  function updateMaterialInputRow(index: number, patch: Partial<MaterialInputRow>) {
-    setMaterialInputs((current) => current.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
-    setMaterialPlan(null);
-    setHasUnsavedLocalEdits(true);
-  }
-
   function updatePlanRow(index: number, patch: Partial<MaterialPlan["rows"][number]>) {
+    if (!canEditMaterialPhase2 || materialPhase2Finished) return;
     setMaterialPlan((current) => {
       if (!current) return current;
       const nextRows = current.rows.map((row, rowIndex) => {
@@ -2272,28 +2844,69 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           suggested_purchase_qty: patch.suggested_purchase_qty === undefined ? shortage : toNumber(nextRow.suggested_purchase_qty, shortage),
         };
       });
-      const grouped = nextRows.reduce<MaterialPlan["grouped_summary"]>((acc, row) => {
-        const group = `${row.type} / ${row.purchase_uom} / ${row.thickness_mm ?? "-"} mm / ${row.preferred_vendor || "Vendor TBD"}`;
-        const currentGroup = acc.find((item) => item.group === group);
-        if (currentGroup) {
-          currentGroup.rows += 1;
-          currentGroup.shortage_qty += row.shortage_qty;
-          currentGroup.suggested_purchase_qty += row.suggested_purchase_qty;
-          currentGroup.estimated_material_cost += row.estimated_material_cost;
-        } else {
-          acc.push({
-            group,
-            rows: 1,
-            shortage_qty: row.shortage_qty,
-            suggested_purchase_qty: row.suggested_purchase_qty,
-            estimated_material_cost: row.estimated_material_cost,
-          });
-        }
-        return acc;
-      }, []);
-      return { ...current, rows: nextRows, grouped_summary: grouped };
+      return materialPlanWithRows(current, nextRows);
     });
     setHasUnsavedLocalEdits(true);
+  }
+
+  function addMaterialPhase2Row() {
+    if (!canEditMaterialPhase2 || materialPhase2Finished) return;
+    setMaterialPlan((current) => {
+      const base = current ?? createManualMaterialPlan([], { ...materialConfig, material_inputs: [] });
+      return materialPlanWithRows(base, [...base.rows, blankMaterialPhase2Row(base.rows.length + 1)]);
+    });
+    setHasUnsavedLocalEdits(true);
+  }
+
+  function deleteMaterialPhase2Row(index: number) {
+    if (!canEditMaterialPhase2 || materialPhase2Finished) return;
+    setMaterialPlan((current) => {
+      if (!current) return current;
+      return materialPlanWithRows(current, current.rows.filter((_, rowIndex) => rowIndex !== index));
+    });
+    setHasUnsavedLocalEdits(true);
+  }
+
+  async function submitMaterialPlan() {
+    if (!quote || !materialPlan || !canEditMaterialPhase2) return;
+    const now = new Date().toISOString();
+    await savePatch(
+      {
+        stage_meta: {
+          ...(quote.stage_meta ?? {}),
+          material_breakdown: materialBreakdown ?? [],
+          material_inputs: [],
+          material_plan: materialPlan,
+          material_plan_status: "submitted",
+          material_plan_submitted_at: now,
+          material_plan_submitted_by: currentUser.id,
+          material_plan_updated_at: now,
+        },
+      } as Partial<Quote>,
+      "Phase 2 material plan submitted",
+    );
+  }
+
+  async function finishMaterialPlan() {
+    if (!quote || !materialPlan || !canEditMaterialPhase2) return;
+    const now = new Date().toISOString();
+    const finishedPlan = materialPlanWithRows(materialPlan, materialPlan.rows.map((row) => ({ ...row, reviewed: true })));
+    setMaterialPlan(finishedPlan);
+    await savePatch(
+      {
+        stage_meta: {
+          ...(quote.stage_meta ?? {}),
+          material_breakdown: materialBreakdown ?? [],
+          material_inputs: [],
+          material_plan: finishedPlan,
+          material_plan_status: "finished",
+          material_plan_finished_at: now,
+          material_plan_finished_by: currentUser.id,
+          material_plan_updated_at: now,
+        },
+      } as Partial<Quote>,
+      "Material plan finished",
+    );
   }
 
   function formatStockSize(row: MaterialPlan["rows"][number]) {
@@ -2417,97 +3030,100 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
 
   if (!quote) {
     return (
-      <div className="space-y-6">
-        <div className="rounded-lg border bg-card p-5 shadow-sm">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="space-y-2">
-              <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-                {isPoSection ? <ShoppingCart className="h-4 w-4" /> : isFinalSection ? <FileSpreadsheet className="h-4 w-4" /> : isMaterialSection ? <Layers3 className="h-4 w-4" /> : <Inbox className="h-4 w-4" />}
-                {isPoSection ? "Purchase order queue" : isFinalSection ? "Quotation queue" : isMaterialSection ? "Material planning queue" : "Enquiry queue"}
-              </div>
-              <div>
-                <h2 className="text-2xl font-semibold tracking-normal">{isPoSection ? "Purchase orders" : isFinalSection ? "Quotations" : isMaterialSection ? "Material planning" : "Enquiry"}</h2>
-                <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-                  {isPoSection
-                    ? "Accepted quotations moved to PO are listed here."
-                    : isFinalSection
-                      ? "Prepared and completed quotations are listed here for review."
-                    : isMaterialSection
-                      ? "Select a cleaned enquiry to generate starter stock sizes, estimated weights, and review notes."
-                    : "Email and Excel enquiries move through enquiry cleanup before quotation preparation."}
-                </p>
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {isDraftSection && (
-                <Button onClick={startQuote}>
-                  <Plus className="h-4 w-4" />
-                  New enquiry
-                </Button>
-              )}
-              <Button variant="secondary" onClick={() => refreshQuotes().catch((error) => toast.error(error.message))} aria-label="Refresh quotes">
-                <RefreshCw className="h-4 w-4" />
-                Refresh
-              </Button>
-            </div>
-          </div>
-        </div>
-
+      <div className="space-y-3">
         <Card>
-          <CardHeader className="gap-3 border-b md:flex-row md:items-center md:justify-between md:space-y-0">
-            <div className="space-y-1">
-              <CardTitle>{isPoSection ? "Purchase order queue" : isFinalSection ? "Quotation queue" : isMaterialSection ? "Material planning queue" : "Enquiry queue"}</CardTitle>
-              <div className="text-sm text-muted-foreground">{visibleQuotes.length} workspace{visibleQuotes.length === 1 ? "" : "s"}</div>
+          <CardHeader className="gap-2 border-b px-3 py-2">
+            <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex min-w-0 items-center gap-2">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border bg-background">
+                  {isPoSection ? <ShoppingCart className="h-4 w-4" /> : isFinalSection ? <FileSpreadsheet className="h-4 w-4" /> : isMaterialSection ? <Layers3 className="h-4 w-4" /> : <Inbox className="h-4 w-4" />}
+                </div>
+                <div className="min-w-0">
+                  <CardTitle className="text-base">{isPoSection ? "Purchase orders" : isFinalSection ? "Quotations" : isMaterialSection ? "Material planning" : "Enquiries"}</CardTitle>
+                  <div className="text-xs text-muted-foreground">{visibleQuotes.length} workspace{visibleQuotes.length === 1 ? "" : "s"}</div>
+                </div>
+              </div>
+              <div className="flex flex-col gap-2 md:flex-row md:items-center lg:justify-end">
+                <div className="relative w-full md:w-72">
+                  <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    className="h-9 pl-9"
+                    placeholder={isPoSection ? "Search customer, project, PO" : isFinalSection ? "Search customer, project, quote no" : "Search customer, project, enquiry no"}
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                  />
+                </div>
+                <Select value={queueFilter} onValueChange={setQueueFilter}>
+                  <SelectTrigger className="h-9 w-full md:w-44"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All work</SelectItem>
+                    <SelectItem value="my_work">My work</SelectItem>
+                    <SelectItem value="due_today">Due today</SelectItem>
+                    <SelectItem value="delayed">Delayed</SelectItem>
+                    <SelectItem value="clarification">Clarification</SelectItem>
+                    <SelectItem value="high_risk">High risk</SelectItem>
+                    {(isFinalSection || isPoSection) && <SelectItem value="high_value">High value</SelectItem>}
+                    {!isFinalSection && !isPoSection && ENQUIRY_STAGES.map((stage) => (
+                      <SelectItem key={stage.id} value={`enquiry_stage:${stage.id}`}>Enquiry: {stage.label}</SelectItem>
+                    ))}
+                    {!isFinalSection && !isPoSection && (
+                      <>
+                        <SelectItem value="stage:initial">Stage: enquiry</SelectItem>
+                        <SelectItem value="stage:review">Stage: review</SelectItem>
+                        <SelectItem value="stage:quote_prep">Stage: quote prep</SelectItem>
+                      </>
+                    )}
+                    {isFinalSection && (
+                      <>
+                        <SelectItem value="stage:quote_prep">Workflow: quote prep</SelectItem>
+                        <SelectItem value="stage:repricing">Workflow: repricing</SelectItem>
+                        <SelectItem value="stage:sent">Workflow: sent</SelectItem>
+                        <SelectItem value="stage:po">Workflow: PO</SelectItem>
+                      </>
+                    )}
+                    {isPoSection && <SelectItem value="stage:po">Workflow: PO</SelectItem>}
+                  </SelectContent>
+                </Select>
+                <div className="flex gap-1.5">
+                  {isDraftSection && canEditQuote && (
+                    <Button className="h-9" onClick={startQuote}>
+                      <Plus className="h-4 w-4" />
+                      New
+                    </Button>
+                  )}
+                  <Button className="h-9" variant="secondary" onClick={() => refreshQuotes().catch((error) => toast.error(error.message))} aria-label="Refresh quotes">
+                    <RefreshCw className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
             </div>
-            <div className="relative w-full md:max-w-sm">
-              <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-              <Input className="pl-9" placeholder="Search customer, project, quote no" value={search} onChange={(event) => setSearch(event.target.value)} />
-            </div>
-            <Select value={queueFilter} onValueChange={setQueueFilter}>
-              <SelectTrigger className="w-full md:w-48"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All work</SelectItem>
-                <SelectItem value="my_work">My work</SelectItem>
-                <SelectItem value="due_today">Due today</SelectItem>
-                <SelectItem value="delayed">Delayed</SelectItem>
-                <SelectItem value="clarification">Clarification</SelectItem>
-                <SelectItem value="high_risk">High risk</SelectItem>
-                <SelectItem value="high_value">High value</SelectItem>
-                <SelectItem value="stage:initial">Stage: enquiry</SelectItem>
-                <SelectItem value="stage:review">Stage: review</SelectItem>
-                <SelectItem value="stage:quote_prep">Stage: quote prep</SelectItem>
-              </SelectContent>
-            </Select>
           </CardHeader>
           <CardContent className="p-0">
             <div className="overflow-hidden">
-              <Table>
-                <TableHeader>
+                <Table>
+                  <TableHeader>
                     <TableRow>
-                      <TableHead>Workspace</TableHead>
-                      <TableHead className="w-44">Sales rep</TableHead>
-                      <TableHead className="w-32">Priority</TableHead>
-                      <TableHead className="w-40">Due / age</TableHead>
-                      <TableHead className="w-48">Readiness</TableHead>
-                      <TableHead className="w-28">Items</TableHead>
-                      <TableHead className="w-44">Value / next action</TableHead>
-                      <TableHead className="w-40">Updated</TableHead>
-                      <TableHead className="w-28 text-right">Actions</TableHead>
+                      <TableHead className="w-[34%]">{isPoSection ? "Order" : isFinalSection ? "Quotation" : "Enquiry"}</TableHead>
+                      <TableHead className="w-40">{isFinalSection || isPoSection ? "Workflow" : "Stage"}</TableHead>
+                      <TableHead className="w-56">Review</TableHead>
+                      <TableHead className="w-48">{isFinalSection || isPoSection ? "Items / value" : "Items / next action"}</TableHead>
+                      <TableHead className="w-28">Updated</TableHead>
+                      <TableHead className="w-24 text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {visibleQuotes.map((row) => (
-                    <QuoteSummaryRow key={row.id} quote={row} section={section} onOpen={openQuote} onDelete={removeQuote} onMetaChange={updateQueueMeta} />
+                    <QuoteSummaryRow key={row.id} quote={row} section={section} onOpen={openQuote} onDelete={removeQuote} onMetaChange={updateQueueMeta} canDelete={canEditQuote} />
                   ))}
                   {!visibleQuotes.length && (
                     <TableRow>
-                      <TableCell colSpan={9} className="py-14 text-center">
+                      <TableCell colSpan={6} className="py-14 text-center">
                         <div className="mx-auto flex max-w-sm flex-col items-center gap-3 text-sm text-muted-foreground">
                           <div className="flex h-10 w-10 items-center justify-center rounded-md border bg-background">
                             {isPoSection ? <ShoppingCart className="h-5 w-5" /> : isFinalSection ? <FileSpreadsheet className="h-5 w-5" /> : isMaterialSection ? <Layers3 className="h-5 w-5" /> : <Inbox className="h-5 w-5" />}
                           </div>
                           <div>{isPoSection ? "No accepted quotations have been moved to PO yet." : isFinalSection ? "No quotes are ready for quotation yet." : isMaterialSection ? "No enquiries are ready for material planning." : "No enquiries match the current search."}</div>
-                          {isDraftSection && (
+                          {isDraftSection && canEditQuote && (
                             <Button onClick={startQuote}>
                               <Plus className="h-4 w-4" />
                               New enquiry
@@ -2527,10 +3143,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   return (
-    <div className="space-y-6">
-      <div className="rounded-lg border bg-card p-5 shadow-sm">
-        <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
-          <div className="min-w-0 space-y-3">
+    <div className="space-y-4">
+      <div className="rounded-md border bg-card p-3 shadow-sm">
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+          <div className="min-w-0 space-y-2">
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant={quote.stage === "po" ? "secondary" : "outline"}>{stageLabel(quote.stage)}</Badge>
               {revisionLabel(quote) && <Badge variant="outline">{revisionLabel(quote)}</Badge>}
@@ -2538,11 +3154,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               {!saving && hasUnsavedLocalEdits && <Badge variant="warning">Unsaved edits</Badge>}
             </div>
             <div>
-              <h2 className="truncate text-2xl font-semibold tracking-normal">{quote.customer || quote.quote_no || "Untitled enquiry"}</h2>
-              <div className="mt-1 truncate text-sm text-muted-foreground">{quote.project_ref || quote.id}</div>
+              <h2 className="font-mono text-xl font-semibold tracking-normal text-primary">{quote.quote_no || "enq-pending"}</h2>
+              <div className="mt-1 truncate text-sm text-muted-foreground">
+                {[quote.customer, quote.project_ref].filter(Boolean).join(" / ") || "No customer or project reference"}
+              </div>
             </div>
             {!isQuotationSection && (
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <CompactMetric icon={<FileText className="h-3.5 w-3.5" />} label="Items" value={items.length} />
                 <CompactMetric
                   icon={<ShieldCheck className="h-3.5 w-3.5" />}
@@ -2561,12 +3179,12 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               </div>
             )}
           </div>
-          <div className="flex flex-wrap gap-2 xl:justify-end">
+          <div className="flex flex-wrap gap-1.5 xl:justify-end">
             <Button variant="secondary" onClick={clearWorkspace}>
               <RotateCcw className="h-4 w-4" />
               Back to list
             </Button>
-            {isDraftSection && (
+            {isDraftSection && canEditQuote && (
               <>
                 <Button variant="secondary" onClick={startNew}>
                   <Plus className="h-4 w-4" />
@@ -2586,18 +3204,19 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         </div>
 
         {!isQuotationSection && (
-          <div className="mt-4 grid gap-3 border-t pt-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
-            <details className="rounded-md border bg-background p-3" open={!quote.customer || !quote.project_ref}>
+          <div className="mt-3 grid gap-2 border-t pt-3 lg:grid-cols-2 2xl:grid-cols-4">
+            <details className="rounded-md border bg-background p-2.5" open={!quote.customer || !quote.project_ref}>
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2"><FileText className="h-4 w-4" />Header details</span>
                 <Badge variant={quote.customer && quote.project_ref ? "secondary" : "outline"}>{quote.customer && quote.project_ref ? "Saved context" : "Needs context"}</Badge>
               </summary>
               <div className="mt-3 grid gap-3 md:grid-cols-[1fr_1fr_auto] md:items-end">
-                <Field label="Customer" value={quote.customer} onChange={(value) => setQuote({ ...quote, customer: value })} />
-                <Field label="Project / PO reference" value={quote.project_ref} onChange={(value) => setQuote({ ...quote, project_ref: value })} />
+                <Field label="Customer" value={quote.customer} onChange={(value) => setQuote({ ...quote, customer: value })} disabled={!canAddDetails} />
+                <Field label="Project / PO reference" value={quote.project_ref} onChange={(value) => setQuote({ ...quote, project_ref: value })} disabled={!canAddDetails} />
                 <Button
                   variant="secondary"
-                  onClick={() => savePatch({ customer: quote.customer, project_ref: quote.project_ref } as Partial<Quote>, "Enquiry details saved")}
+                  onClick={() => canEditQuote ? savePatch({ customer: quote.customer, project_ref: quote.project_ref } as Partial<Quote>, "Enquiry details saved") : saveSalesDetails("Enquiry details saved")}
+                  disabled={!canAddDetails}
                 >
                   <Save className="h-4 w-4" />
                   Save
@@ -2605,7 +3224,134 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               </div>
             </details>
 
-            <details className="rounded-md border bg-background p-3">
+            <details className="rounded-md border bg-background p-2.5" open={currentUser.role === "sales"}>
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
+                <span className="inline-flex items-center gap-2"><FileText className="h-4 w-4" />Sales notes</span>
+                <Badge variant="outline">{getString(quote.stage_meta?.sales_notes) ? "Saved notes" : "No notes"}</Badge>
+              </summary>
+              <div className="mt-3 space-y-3">
+                <Field
+                  label="Notes / extra details"
+                  value={getString(quote.stage_meta?.sales_notes)}
+                  onChange={(value) => setQuote({ ...quote, stage_meta: { ...(quote.stage_meta ?? {}), sales_notes: value } })}
+                  textarea
+                  disabled={!canAddDetails}
+                />
+                <Button variant="secondary" onClick={() => saveSalesDetails("Sales notes saved")} disabled={!canAddDetails}>
+                  <Save className="h-4 w-4" />
+                  Save notes
+                </Button>
+              </div>
+            </details>
+
+            <details className="rounded-md border bg-background p-2.5" open>
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
+                <span className="inline-flex items-center gap-2"><PanelRight className="h-4 w-4" />Assignment</span>
+                <Badge variant="outline">{enquiryStageLabel(currentEnquiryStage)}</Badge>
+              </summary>
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label>Sales rep</Label>
+                  <Select
+                    value={selectedEnquiryOwnerValue}
+                    disabled={!canEditWorkflow}
+                    onValueChange={(value) => {
+                      if (value === CUSTOM_SALES_REP_VALUE) return;
+                      const user = salesRepUsers.find((row) => row.id === value);
+                      if (!user) return;
+                      updateQueueMeta(quote, {
+                        owner_id: user.id,
+                        owner_name: user.name,
+                        owner_email: user.email,
+                        owner_role: user.role,
+                      });
+                    }}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {salesRepUsers.map((user) => (
+                        <SelectItem key={user.id} value={user.id}>
+                          {user.name} - {roleLabels[user.role]}
+                        </SelectItem>
+                      ))}
+                      <SelectItem value={CUSTOM_SALES_REP_VALUE}>{getString(quote.stage_meta?.owner_name) || "Unassigned"}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Due date</Label>
+                  <Input
+                    type="date"
+                    value={getString(quote.stage_meta?.due_date)}
+                    onChange={(event) => {
+                      const stageMeta = { ...(quote.stage_meta ?? {}), due_date: event.target.value };
+                      setQuote({ ...quote, stage_meta: stageMeta });
+                    }}
+                    onBlur={(event) => updateQueueMeta(quote, { due_date: event.target.value })}
+                    disabled={!canEditWorkflow}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Enquiry stage</Label>
+                  <Select value={currentEnquiryStage} onValueChange={(value) => updateQueueMeta(quote, { enquiry_stage: value as EnquiryStageId })} disabled={!canEditWorkflow}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {ENQUIRY_STAGES.map((stage) => (
+                        <SelectItem key={stage.id} value={stage.id}>{stage.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Priority</Label>
+                  <Select value={getString(quote.stage_meta?.priority) || "normal"} onValueChange={(value) => updateQueueMeta(quote, { priority: value })} disabled={!canEditWorkflow}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="urgent">Urgent</SelectItem>
+                      <SelectItem value="high">High</SelectItem>
+                      <SelectItem value="normal">Normal</SelectItem>
+                      <SelectItem value="low">Low</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            </details>
+
+            <details className="rounded-md border bg-background p-2.5" open>
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
+                <span className="inline-flex items-center gap-2"><Users className="h-4 w-4" />With whom</span>
+                <Badge variant="outline">{getString(quote.stage_meta?.with_whom) || "Unassigned"}</Badge>
+              </summary>
+              <div className="mt-3 space-y-1.5">
+                <Label>Enquiry with</Label>
+                <Select
+                  value={getString(quote.stage_meta?.with_whom) || BLANK_SELECT_VALUE}
+                  onValueChange={(value) => updateQueueMeta(quote, { with_whom: value === BLANK_SELECT_VALUE ? "" : value })}
+                  disabled={!canEditWorkflow}
+                >
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={BLANK_SELECT_VALUE}>Unassigned</SelectItem>
+                    {WITH_WHOM_OPTIONS.map((name) => (
+                      <SelectItem key={name} value={name}>{name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </details>
+
+            <details className="rounded-md border bg-background p-2.5" open>
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
+                <span className="inline-flex items-center gap-2"><FileText className="h-4 w-4" />Created by</span>
+                <Badge variant="outline">{createdByRoleLabel}</Badge>
+              </summary>
+              <div className="mt-3 space-y-2 text-sm">
+                <div className="font-medium">{createdByLabel}</div>
+                <div className="text-xs text-muted-foreground">{quote.created_at ? new Date(quote.created_at).toLocaleString("en-GB") : "Created date not recorded"}</div>
+              </div>
+            </details>
+
+            <details className="rounded-md border bg-background p-2.5">
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2"><ShieldCheck className="h-4 w-4" />Quality and risk</span>
                 <Badge variant={qualityReport.score >= 80 ? "secondary" : qualityReport.score >= 60 ? "warning" : "outline"}>{qualityReport.score}%</Badge>
@@ -2642,7 +3388,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         )}
       </div>
 
-      {isDraftSection && (
+      {isDraftSection && canEditQuote && (
         <Card className="overflow-hidden">
           <CardHeader className="border-b px-4 py-3">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -2788,8 +3534,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               <QuoteTimeline quote={quote} />
             </>
           )}
-          <Card className={tableMode === "spreadsheet" ? "rounded-none shadow-none" : ""}>
-            <CardHeader className={`sticky top-16 z-20 border-b bg-card/95 backdrop-blur ${tableMode === "spreadsheet" ? "px-3 py-2" : "px-4 py-3"}`}>
+          <Card className={tableMode === "spreadsheet" ? `rounded-none shadow-none ${spreadsheetFullscreen ? "fixed inset-0 z-50 flex h-[100dvh] w-[100vw] flex-col border-0 bg-background" : ""}` : ""}>
+            <CardHeader className={`sticky ${spreadsheetFullscreen ? "top-0" : "top-16"} z-20 border-b bg-card/95 backdrop-blur ${tableMode === "spreadsheet" ? "px-3 py-2" : "px-4 py-3"}`}>
               <div className="flex flex-col gap-3 2xl:flex-row 2xl:items-center 2xl:justify-between">
                 <div className="flex items-center gap-3">
                   <div className="flex h-9 w-9 items-center justify-center rounded-md border bg-background">
@@ -2853,22 +3599,40 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       </SelectContent>
                     </Select>
                   </div>
-                  <Button variant="secondary" size="sm" onClick={addBlankRow} title="Add row">
-                    <Plus className="h-4 w-4" />
-                    Row
-                  </Button>
-                  <Button variant="secondary" size="sm" onClick={persistInlineEdits} title="Save enquiry items">
-                    <Save className="h-4 w-4" />
-                    Save
-                  </Button>
-                  <Button size="sm" onClick={openQuotationScreen} disabled={!quote || !items.length}>
-                    <ArrowRight className="h-4 w-4" />
-                    Quotation
-                  </Button>
+                  {canEditLineItems && (
+                    <>
+                      <Button variant="secondary" size="sm" onClick={addBlankRow} title="Add row">
+                        <Plus className="h-4 w-4" />
+                        Row
+                      </Button>
+                      <Button variant="secondary" size="sm" onClick={persistInlineEdits} title="Save enquiry items">
+                        <Save className="h-4 w-4" />
+                        Save
+                      </Button>
+                    </>
+                  )}
+                  {tableMode === "spreadsheet" && (
+                    <Button variant="secondary" size="sm" onClick={() => setSpreadsheetFullscreen((value) => !value)} title={spreadsheetFullscreen ? "Exit fullscreen spreadsheet" : "Open fullscreen spreadsheet"}>
+                      {spreadsheetFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                      {spreadsheetFullscreen ? "Exit full screen" : "Full screen"}
+                    </Button>
+                  )}
+                  {canEditQuotation && (
+                    <Button size="sm" onClick={openQuotationScreen} disabled={!quote || !items.length}>
+                      <ArrowRight className="h-4 w-4" />
+                      Quotation
+                    </Button>
+                  )}
                 </div>
               </div>
             </CardHeader>
-            <CardContent className={tableMode === "spreadsheet" ? "space-y-3 p-3" : "space-y-4 pt-5"}>
+            <CardContent className={tableMode === "spreadsheet" ? `space-y-3 p-3 ${spreadsheetFullscreen ? "flex-1 overflow-auto" : ""}` : "space-y-4 pt-5"}>
+              {!canEditLineItems && (
+                <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+                  Sales access is view-only for line items and quotation work. Customer details and notes can still be updated above.
+                </div>
+              )}
+              {canEditLineItems && (
               <div className={`flex flex-wrap items-center gap-2 ${tableMode === "spreadsheet" ? "rounded-md border bg-muted/20 p-2" : ""}`}>
                 <div className="flex flex-wrap gap-2 rounded-md border bg-background p-1">
                 <Button variant="ghost" size="sm" onClick={() => recomputeRows(selectedIndices.length ? selectedIndices : displayIndices)} title="Update generated descriptions">
@@ -2917,8 +3681,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   </Button>
                 )}
               </div>
+              )}
 
-              <details className={tableMode === "spreadsheet" ? "rounded-md border p-2" : "rounded-md border p-3"}>
+              {canEditLineItems && <details className={tableMode === "spreadsheet" ? "rounded-md border p-2" : "rounded-md border p-3"}>
                 <summary className="cursor-pointer text-sm font-medium">
                   <span className="inline-flex items-center gap-2">
                     <SlidersHorizontal className="h-4 w-4" />
@@ -2979,7 +3744,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     <Button variant="secondary" onClick={() => applyBulkEdit().catch((error) => toast.error(error.message))}>Apply Bulk Edit</Button>
                   </div>
                 </div>
-              </details>
+              </details>}
 
               <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_380px]">
                 <div className="min-w-0 space-y-3">
@@ -3010,6 +3775,27 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 </div>
               </div>
 
+              {tableMode === "spreadsheet" && (
+                <div className="grid gap-2 border bg-[#f8f8f8] p-2 text-xs dark:bg-muted/40 md:grid-cols-[96px_minmax(0,1fr)_auto]">
+                  <div className="flex h-8 items-center border bg-background px-2 font-mono text-muted-foreground">
+                    {activeCellAddress || "A1"}
+                  </div>
+                  <div className="flex h-8 min-w-0 items-center border bg-background">
+                    <div className="flex h-full w-10 shrink-0 items-center justify-center border-r font-serif italic text-muted-foreground">fx</div>
+                    <input
+                      className="h-full min-w-0 flex-1 border-0 bg-transparent px-2 font-mono text-xs outline-none"
+                      value={activeCellValue}
+                      readOnly
+                      title={activeCellValue}
+                    />
+                  </div>
+                  <div className="flex h-8 items-center gap-2 border bg-background px-2 text-muted-foreground">
+                    <span>{selectedCellCount ? `${selectedCellCount} cell${selectedCellCount === 1 ? "" : "s"}` : "0 cells"}</span>
+                    {editingCell && <Badge variant="outline">Edit</Badge>}
+                  </div>
+                </div>
+              )}
+
               <div
                 ref={draftGridRef}
                 tabIndex={0}
@@ -3026,8 +3812,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 <Table className={`w-max min-w-full border-collapse text-xs ${tableMode === "spreadsheet" ? "[&_td]:border-r [&_td]:border-b [&_th]:border-r [&_th]:border-b" : ""}`}>
                   <TableHeader className={tableMode === "spreadsheet" ? "sticky top-0 z-30 bg-muted" : "sticky top-0 z-30 bg-card"}>
                     <TableRow className="hover:bg-transparent">
-                      <TableHead className={`sticky left-0 z-40 h-8 w-10 border-r px-2 text-center ${tableMode === "spreadsheet" ? "bg-muted" : "bg-card"}`}>
-                        {tableMode === "spreadsheet" ? <Check className="mx-auto h-3.5 w-3.5" /> : "Sel"}
+                      <TableHead className={`sticky left-0 z-40 h-8 w-10 border-r px-2 text-center ${tableMode === "spreadsheet" ? "bg-[#f3f3f3] text-muted-foreground dark:bg-muted" : "bg-card"}`}>
+                        {tableMode === "spreadsheet" ? "" : "Sel"}
                       </TableHead>
                       {tableMode !== "spreadsheet" && <TableHead className="sticky left-10 z-40 h-8 w-20 border-r bg-card px-2 text-center">Tools</TableHead>}
                       {activeTableColumns.map((column) => (
@@ -3091,19 +3877,35 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                             setSelectedRows(new Set([index]));
                           }}
                         >
-                          <TableCell className={`sticky left-0 z-20 border-r p-0 text-center align-middle ${tableMode === "spreadsheet" ? "bg-background" : "bg-card"}`}>
-                            <input
-                              type="checkbox"
-                              checked={selected}
-                              onClick={(event) => event.stopPropagation()}
-                              onChange={(event) => {
-                                const next = new Set(selectedRows);
-                                if (event.target.checked) next.add(index);
-                                else next.delete(index);
-                                setSelectedRows(next);
-                              }}
-                              aria-label={`Select row ${index + 1}`}
-                            />
+                          <TableCell className={`sticky left-0 z-20 border-r p-0 text-center align-middle ${tableMode === "spreadsheet" ? "bg-[#f3f3f3] text-muted-foreground dark:bg-muted" : "bg-card"}`}>
+                            {tableMode === "spreadsheet" ? (
+                              <button
+                                type="button"
+                                className={`h-full w-full px-1 text-xs ${selected ? "bg-emerald-100 text-emerald-950 dark:bg-emerald-950/40 dark:text-emerald-100" : ""}`}
+                                onClick={() => {
+                                  const next = new Set(selectedRows);
+                                  if (next.has(index)) next.delete(index);
+                                  else next.add(index);
+                                  setSelectedRows(next);
+                                }}
+                                title={`Select row ${index + 1}`}
+                              >
+                                {index + 1}
+                              </button>
+                            ) : (
+                              <input
+                                type="checkbox"
+                                checked={selected}
+                                onClick={(event) => event.stopPropagation()}
+                                onChange={(event) => {
+                                  const next = new Set(selectedRows);
+                                  if (event.target.checked) next.add(index);
+                                  else next.delete(index);
+                                  setSelectedRows(next);
+                                }}
+                                aria-label={`Select row ${index + 1}`}
+                              />
+                            )}
                           </TableCell>
                           {tableMode !== "spreadsheet" && (
                             <TableCell className="sticky left-10 z-20 border-r bg-card p-0 align-middle">
@@ -3144,11 +3946,22 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                               data-grid-row={index}
                               data-grid-col={colIndex}
                               tabIndex={tableMode === "spreadsheet" ? 0 : undefined}
-                              className={`border-r p-0 align-top outline-none ${selectedCell ? "bg-primary/10 ring-1 ring-inset ring-primary/50" : ""} ${activeGridCell ? "ring-2 ring-inset ring-primary" : ""}`}
+                              className={`border-r p-0 align-top outline-none ${selectedCell ? "bg-emerald-50 ring-1 ring-inset ring-emerald-400/60 dark:bg-emerald-950/20" : ""} ${activeGridCell ? "ring-2 ring-inset ring-emerald-600" : ""}`}
                               onMouseDown={(event) => {
                                 if (tableMode !== "spreadsheet") return;
+                                event.preventDefault();
                                 selectGridCell(index, colIndex, event.shiftKey);
                                 setIsSelectingCells(true);
+                                focusGridCell(index, colIndex);
+                              }}
+                              onDoubleClick={(event) => {
+                                if (tableMode !== "spreadsheet") return;
+                                event.preventDefault();
+                                if (column.kind === "checkbox") {
+                                  toggleGridCheckbox(index, column);
+                                  return;
+                                }
+                                startEditingGridCell(index, colIndex);
                               }}
                               onMouseEnter={() => {
                                 if (tableMode !== "spreadsheet" || !isSelectingCells) return;
@@ -3156,10 +3969,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                               }}
                               onFocus={() => {
                                 if (tableMode !== "spreadsheet") return;
+                                if (isEditingGridCell(index, colIndex)) return;
                                 if (!isGridCellSelected(index, colIndex)) selectGridCell(index, colIndex, false);
                               }}
                             >
-                              {renderGridCell(index, item, column)}
+                              {renderGridCell(index, item, column, colIndex)}
                             </TableCell>
                           );
                           })}
@@ -3212,7 +4026,19 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                             : "Select one row"}
                       </div>
                     </div>
-                    {selectedItem && selectedRowIndex !== null && <Badge variant="outline">{getString(selectedItem.status) || "draft"}</Badge>}
+                    {selectedItem && selectedRowIndex !== null && (
+                      <div className="min-w-32">
+                        <Label className="mb-1.5 block text-xs text-muted-foreground">Status</Label>
+                        <Select value={getString(selectedItem.status) || "missing"} onValueChange={(value) => updateItem(selectedRowIndex, "status", value)} disabled={!canEditLineItems}>
+                          <SelectTrigger className={SHEET_SELECT_CLASS}>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {STATUS_OPTIONS.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
                   </div>
 
                   {selectedItem && selectedRowIndex !== null ? (
@@ -3279,13 +4105,54 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 </aside>
               </div>
 
-              <div className="grid gap-4 lg:grid-cols-3">
+              <div className="grid gap-4">
                 <div className="rounded-md border p-3">
                   <div className="text-sm font-medium">Extraction summary</div>
-                  <div className="mt-2 space-y-1 text-sm text-muted-foreground">
-                    {shownSummary.map(([key, count], index) => <div key={key}><span className="font-medium">{index + 1}.</span> {key} <span className="text-xs">({count})</span></div>)}
-                    {hiddenSummaryCount > 0 && <div>+ {hiddenSummaryCount} more summary group(s)</div>}
-                    {!items.length && <div>No items yet.</div>}
+                  <div className="mt-2 overflow-hidden rounded-md border bg-background">
+                    <Table className={SHEET_TABLE_CLASS}>
+                      <TableHeader className={SHEET_HEADER_CLASS}>
+                        <TableRow>
+                          <TableHead className={SHEET_ROW_HEADER_CLASS} />
+                          <TableHead className={`${SHEET_HEAD_CLASS} min-w-56`}>Summary item</TableHead>
+                          <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Count</TableHead>
+                          <TableHead className={`${SHEET_HEAD_CLASS} min-w-56`}>Note 1</TableHead>
+                          <TableHead className={`${SHEET_HEAD_CLASS} min-w-56`}>Note 2</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {extractionSummary.length > 0 ? extractionSummary.map(([key, count], index) => (
+                          <TableRow key={key}>
+                            <TableCell className={SHEET_ROW_HEADER_CLASS}>{index + 1}</TableCell>
+                            <TableCell className={SHEET_CELL_CLASS}>{key}</TableCell>
+                            <TableCell className={SHEET_CELL_CLASS}>{count}</TableCell>
+                            <TableCell className={SHEET_CELL_CLASS}>
+                              <Input
+                                className={SHEET_INPUT_CLASS}
+                                value={getString(extractionSummaryNotes?.[key]?.note1)}
+                                onChange={(event) => {
+                                  void updateExtractionSummaryNote(key, "note1", event.target.value);
+                                }}
+                                placeholder="Add note"
+                              />
+                            </TableCell>
+                            <TableCell className={SHEET_CELL_CLASS}>
+                              <Input
+                                className={SHEET_INPUT_CLASS}
+                                value={getString(extractionSummaryNotes?.[key]?.note2)}
+                                onChange={(event) => {
+                                  void updateExtractionSummaryNote(key, "note2", event.target.value);
+                                }}
+                                placeholder="Add note"
+                              />
+                            </TableCell>
+                          </TableRow>
+                        )) : (
+                          <TableRow>
+                            <TableCell className={SHEET_CELL_CLASS} colSpan={5}>No items yet.</TableCell>
+                          </TableRow>
+                        )}
+                      </TableBody>
+                    </Table>
                   </div>
                 </div>
                 <div className="rounded-md border p-3 lg:col-span-2">
@@ -3335,6 +4202,26 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   )}
                 </div>
               </div>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2">
+                <div className="min-w-0">
+                  <div className="text-xs font-medium">Material planning</div>
+                  <div className="text-xs text-muted-foreground">
+                    {quote.stage_meta?.material_planning_enabled === true ? "Included in material planning." : "Press to add this enquiry to material planning."}
+                  </div>
+                </div>
+                <Button
+                  variant={quote.stage_meta?.material_planning_enabled === true ? "secondary" : "default"}
+                  size="sm"
+                  onClick={() => updateQueueMeta(quote, {
+                    material_planning_enabled: true,
+                    material_planning_enabled_at: new Date().toISOString(),
+                  })}
+                  disabled={quote.stage_meta?.material_planning_enabled === true}
+                >
+                  <Layers3 className="h-4 w-4" />
+                  {quote.stage_meta?.material_planning_enabled === true ? "Added to material" : "Add to material planning"}
+                </Button>
+              </div>
             </CardContent>
           </Card>
         </>
@@ -3352,32 +4239,44 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <CardTitle className="text-base">Material planning</CardTitle>
                   <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                     <Badge variant={materialBreakdown?.length ? "secondary" : "outline"}>Phase 1</Badge>
-                    <Badge variant={materialPlan ? "secondary" : "outline"}>Phase 2</Badge>
+                    <Badge variant={materialPhase2Finished ? "secondary" : materialPlan ? "warning" : "outline"}>Phase 2{materialPlanStatus ? ` ${materialPlanStatus}` : ""}</Badge>
                     <span>{items.length} enquiry item(s)</span>
                   </div>
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
-                {(materialBreakdown || materialPlan) && (
+                {((materialBreakdown && !materialPlan) || (materialPlan && canEditMaterialPhase2 && !materialPhase2Finished)) && (
                   <Button variant="secondary" size="sm" onClick={() => saveMaterialPlan()}>
                     <Save className="h-4 w-4" />
                     Save
                   </Button>
                 )}
-                {(materialBreakdown || materialPlan) && (
+                {(materialBreakdown || materialPlan) && canEditMaterialPhase2 && !materialPhase2Finished && (
                   <Button variant="secondary" size="sm" onClick={clearMaterialPlan}>
                     <X className="h-4 w-4" />
                     Clear
                   </Button>
                 )}
-                <Button variant="secondary" size="sm" onClick={generateMaterialBreakdown} disabled={!items.length}>
+                <Button variant="secondary" size="sm" onClick={generateMaterialBreakdown} disabled={!items.length || !canRunMaterialPhase1}>
                   <Layers3 className="h-4 w-4" />
                   {materialBreakdown ? "Update" : "Breakdown"}
                 </Button>
-                <Button size="sm" onClick={generateMaterialPlan} disabled={!items.length || !materialBreakdown?.length}>
+                <Button size="sm" onClick={startManualMaterialPlan} disabled={!items.length || !materialBreakdown?.length || !canEditMaterialPhase2 || materialPhase2Finished}>
                   <ArrowRight className="h-4 w-4" />
-                  {materialPlan ? "Update plan" : "Create plan"}
+                  {materialPlan ? "Reset Phase 2" : "Start Phase 2"}
                 </Button>
+                {materialPlan && canEditMaterialPhase2 && !materialPhase2Finished && (
+                  <Button variant="secondary" size="sm" onClick={submitMaterialPlan}>
+                    <Send className="h-4 w-4" />
+                    Submit
+                  </Button>
+                )}
+                {materialPlan && canEditMaterialPhase2 && !materialPhase2Finished && (
+                  <Button size="sm" onClick={finishMaterialPlan}>
+                    <CheckCircle2 className="h-4 w-4" />
+                    Finish
+                  </Button>
+                )}
                 <Button variant="secondary" size="sm" onClick={() => copyRowsToClipboard("Phase 1 breakdown", phase1ExportRows())} disabled={!materialBreakdown?.length}>
                   <Copy className="h-4 w-4" />
                   Copy P1
@@ -3408,33 +4307,35 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 <summary className="cursor-pointer text-sm font-medium">
                   <span className="inline-flex items-center gap-2"><Layers3 className="h-4 w-4" />Phase 1 material breakdown</span>
                 </summary>
-                <div className="mt-3 overflow-auto">
-                  <Table>
-                    <TableHeader>
+                <div className="mt-3 max-h-[520px] overflow-auto border bg-background">
+                  <Table className={SHEET_TABLE_CLASS}>
+                    <TableHeader className={SHEET_HEADER_CLASS}>
                       <TableRow>
-                        <TableHead className="w-20">Review</TableHead>
-                        <TableHead className="w-16">SL</TableHead>
-                        <TableHead className="w-32">Type</TableHead>
-                        <TableHead className="w-28">Size (inch)</TableHead>
-                        <TableHead className="w-32">Pressure rating</TableHead>
-                        <TableHead className="w-28">Thickness</TableHead>
-                        <TableHead className="w-36">Primary material</TableHead>
-                        <TableHead className="w-36">Secondary / inner</TableHead>
-                        <TableHead className="w-36">Outer / hardware</TableHead>
-                        <TableHead className="w-44">Filler / facing / seals</TableHead>
-                        <TableHead className="w-28">Qty</TableHead>
-                        <TableHead className="w-24">UOM</TableHead>
-                        <TableHead className="w-32">Series</TableHead>
-                        <TableHead className="min-w-56">Remarks</TableHead>
-                        <TableHead className="w-28">OD mm</TableHead>
-                        <TableHead className="w-28">ID mm</TableHead>
-                        <TableHead className="w-28">Source rows</TableHead>
+                        <TableHead className={SHEET_ROW_HEADER_CLASS} />
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-20`}>Review</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-16`}>SL</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-32`}>Type</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Size (inch)</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-32`}>Pressure rating</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Thickness</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-36`}>Primary material</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-36`}>Secondary / inner</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-36`}>Outer / hardware</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-44`}>Filler / facing / seals</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Qty</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-24`}>UOM</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-32`}>Series</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} min-w-56`}>Remarks</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>OD mm</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>ID mm</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Source rows</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {materialBreakdown.map((row, index) => (
-                        <TableRow key={`${row.line_no}-${row.size_inch}-${row.pressure_rating}-${index}`}>
-                          <TableCell>
+                        <TableRow key={`${row.line_no}-${row.size_inch}-${row.pressure_rating}-${index}`} className="hover:bg-emerald-50/30 dark:hover:bg-emerald-950/10">
+                          <TableCell className={SHEET_ROW_HEADER_CLASS}>{index + 1}</TableCell>
+                          <TableCell className={`${SHEET_CELL_CLASS} text-center`}>
                             <input
                               type="checkbox"
                               checked={row.reviewed}
@@ -3442,22 +4343,22 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                               aria-label={`Mark breakdown row ${index + 1} reviewed`}
                             />
                           </TableCell>
-                          <TableCell>{row.line_no}</TableCell>
-                          <TableCell><Input className="w-28" value={row.gasket_type} onChange={(event) => updateBreakdownRow(index, { gasket_type: event.target.value.toUpperCase() })} /></TableCell>
-                          <TableCell><Input className="w-24" value={row.size_inch} onChange={(event) => updateBreakdownRow(index, { size_inch: event.target.value })} /></TableCell>
-                          <TableCell><Input className="w-28" value={row.pressure_rating} onChange={(event) => updateBreakdownRow(index, { pressure_rating: event.target.value })} /></TableCell>
-                          <TableCell><Input className="w-24" value={row.thickness} onChange={(event) => updateBreakdownRow(index, { thickness: event.target.value })} /></TableCell>
-                          <TableCell><Input className="w-32" value={row.winding} onChange={(event) => updateBreakdownRow(index, { winding: event.target.value })} /></TableCell>
-                          <TableCell><Input className="w-32" value={row.inner_ring} onChange={(event) => updateBreakdownRow(index, { inner_ring: event.target.value })} /></TableCell>
-                          <TableCell><Input className="w-32" value={row.outer_ring} onChange={(event) => updateBreakdownRow(index, { outer_ring: event.target.value })} /></TableCell>
-                          <TableCell><Input className="w-40" value={row.filler} onChange={(event) => updateBreakdownRow(index, { filler: event.target.value })} /></TableCell>
-                          <TableCell><Input className="w-24" type="number" value={getString(row.qty)} onChange={(event) => updateBreakdownRow(index, { qty: Number(event.target.value) || 0 })} /></TableCell>
-                          <TableCell><Input className="w-20" value={row.uom} onChange={(event) => updateBreakdownRow(index, { uom: event.target.value })} /></TableCell>
-                          <TableCell><Input className="w-28" value={row.series} onChange={(event) => updateBreakdownRow(index, { series: event.target.value })} /></TableCell>
-                          <TableCell><Input className="w-52" value={row.remarks} onChange={(event) => updateBreakdownRow(index, { remarks: event.target.value })} /></TableCell>
-                          <TableCell><Input className="w-24" type="number" value={getString(row.od_mm)} onChange={(event) => updateBreakdownRow(index, { od_mm: Number(event.target.value) || null })} /></TableCell>
-                          <TableCell><Input className="w-24" type="number" value={getString(row.id_mm)} onChange={(event) => updateBreakdownRow(index, { id_mm: Number(event.target.value) || null })} /></TableCell>
-                          <TableCell className="text-sm">{row.source_rows}</TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}>{row.line_no}</TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-28`} value={row.gasket_type} onChange={(event) => updateBreakdownRow(index, { gasket_type: event.target.value.toUpperCase() })} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-24`} value={row.size_inch} onChange={(event) => updateBreakdownRow(index, { size_inch: event.target.value })} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-28`} value={row.pressure_rating} onChange={(event) => updateBreakdownRow(index, { pressure_rating: event.target.value })} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-24`} value={row.thickness} onChange={(event) => updateBreakdownRow(index, { thickness: event.target.value })} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-32`} value={row.winding} onChange={(event) => updateBreakdownRow(index, { winding: event.target.value })} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-32`} value={row.inner_ring} onChange={(event) => updateBreakdownRow(index, { inner_ring: event.target.value })} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-32`} value={row.outer_ring} onChange={(event) => updateBreakdownRow(index, { outer_ring: event.target.value })} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-40`} value={row.filler} onChange={(event) => updateBreakdownRow(index, { filler: event.target.value })} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-24`} type="number" value={getString(row.qty)} onChange={(event) => updateBreakdownRow(index, { qty: Number(event.target.value) || 0 })} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-20`} value={row.uom} onChange={(event) => updateBreakdownRow(index, { uom: event.target.value })} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-28`} value={row.series} onChange={(event) => updateBreakdownRow(index, { series: event.target.value })} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-52`} value={row.remarks} onChange={(event) => updateBreakdownRow(index, { remarks: event.target.value })} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-24`} type="number" value={getString(row.od_mm)} onChange={(event) => updateBreakdownRow(index, { od_mm: Number(event.target.value) || null })} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-24`} type="number" value={getString(row.id_mm)} onChange={(event) => updateBreakdownRow(index, { id_mm: Number(event.target.value) || null })} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}>{row.source_rows}</TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -3469,175 +4370,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               </details>
             )}
 
-            <details className="rounded-md border p-3" open>
-              <summary className="cursor-pointer text-sm font-medium">
-                <span className="inline-flex items-center gap-2"><SlidersHorizontal className="h-4 w-4" />Phase 2 stock inputs</span>
-              </summary>
-              <div className="mt-3 grid gap-3 md:grid-cols-3 xl:grid-cols-5">
-                <Field
-                  label="Sheet width (mm)"
-                  type="number"
-                  value={String(materialConfig.sheet_width_mm)}
-                  onChange={(value) => {
-                    setMaterialConfig((current) => ({ ...current, sheet_width_mm: Number(value) || DEFAULT_SHEET_WIDTH_MM }));
-                    setMaterialPlan(null);
-                  }}
-                />
-                <Field
-                  label="Sheet length (mm)"
-                  type="number"
-                  value={String(materialConfig.sheet_length_mm)}
-                  onChange={(value) => {
-                    setMaterialConfig((current) => ({ ...current, sheet_length_mm: Number(value) || DEFAULT_SHEET_LENGTH_MM }));
-                    setMaterialPlan(null);
-                  }}
-                />
-                <Field
-                  label="Nesting efficiency (%)"
-                  type="number"
-                  value={String(Math.round(materialConfig.nesting_efficiency * 100))}
-                  onChange={(value) => {
-                    const percent = Math.max(10, Math.min(Number(value) || Math.round(DEFAULT_NESTING_EFFICIENCY * 100), 100));
-                    setMaterialConfig((current) => ({ ...current, nesting_efficiency: percent / 100 }));
-                    setMaterialPlan(null);
-                  }}
-                />
-                <Field
-                  label="Winding strip width (mm)"
-                  type="number"
-                  value={String(materialConfig.winding_strip_width_mm)}
-                  onChange={(value) => {
-                    setMaterialConfig((current) => ({ ...current, winding_strip_width_mm: Number(value) || DEFAULT_MATERIAL_PLANNING_INPUTS.winding_strip_width_mm }));
-                    setMaterialPlan(null);
-                  }}
-                />
-                <Field
-                  label="Winding strip thk (mm)"
-                  type="number"
-                  value={String(materialConfig.winding_strip_thickness_mm)}
-                  onChange={(value) => {
-                    setMaterialConfig((current) => ({ ...current, winding_strip_thickness_mm: Number(value) || DEFAULT_MATERIAL_PLANNING_INPUTS.winding_strip_thickness_mm }));
-                    setMaterialPlan(null);
-                  }}
-                />
-                <Field
-                  label="Filler tape width (mm)"
-                  type="number"
-                  value={String(materialConfig.filler_tape_width_mm)}
-                  onChange={(value) => {
-                    setMaterialConfig((current) => ({ ...current, filler_tape_width_mm: Number(value) || DEFAULT_MATERIAL_PLANNING_INPUTS.filler_tape_width_mm }));
-                    setMaterialPlan(null);
-                  }}
-                />
-                <Field
-                  label="Filler tape thk (mm)"
-                  type="number"
-                  value={String(materialConfig.filler_tape_thickness_mm)}
-                  onChange={(value) => {
-                    setMaterialConfig((current) => ({ ...current, filler_tape_thickness_mm: Number(value) || DEFAULT_MATERIAL_PLANNING_INPUTS.filler_tape_thickness_mm }));
-                    setMaterialPlan(null);
-                  }}
-                />
-                <Field
-                  label="Ring radial allowance (mm)"
-                  type="number"
-                  value={String(materialConfig.ring_radial_allowance_mm)}
-                  onChange={(value) => {
-                    setMaterialConfig((current) => ({ ...current, ring_radial_allowance_mm: Number(value) || DEFAULT_MATERIAL_PLANNING_INPUTS.ring_radial_allowance_mm }));
-                    setMaterialPlan(null);
-                  }}
-                />
-                <Field
-                  label="Ring stock thk (mm)"
-                  type="number"
-                  value={String(materialConfig.ring_thickness_mm)}
-                  onChange={(value) => {
-                    setMaterialConfig((current) => ({ ...current, ring_thickness_mm: Number(value) || DEFAULT_MATERIAL_PLANNING_INPUTS.ring_thickness_mm }));
-                    setMaterialPlan(null);
-                  }}
-                />
-                <Field
-                  label="Purchase wastage (%)"
-                  type="number"
-                  value={String(materialConfig.purchase_wastage_percent)}
-                  onChange={(value) => {
-                    setMaterialConfig((current) => ({ ...current, purchase_wastage_percent: Math.max(0, Number(value) || DEFAULT_MATERIAL_PLANNING_INPUTS.purchase_wastage_percent) }));
-                    setMaterialPlan(null);
-                  }}
-                />
-              </div>
-              <div className="mt-3 text-xs leading-5 text-muted-foreground">
-                These defaults seed the material-specific input rows. Override individual materials below when a supplier offers different coil width, filler tape, ring blank, sheet size, MOQ, rate, lead time, or usable stock.
-              </div>
-            </details>
-
-            {materialInputs.length > 0 && (
-              <details className="rounded-md border p-3" open>
-                <summary className="cursor-pointer text-sm font-medium">
-                  <span className="inline-flex items-center gap-2"><ListFilter className="h-4 w-4" />Material-specific inputs</span>
-                </summary>
-                <div className="mt-3 overflow-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="min-w-36">Material</TableHead>
-                        <TableHead className="min-w-44">Component</TableHead>
-                        <TableHead className="min-w-36">Stock form</TableHead>
-                        <TableHead className="w-32">UOM</TableHead>
-                        <TableHead className="w-28">Width</TableHead>
-                        <TableHead className="w-28">Length</TableHead>
-                        <TableHead className="w-28">Thk</TableHead>
-                        <TableHead className="w-28">Wastage %</TableHead>
-                        <TableHead className="w-28">Available</TableHead>
-                        <TableHead className="w-28">Reserved</TableHead>
-                        <TableHead className="w-28">MOQ</TableHead>
-                        <TableHead className="w-28">Rate</TableHead>
-                        <TableHead className="w-32">Lead days</TableHead>
-                        <TableHead className="w-40">Vendor</TableHead>
-                        <TableHead className="min-w-72">Notes</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {materialInputs.map((row, index) => (
-                        <TableRow key={`${row.material}-${row.component}-${index}`}>
-                          <TableCell className="font-medium">{row.material}</TableCell>
-                          <TableCell>{row.component}</TableCell>
-                          <TableCell><Input className="w-36" value={row.stock_form} onChange={(event) => updateMaterialInputRow(index, { stock_form: event.target.value })} /></TableCell>
-                          <TableCell>
-                            <Select value={row.purchase_uom} onValueChange={(value) => updateMaterialInputRow(index, { purchase_uom: value as MaterialInputRow["purchase_uom"] })}>
-                              <SelectTrigger className="w-28"><SelectValue /></SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="SHEETS">Sheets</SelectItem>
-                                <SelectItem value="KG">Kg</SelectItem>
-                                <SelectItem value="COIL">Coil</SelectItem>
-                                <SelectItem value="RINGS">Rings</SelectItem>
-                                <SelectItem value="NOS">Nos</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </TableCell>
-                          <TableCell><Input className="w-24" type="number" value={getString(row.stock_width_mm)} onChange={(event) => updateMaterialInputRow(index, { stock_width_mm: Number(event.target.value) || null })} /></TableCell>
-                          <TableCell><Input className="w-24" value={getString(row.stock_length_mm)} onChange={(event) => updateMaterialInputRow(index, { stock_length_mm: event.target.value.toUpperCase() === "COIL" ? "COIL" : Number(event.target.value) || null })} /></TableCell>
-                          <TableCell><Input className="w-24" type="number" value={getString(row.stock_thickness_mm)} onChange={(event) => updateMaterialInputRow(index, { stock_thickness_mm: Number(event.target.value) || null })} /></TableCell>
-                          <TableCell><Input className="w-24" type="number" value={getString(row.wastage_percent)} onChange={(event) => updateMaterialInputRow(index, { wastage_percent: Number(event.target.value) || 0 })} /></TableCell>
-                          <TableCell><Input className="w-24" type="number" value={getString(row.available_qty)} onChange={(event) => updateMaterialInputRow(index, { available_qty: Number(event.target.value) || 0 })} /></TableCell>
-                          <TableCell><Input className="w-24" type="number" value={getString(row.reserved_qty)} onChange={(event) => updateMaterialInputRow(index, { reserved_qty: Number(event.target.value) || 0 })} /></TableCell>
-                          <TableCell><Input className="w-24" type="number" value={getString(row.moq)} onChange={(event) => updateMaterialInputRow(index, { moq: Number(event.target.value) || 0 })} /></TableCell>
-                          <TableCell><Input className="w-24" type="number" value={getString(row.rate_per_uom)} onChange={(event) => updateMaterialInputRow(index, { rate_per_uom: Number(event.target.value) || 0 })} /></TableCell>
-                          <TableCell><Input className="w-24" type="number" value={getString(row.lead_time_days)} onChange={(event) => updateMaterialInputRow(index, { lead_time_days: Number(event.target.value) || 0 })} /></TableCell>
-                          <TableCell><Input className="w-36" value={row.preferred_vendor} onChange={(event) => updateMaterialInputRow(index, { preferred_vendor: event.target.value })} /></TableCell>
-                          <TableCell><Input className="w-64" value={row.notes} onChange={(event) => updateMaterialInputRow(index, { notes: event.target.value })} /></TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              </details>
-            )}
-
             {!materialPlan ? (
               <div className="flex items-center gap-3 rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
                 <ArrowRight className="h-4 w-4 shrink-0" />
-                <span>Create the Phase 2 plan to see stock size, planned quantity, purchase weight, shortage, and review notes.</span>
+                <span>Material planner users can start Phase 2 after Phase 1 review. Phase 2 is a manual spreadsheet for stock, quantity, vendor, shortage, and planner notes.</span>
               </div>
             ) : (
               <>
@@ -3646,21 +4382,21 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     {quote?.customer || quote?.quote_no || "Untitled enquiry"} - REG : {quote?.quote_no || quote?.id || "N/A"} / {quote?.project_ref || "N/A"} / {quote?.custom_label || "GASKETS"}
                   </div>
                   <div className="text-sm text-muted-foreground">
-                    Sheet rows use {materialPlan.config.sheet_width_mm} x {materialPlan.config.sheet_length_mm} mm stock with {Math.round(materialPlan.config.nesting_efficiency * 100)}% nesting efficiency.
+                    Phase 2 is manually maintained by the material planner. Add, delete, and edit rows before submitting or finishing the material plan.
                   </div>
                 </div>
 
                 <div className="grid gap-2 md:grid-cols-3 xl:grid-cols-6">
                   <div className="rounded-md border bg-background p-3">
-                    <div className="text-xs text-muted-foreground">Components</div>
+                    <div className="text-xs text-muted-foreground">Rows</div>
                     <div className="text-lg font-semibold">{materialPlan.totals.component_count}</div>
                   </div>
                   <div className="rounded-md border p-3">
-                    <div className="text-xs text-muted-foreground">Sheet demand</div>
+                    <div className="text-xs text-muted-foreground">Sheet qty</div>
                     <div className="text-lg font-semibold">{materialPlan.totals.sheet_count.toFixed(0)}</div>
                   </div>
                   <div className="rounded-md border bg-background p-3">
-                    <div className="text-xs text-muted-foreground">Estimated purchase weight</div>
+                    <div className="text-xs text-muted-foreground">Weight qty</div>
                     <div className="text-lg font-semibold">{materialPlan.totals.total_weight_kg.toFixed(3)} kg</div>
                   </div>
                   <div className="rounded-md border bg-background p-3">
@@ -3672,7 +4408,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     <div className="text-lg font-semibold">{materialPlan.rows.reduce((sum, row) => sum + row.suggested_purchase_qty, 0).toFixed(2)}</div>
                   </div>
                   <div className="rounded-md border bg-background p-3">
-                    <div className="text-xs text-muted-foreground">Material cost impact</div>
+                    <div className="text-xs text-muted-foreground">Material cost</div>
                     <div className="text-lg font-semibold">{materialPlan.rows.reduce((sum, row) => sum + row.estimated_material_cost, 0).toFixed(2)}</div>
                   </div>
                 </div>
@@ -3702,25 +4438,27 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     <summary className="cursor-pointer text-sm font-medium">
                       <span className="inline-flex items-center gap-2"><ShoppingCart className="h-4 w-4" />Grouped purchase summary</span>
                     </summary>
-                    <div className="mt-3 overflow-auto">
-                      <Table>
-                        <TableHeader>
+                    <div className="mt-3 overflow-auto border bg-background">
+                      <Table className={SHEET_TABLE_CLASS}>
+                        <TableHeader className={SHEET_HEADER_CLASS}>
                           <TableRow>
-                            <TableHead>Material / thickness / vendor</TableHead>
-                            <TableHead className="w-24">Rows</TableHead>
-                            <TableHead className="w-32">Shortage</TableHead>
-                            <TableHead className="w-40">Suggested purchase</TableHead>
-                            <TableHead className="w-36">Est. cost</TableHead>
+                            <TableHead className={SHEET_ROW_HEADER_CLASS} />
+                            <TableHead className={`${SHEET_HEAD_CLASS} min-w-96`}>Material / thickness / vendor</TableHead>
+                            <TableHead className={`${SHEET_HEAD_CLASS} w-24`}>Rows</TableHead>
+                            <TableHead className={`${SHEET_HEAD_CLASS} w-32`}>Shortage</TableHead>
+                            <TableHead className={`${SHEET_HEAD_CLASS} w-40`}>Suggested purchase</TableHead>
+                            <TableHead className={`${SHEET_HEAD_CLASS} w-36`}>Est. cost</TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {(materialPlan.grouped_summary ?? []).map((row) => (
-                            <TableRow key={row.group}>
-                              <TableCell className="font-medium">{row.group}</TableCell>
-                              <TableCell>{row.rows}</TableCell>
-                              <TableCell>{row.shortage_qty.toFixed(2)}</TableCell>
-                              <TableCell>{row.suggested_purchase_qty.toFixed(2)}</TableCell>
-                              <TableCell>{row.estimated_material_cost.toFixed(2)}</TableCell>
+                          {(materialPlan.grouped_summary ?? []).map((row, index) => (
+                            <TableRow key={row.group} className="hover:bg-emerald-50/30 dark:hover:bg-emerald-950/10">
+                              <TableCell className={SHEET_ROW_HEADER_CLASS}>{index + 1}</TableCell>
+                              <TableCell className={`${SHEET_CELL_CLASS} font-medium`}>{row.group}</TableCell>
+                              <TableCell className={SHEET_CELL_CLASS}>{row.rows}</TableCell>
+                              <TableCell className={SHEET_CELL_CLASS}>{row.shortage_qty.toFixed(2)}</TableCell>
+                              <TableCell className={SHEET_CELL_CLASS}>{row.suggested_purchase_qty.toFixed(2)}</TableCell>
+                              <TableCell className={SHEET_CELL_CLASS}>{row.estimated_material_cost.toFixed(2)}</TableCell>
                             </TableRow>
                           ))}
                         </TableBody>
@@ -3729,56 +4467,104 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   </details>
                 )}
 
-                <div className="overflow-auto rounded-md border">
-                  <Table>
-                    <TableHeader>
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/30 px-3 py-2 text-sm">
+                  <div className="text-muted-foreground">
+                    {canEditMaterialPhase2 && !materialPhase2Finished ? "Edit Phase 2 rows directly, then submit or finish the plan." : "Phase 2 is view-only for this user or status."}
+                  </div>
+                  {canEditMaterialPhase2 && !materialPhase2Finished && (
+                    <Button variant="secondary" size="sm" onClick={addMaterialPhase2Row}>
+                      <Plus className="h-4 w-4" />
+                      Row
+                    </Button>
+                  )}
+                </div>
+
+                <div className="max-h-[620px] overflow-auto border bg-background">
+                  <Table className={SHEET_TABLE_CLASS}>
+                    <TableHeader className={SHEET_HEADER_CLASS}>
                       <TableRow>
-                        <TableHead className="w-20">Review</TableHead>
-                        <TableHead className="w-16">SL.NO.</TableHead>
-                        <TableHead className="min-w-72">Stock type</TableHead>
-                        <TableHead className="min-w-44">Stock size</TableHead>
-                        <TableHead className="w-28">UOM</TableHead>
-                        <TableHead className="w-36">Planned qty</TableHead>
-                        <TableHead className="w-40">Est. purchase qty</TableHead>
-                        <TableHead className="w-32">Available</TableHead>
-                        <TableHead className="w-32">Reserved</TableHead>
-                        <TableHead className="w-32">Shortage</TableHead>
-                        <TableHead className="w-40">Suggested purchase</TableHead>
-                        <TableHead className="w-40">Vendor</TableHead>
-                        <TableHead className="w-32">Lead days</TableHead>
-                        <TableHead className="w-40">Material cost</TableHead>
-                        <TableHead className="w-36">Priority</TableHead>
-                        <TableHead className="w-28">Source rows</TableHead>
-                        <TableHead className="min-w-96">Notes / planner review</TableHead>
+                        <TableHead className={SHEET_ROW_HEADER_CLASS} />
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-20`}>Review</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-16`}>SL.NO.</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} min-w-72`}>Stock type</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Width</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Length</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Thk</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>UOM</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-36`}>Planned qty</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-32`}>Available</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-32`}>Reserved</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-32`}>Shortage</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-40`}>Suggested purchase</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-40`}>Vendor</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-32`}>Lead days</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-40`}>Material cost</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-36`}>Priority</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Source rows</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} min-w-96`}>Notes / planner review</TableHead>
+                        <TableHead className={`${SHEET_HEAD_CLASS} w-20`}>Delete</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {materialPlan.rows.map((row, index) => (
-                        <TableRow key={`${row.sl_no}-${row.type}-${index}`}>
-                          <TableCell>
+                        <TableRow key={`${row.sl_no}-${row.type}-${index}`} className="hover:bg-emerald-50/30 dark:hover:bg-emerald-950/10">
+                          <TableCell className={SHEET_ROW_HEADER_CLASS}>{index + 1}</TableCell>
+                          <TableCell className={`${SHEET_CELL_CLASS} text-center`}>
                             <input
                               type="checkbox"
                               checked={row.reviewed}
                               onChange={(event) => updatePlanRow(index, { reviewed: event.target.checked })}
+                              disabled={!canEditMaterialPhase2 || materialPhase2Finished}
                               aria-label={`Mark row ${index + 1} reviewed`}
                             />
                           </TableCell>
-                          <TableCell>{row.sl_no}</TableCell>
-                          <TableCell className="text-sm font-medium">{row.type}</TableCell>
-                          <TableCell className="text-sm">{formatStockSize(row)}</TableCell>
-                          <TableCell className="text-sm">{row.purchase_uom}</TableCell>
-                          <TableCell className="text-sm">{formatPlanQuantity(row)}</TableCell>
-                          <TableCell className="text-sm">{row.reqd_qty_sheets ?? row.reqd_qty_kg ?? "Needs dimensions"}</TableCell>
-                          <TableCell><Input className="w-28" type="number" value={getString(row.available_qty)} onChange={(event) => updatePlanRow(index, { available_qty: Number(event.target.value) })} /></TableCell>
-                          <TableCell><Input className="w-28" type="number" value={getString(row.reserved_qty)} onChange={(event) => updatePlanRow(index, { reserved_qty: Number(event.target.value) })} /></TableCell>
-                          <TableCell className={row.shortage_qty > 0 ? "font-medium text-red-600" : "text-sm"}>{row.shortage_qty.toFixed(2)}</TableCell>
-                          <TableCell><Input className="w-32" type="number" value={getString(row.suggested_purchase_qty)} onChange={(event) => updatePlanRow(index, { suggested_purchase_qty: Number(event.target.value) })} /></TableCell>
-                          <TableCell><Input className="w-36" value={row.preferred_vendor} onChange={(event) => updatePlanRow(index, { preferred_vendor: event.target.value })} /></TableCell>
-                          <TableCell><Input className="w-24" type="number" value={getString(row.lead_time_days)} onChange={(event) => updatePlanRow(index, { lead_time_days: Number(event.target.value) })} /></TableCell>
-                          <TableCell><Input className="w-32" type="number" value={getString(row.estimated_material_cost)} onChange={(event) => updatePlanRow(index, { estimated_material_cost: Number(event.target.value) })} /></TableCell>
-                          <TableCell>
-                            <Select value={row.production_priority} onValueChange={(value) => updatePlanRow(index, { production_priority: value as MaterialPlan["rows"][number]["production_priority"] })}>
-                              <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+                          <TableCell className={SHEET_CELL_CLASS}>{row.sl_no}</TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-72 font-medium`} value={row.type} onChange={(event) => updatePlanRow(index, { type: event.target.value })} disabled={!canEditMaterialPhase2 || materialPhase2Finished} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-24`} type="number" value={getString(row.width_mm)} onChange={(event) => updatePlanRow(index, { width_mm: Number(event.target.value) || null })} disabled={!canEditMaterialPhase2 || materialPhase2Finished} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-24`} value={getString(row.length_mm)} onChange={(event) => updatePlanRow(index, { length_mm: event.target.value.toUpperCase() === "COIL" ? "COIL" : Number(event.target.value) || null })} disabled={!canEditMaterialPhase2 || materialPhase2Finished} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-24`} type="number" value={getString(row.thickness_mm)} onChange={(event) => updatePlanRow(index, { thickness_mm: Number(event.target.value) || null })} disabled={!canEditMaterialPhase2 || materialPhase2Finished} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}>
+                            <Select
+                              value={row.purchase_uom}
+                              disabled={!canEditMaterialPhase2 || materialPhase2Finished}
+                              onValueChange={(value) => {
+                                const purchaseUom = value as MaterialPhase2Row["purchase_uom"];
+                                const required = materialPhase2RequiredQty(row);
+                                updatePlanRow(index, {
+                                  purchase_uom: purchaseUom,
+                                  reqd_qty_sheets: purchaseUom === "SHEETS" ? required : null,
+                                  reqd_qty_kg: purchaseUom === "SHEETS" ? null : required,
+                                });
+                              }}
+                            >
+                              <SelectTrigger className={`${SHEET_SELECT_CLASS} w-24`}><SelectValue /></SelectTrigger>
+                              <SelectContent>
+                                {MATERIAL_PHASE2_UOMS.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}
+                              </SelectContent>
+                            </Select>
+                          </TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}>
+                            <Input
+                              className={`${SHEET_INPUT_CLASS} w-28`}
+                              type="number"
+                              value={getString(materialPhase2RequiredQty(row))}
+                              onChange={(event) => {
+                                const quantity = Number(event.target.value) || 0;
+                                updatePlanRow(index, row.purchase_uom === "SHEETS" ? { reqd_qty_sheets: quantity, reqd_qty_kg: null } : { reqd_qty_sheets: null, reqd_qty_kg: quantity });
+                              }}
+                              disabled={!canEditMaterialPhase2 || materialPhase2Finished}
+                            />
+                          </TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-28`} type="number" value={getString(row.available_qty)} onChange={(event) => updatePlanRow(index, { available_qty: Number(event.target.value) })} disabled={!canEditMaterialPhase2 || materialPhase2Finished} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-28`} type="number" value={getString(row.reserved_qty)} onChange={(event) => updatePlanRow(index, { reserved_qty: Number(event.target.value) })} disabled={!canEditMaterialPhase2 || materialPhase2Finished} /></TableCell>
+                          <TableCell className={`${SHEET_CELL_CLASS} ${row.shortage_qty > 0 ? "font-medium text-red-600" : ""}`}>{row.shortage_qty.toFixed(2)}</TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-32`} type="number" value={getString(row.suggested_purchase_qty)} onChange={(event) => updatePlanRow(index, { suggested_purchase_qty: Number(event.target.value) })} disabled={!canEditMaterialPhase2 || materialPhase2Finished} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-36`} value={row.preferred_vendor} onChange={(event) => updatePlanRow(index, { preferred_vendor: event.target.value })} disabled={!canEditMaterialPhase2 || materialPhase2Finished} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-24`} type="number" value={getString(row.lead_time_days)} onChange={(event) => updatePlanRow(index, { lead_time_days: Number(event.target.value) })} disabled={!canEditMaterialPhase2 || materialPhase2Finished} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-32`} type="number" value={getString(row.estimated_material_cost)} onChange={(event) => updatePlanRow(index, { estimated_material_cost: Number(event.target.value) })} disabled={!canEditMaterialPhase2 || materialPhase2Finished} /></TableCell>
+                          <TableCell className={SHEET_CELL_CLASS}>
+                            <Select value={row.production_priority} onValueChange={(value) => updatePlanRow(index, { production_priority: value as MaterialPlan["rows"][number]["production_priority"] })} disabled={!canEditMaterialPhase2 || materialPhase2Finished}>
+                              <SelectTrigger className={`${SHEET_SELECT_CLASS} w-32`}><SelectValue /></SelectTrigger>
                               <SelectContent>
                                 <SelectItem value="low">Low</SelectItem>
                                 <SelectItem value="normal">Normal</SelectItem>
@@ -3787,15 +4573,23 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                               </SelectContent>
                             </Select>
                           </TableCell>
-                          <TableCell className="text-sm">{row.source_count}</TableCell>
-                          <TableCell>
-                            <div className="mb-2 text-xs leading-5 text-muted-foreground">{row.notes}</div>
+                          <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-20`} type="number" value={getString(row.source_count)} onChange={(event) => updatePlanRow(index, { source_count: Number(event.target.value) || 0 })} disabled={!canEditMaterialPhase2 || materialPhase2Finished} /></TableCell>
+                          <TableCell className={`${SHEET_CELL_CLASS} align-top`}>
+                            <Input className={`${SHEET_INPUT_CLASS} mb-1 w-96`} value={row.notes} onChange={(event) => updatePlanRow(index, { notes: event.target.value })} disabled={!canEditMaterialPhase2 || materialPhase2Finished} />
                             <textarea
-                              className="min-h-16 w-full rounded-md border bg-background px-2 py-1 text-xs"
+                              className={SHEET_TEXTAREA_CLASS}
                               value={row.planner_notes}
                               onChange={(event) => updatePlanRow(index, { planner_notes: event.target.value })}
                               placeholder="Planner notes"
+                              disabled={!canEditMaterialPhase2 || materialPhase2Finished}
                             />
+                          </TableCell>
+                          <TableCell className={`${SHEET_CELL_CLASS} text-center`}>
+                            {canEditMaterialPhase2 && !materialPhase2Finished && (
+                              <Button variant="ghost" size="icon" onClick={() => deleteMaterialPhase2Row(index)} aria-label={`Delete phase 2 row ${index + 1}`}>
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            )}
                           </TableCell>
                         </TableRow>
                       ))}
@@ -3842,26 +4636,32 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <RotateCcw className="h-4 w-4" />
                   Back to enquiry
                 </Button>
-                <Button variant="secondary" size="sm" onClick={() => savePatch({ items, quote_data: qd, quote_no: getString(qd.quote_no) } as Partial<Quote>, "Quotation saved")}>
-                  <Save className="h-4 w-4" />
-                  Save
-                </Button>
-                <Button variant="secondary" size="sm" onClick={() => exportCurrent("pdf", "preview")} disabled={!canExportFinal}>
+                {canEditQuotation && (
+                  <Button variant="secondary" size="sm" onClick={() => savePatch({ items, quote_data: qd, quote_no: effectiveQuoteNo } as Partial<Quote>, "Quotation saved")}>
+                    <Save className="h-4 w-4" />
+                    Save
+                  </Button>
+                )}
+                <Button variant="secondary" size="sm" onClick={() => exportCurrent("pdf", "preview")} disabled={!canEditQuotation || !canExportFinal}>
                   {exporting === "pdf" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
                   Preview
                 </Button>
-                <Button variant="secondary" size="sm" onClick={markSent} disabled={approval.status !== "approved" || quote.stage === "sent"}>
-                  <Send className="h-4 w-4" />
-                  Sent
-                </Button>
-                <Button variant="secondary" size="sm" onClick={() => exportCurrent("xlsx")} disabled={!canExportFinal}>
-                  {exporting === "xlsx" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
-                  Excel
-                </Button>
-                <Button size="sm" onClick={() => exportCurrent("pdf")} disabled={!canExportFinal}>
-                  {exporting === "pdf" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                  PDF
-                </Button>
+                {canEditQuotation && (
+                  <>
+                    <Button variant="secondary" size="sm" onClick={markSent} disabled={approval.status !== "approved" || quote.stage === "sent"}>
+                      <Send className="h-4 w-4" />
+                      Sent
+                    </Button>
+                    <Button variant="secondary" size="sm" onClick={() => exportCurrent("xlsx")} disabled={!canExportFinal}>
+                      {exporting === "xlsx" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
+                      Excel
+                    </Button>
+                    <Button size="sm" onClick={() => exportCurrent("pdf")} disabled={!canExportFinal}>
+                      {exporting === "pdf" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                      PDF
+                    </Button>
+                  </>
+                )}
               </div>
             </div>
           </CardHeader>
@@ -3877,11 +4677,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     <Badge variant={quote.customer && quote.project_ref ? "secondary" : "outline"}>{quote.customer && quote.project_ref ? "Context ready" : "Needs context"}</Badge>
                   </div>
                   <div className="grid gap-3 lg:grid-cols-[1fr_1fr_minmax(240px,0.75fr)_auto] lg:items-end">
-                    <Field label="Customer" value={quote.customer} onChange={(value) => setQuote({ ...quote, customer: value })} />
-                    <Field label="Project / PO reference" value={quote.project_ref} onChange={(value) => setQuote({ ...quote, project_ref: value })} />
+                    <Field label="Customer" value={quote.customer} onChange={(value) => setQuote({ ...quote, customer: value })} disabled={!canAddDetails} />
+                    <Field label="Project / PO reference" value={quote.project_ref} onChange={(value) => setQuote({ ...quote, project_ref: value })} disabled={!canAddDetails} />
                     <div className="space-y-1.5">
                       <Label>Quotation stage</Label>
-                      <Select value={quotationStage} onValueChange={(value) => setQuotationStage(value as QuotationStageId)}>
+                      <Select value={quotationStage} onValueChange={(value) => setQuotationStage(value as QuotationStageId)} disabled={!canEditWorkflow}>
                         <SelectTrigger><SelectValue /></SelectTrigger>
                         <SelectContent>
                           {QUOTATION_STAGES.map((stage, index) => (
@@ -3892,7 +4692,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     </div>
                     <Button
                       variant="secondary"
-                      onClick={() => savePatch({ customer: quote.customer, project_ref: quote.project_ref, quote_data: qd, quote_no: getString(qd.quote_no) } as Partial<Quote>, "Quotation header saved")}
+                      onClick={() => canEditQuotation ? savePatch({ customer: quote.customer, project_ref: quote.project_ref, quote_data: qd, quote_no: effectiveQuoteNo } as Partial<Quote>, "Quotation header saved") : saveSalesDetails("Quotation details saved")}
+                      disabled={!canAddDetails}
                     >
                       <Save className="h-4 w-4" />
                       Save header
@@ -3904,6 +4705,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       <Select
                         value={salesRepUsers.some((user) => user.id === getString(qd.sales_rep_user_id)) ? getString(qd.sales_rep_user_id) : CUSTOM_SALES_REP_VALUE}
                         onValueChange={selectSalesRep}
+                        disabled={!canEditQuotation}
                       >
                         <SelectTrigger><SelectValue /></SelectTrigger>
                         <SelectContent>
@@ -3916,9 +4718,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                         </SelectContent>
                       </Select>
                     </div>
-                    <Field label="Rep designation" value={getString(qd.rep_designation)} onChange={(value) => updateQd("rep_designation", value)} />
-                    <Field label="Rep contact" value={getString(qd.rep_contact)} onChange={(value) => updateQd("rep_contact", value)} />
-                    <Field label="Rep email" value={getString(qd.rep_email)} onChange={(value) => updateQd("rep_email", value)} />
+                    <Field label="Rep designation" value={getString(qd.rep_designation)} onChange={(value) => updateQd("rep_designation", value)} disabled={!canEditQuotation} />
+                    <Field label="Rep contact" value={getString(qd.rep_contact)} onChange={(value) => updateQd("rep_contact", value)} disabled={!canEditQuotation} />
+                    <Field label="Rep email" value={getString(qd.rep_email)} onChange={(value) => updateQd("rep_email", value)} disabled={!canEditQuotation} />
                   </div>
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     <Badge variant={quotationStageBadgeVariant(quotationStage)}>{quotationStageIndex + 1}. {quotationStageMeta.label}</Badge>
@@ -3951,6 +4753,26 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     ))}
                   </div>
                 </div>
+
+                <div className="rounded-md border bg-background p-3">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div className="inline-flex items-center gap-2 text-sm font-medium"><FileText className="h-4 w-4" />Sales notes</div>
+                    <Badge variant="outline">{getString(quote.stage_meta?.sales_notes) ? "Saved notes" : "No notes"}</Badge>
+                  </div>
+                  <div className="space-y-3">
+                    <Field
+                      label="Notes / extra details"
+                      value={getString(quote.stage_meta?.sales_notes)}
+                      onChange={(value) => setQuote({ ...quote, stage_meta: { ...(quote.stage_meta ?? {}), sales_notes: value } })}
+                      textarea
+                      disabled={!canAddDetails}
+                    />
+                    <Button variant="secondary" onClick={() => saveSalesDetails("Sales notes saved")} disabled={!canAddDetails}>
+                      <Save className="h-4 w-4" />
+                      Save notes
+                    </Button>
+                  </div>
+                </div>
               </div>
 
               <Tabs defaultValue="setup" className="min-w-0 space-y-3">
@@ -3966,23 +4788,23 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <div className="rounded-md border bg-background p-3">
                     <div className="mb-3 flex items-center gap-2 text-sm font-medium"><FileText className="h-4 w-4" />Quotation identity</div>
                     <div className="grid gap-3 md:grid-cols-4">
-                      <Field label="Quote no" value={getString(qd.quote_no)} onChange={(value) => updateQd("quote_no", value)} />
-                      <Field label="Quote date" value={getString(qd.quote_date)} onChange={(value) => updateQd("quote_date", value)} />
-                      <Field label="Revision no" value={getString(qd.rev_no)} onChange={(value) => updateQd("rev_no", value)} />
-                      <Field label="Revision date" value={getString(qd.rev_date)} onChange={(value) => updateQd("rev_date", value)} />
+                      <Field label="Quote no" value={getString(qd.quote_no)} onChange={(value) => updateQd("quote_no", value)} disabled={!canEditQuotation} />
+                      <Field label="Quote date" value={getString(qd.quote_date)} onChange={(value) => updateQd("quote_date", value)} disabled={!canEditQuotation} />
+                      <Field label="Revision no" value={getString(qd.rev_no)} onChange={(value) => updateQd("rev_no", value)} disabled={!canEditQuotation} />
+                      <Field label="Revision date" value={getString(qd.rev_date)} onChange={(value) => updateQd("rev_date", value)} disabled={!canEditQuotation} />
                     </div>
                   </div>
 
                   <div className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-2">
                     <label className="flex items-start gap-3 text-sm">
-                      <input className="mt-1" type="checkbox" checked={Boolean(qd.include_customer_sl_no)} onChange={(event) => updateQd("include_customer_sl_no", event.target.checked)} />
+                      <input className="mt-1" type="checkbox" checked={Boolean(qd.include_customer_sl_no)} onChange={(event) => updateQd("include_customer_sl_no", event.target.checked)} disabled={!canEditQuotation} />
                       <span>
                         <span className="block font-medium">Use customer SL No. in quotation PDF</span>
                         <span className="block text-xs text-muted-foreground">When enabled, customer SL No. replaces the default serial number.</span>
                       </span>
                     </label>
                     <label className="flex items-start gap-3 text-sm">
-                      <input className="mt-1" type="checkbox" checked={Boolean(qd.include_customer_item_code)} onChange={(event) => updateQd("include_customer_item_code", event.target.checked)} />
+                      <input className="mt-1" type="checkbox" checked={Boolean(qd.include_customer_item_code)} onChange={(event) => updateQd("include_customer_item_code", event.target.checked)} disabled={!canEditQuotation} />
                       <span>
                         <span className="block font-medium">Add customer item code to quotation PDF</span>
                         <span className="block text-xs text-muted-foreground">Keep disabled when the customer code is only for internal matching.</span>
@@ -3993,13 +4815,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <div className="rounded-md border bg-background p-3">
                     <div className="mb-3 flex items-center gap-2 text-sm font-medium"><FileText className="h-4 w-4" />Buyer details</div>
                     <div className="grid gap-3 md:grid-cols-2">
-                      <Field label="Buyer name/address" value={getString(qd.buyer_name_address)} onChange={(value) => updateQd("buyer_name_address", value)} textarea />
+                      <Field label="Buyer name/address" value={getString(qd.buyer_name_address)} onChange={(value) => updateQd("buyer_name_address", value)} textarea disabled={!canAddDetails} />
                       <div className="grid gap-3 md:grid-cols-2">
-                        <Field label="Customer enquiry no" value={getString(qd.customer_enq_no)} onChange={(value) => updateQd("customer_enq_no", value)} />
-                        <Field label="Attention" value={getString(qd.attention)} onChange={(value) => updateQd("attention", value)} />
-                        <Field label="Designation" value={getString(qd.designation)} onChange={(value) => updateQd("designation", value)} />
-                        <Field label="Contact no" value={getString(qd.contact_no)} onChange={(value) => updateQd("contact_no", value)} />
-                        <Field label="Email" value={getString(qd.email)} onChange={(value) => updateQd("email", value)} />
+                        <Field label="Customer enquiry no" value={getString(qd.customer_enq_no)} onChange={(value) => updateQd("customer_enq_no", value)} disabled={!canAddDetails} />
+                        <Field label="Attention" value={getString(qd.attention)} onChange={(value) => updateQd("attention", value)} disabled={!canAddDetails} />
+                        <Field label="Designation" value={getString(qd.designation)} onChange={(value) => updateQd("designation", value)} disabled={!canAddDetails} />
+                        <Field label="Contact no" value={getString(qd.contact_no)} onChange={(value) => updateQd("contact_no", value)} disabled={!canAddDetails} />
+                        <Field label="Email" value={getString(qd.email)} onChange={(value) => updateQd("email", value)} disabled={!canAddDetails} />
                       </div>
                     </div>
                   </div>
@@ -4022,18 +4844,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     <div className="grid gap-3 md:grid-cols-4 xl:grid-cols-7">
                       <div className="space-y-1.5">
                         <Label>Currency</Label>
-                        <Select value={currency} onValueChange={(value) => updateQd("currency", value)}>
+                        <Select value={currency} onValueChange={(value) => updateQd("currency", value)} disabled={!canEditQuotation}>
                           <SelectTrigger><SelectValue /></SelectTrigger>
                           <SelectContent>{currencies.map((cur) => <SelectItem key={cur} value={cur}>{cur}</SelectItem>)}</SelectContent>
                         </Select>
                       </div>
-                      <Field label="FX rate" value={getString(qd.fx_rate)} onChange={(value) => updateQd("fx_rate", Number(value))} type="number" />
-                      <Field label="Discount %" value={getString(qd.discount_pct)} onChange={(value) => updateQd("discount_pct", Number(value))} type="number" />
-                      <Field label="Approval discount %" value={getString(qd.discount_approval_pct)} onChange={(value) => updateQd("discount_approval_pct", Number(value))} type="number" />
-                      <Field label="Minimum margin %" value={getString(qd.minimum_margin_pct)} onChange={(value) => updateQd("minimum_margin_pct", Number(value))} type="number" />
+                      <Field label="FX rate" value={getString(qd.fx_rate)} onChange={(value) => updateQd("fx_rate", Number(value))} type="number" disabled={!canEditQuotation} />
+                      <Field label="Discount %" value={getString(qd.discount_pct)} onChange={(value) => updateQd("discount_pct", Number(value))} type="number" disabled={!canEditQuotation} />
+                      <Field label="Approval discount %" value={getString(qd.discount_approval_pct)} onChange={(value) => updateQd("discount_approval_pct", Number(value))} type="number" disabled={!canEditQuotation} />
+                      <Field label="Minimum margin %" value={getString(qd.minimum_margin_pct)} onChange={(value) => updateQd("minimum_margin_pct", Number(value))} type="number" disabled={!canEditQuotation} />
                       <div className="space-y-1.5">
                         <Label>GST type</Label>
-                        <Select value={getString(qd.gst_type || "IGST")} onValueChange={(value) => updateQd("gst_type", value)} disabled={currency !== "INR"}>
+                        <Select value={getString(qd.gst_type || "IGST")} onValueChange={(value) => updateQd("gst_type", value)} disabled={currency !== "INR" || !canEditQuotation}>
                           <SelectTrigger><SelectValue /></SelectTrigger>
                           <SelectContent>
                             <SelectItem value="IGST">IGST</SelectItem>
@@ -4042,7 +4864,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                           </SelectContent>
                         </Select>
                       </div>
-                      <Field label="GST %" value={getString(qd.gst_pct)} onChange={(value) => updateQd("gst_pct", Number(value))} type="number" />
+                      <Field label="GST %" value={getString(qd.gst_pct)} onChange={(value) => updateQd("gst_pct", Number(value))} type="number" disabled={!canEditQuotation} />
                     </div>
                   </div>
 
@@ -4095,8 +4917,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                           return (
                             <TableRow key={index}>
                               <TableCell>{index + 1}</TableCell>
-                              <TableCell><Input className="w-24" value={getString(item.customer_sl_no)} onChange={(event) => updateItem(index, "customer_sl_no", event.target.value)} /></TableCell>
-                              <TableCell><Input className="w-36" value={getString(item.customer_item_code)} onChange={(event) => updateItem(index, "customer_item_code", event.target.value)} /></TableCell>
+                              <TableCell><Input className="w-24" value={getString(item.customer_sl_no)} onChange={(event) => updateItem(index, "customer_sl_no", event.target.value)} disabled={!canEditLineItems} /></TableCell>
+                              <TableCell><Input className="w-36" value={getString(item.customer_item_code)} onChange={(event) => updateItem(index, "customer_item_code", event.target.value)} disabled={!canEditLineItems} /></TableCell>
                               <TableCell className="min-w-96 text-xs">
                                 {item.status === "regret" ? (
                                   "REGRET - CANNOT PRODUCE"
@@ -4107,24 +4929,24 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                                   </div>
                                 )}
                               </TableCell>
-                              <TableCell><Input className="w-24" type="number" value={getString(item.quantity)} onChange={(event) => updateItem(index, "quantity", event.target.value)} /></TableCell>
+                              <TableCell><Input className="w-24" type="number" value={getString(item.quantity)} onChange={(event) => updateItem(index, "quantity", event.target.value)} disabled={!canEditLineItems} /></TableCell>
                               <TableCell>{getString(item.uom || "NOS")}</TableCell>
                               <TableCell>
-                                <Input className="w-28" type="number" value={getString(costPrices[index] ?? 0)} onChange={(event) => {
+                                <Input className="w-28" type="number" value={getString(costPrices[index] ?? 0)} disabled={!canEditQuotation} onChange={(event) => {
                                   const next = [...costPrices];
                                   next[index] = Number(event.target.value);
                                   updateQd("cost_prices", next);
                                 }} />
                               </TableCell>
                               <TableCell>
-                                <Input className="w-28" type="number" value={getString(targetMargins[index] ?? minimumMarginPct)} onChange={(event) => {
+                                <Input className="w-28" type="number" value={getString(targetMargins[index] ?? minimumMarginPct)} disabled={!canEditQuotation} onChange={(event) => {
                                   const next = [...targetMargins];
                                   next[index] = Number(event.target.value);
                                   updateQd("target_margins_pct", next);
                                 }} />
                               </TableCell>
                               <TableCell>
-                                <Input className="w-32" type="number" value={getString(price)} onChange={(event) => {
+                                <Input className="w-32" type="number" value={getString(price)} disabled={!canEditQuotation} onChange={(event) => {
                                   const next = [...unitPrices];
                                   next[index] = Number(event.target.value);
                                   updateQd("unit_prices", next);
@@ -4170,6 +4992,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                           value={getString(qd[key])}
                           onChange={(value) => updateQd(key, value)}
                           textarea={["payment_terms", "cancellation", "min_order_value", "technical_notes"].includes(key)}
+                          disabled={!canEditQuotation && key !== "technical_notes"}
                         />
                       ))}
                     </div>
@@ -4219,20 +5042,25 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                         value={approvalComment}
                         onChange={(event) => setApprovalComment(event.target.value)}
                         placeholder="Reason, exception approval, price override, or rejection comments"
+                        disabled={!canEditQuotation}
                       />
                       <div className="mt-3 flex flex-wrap gap-2">
-                        <Button variant="secondary" onClick={requestApproval} disabled={approval.status === "pending" || approval.status === "approved"}>
-                          <ShieldCheck className="h-4 w-4" />
-                          Request approval
-                        </Button>
-                        <Button onClick={() => decideApproval("approved")} disabled={!canApprove || approval.status !== "pending"}>
-                          <CheckCircle2 className="h-4 w-4" />
-                          Approve
-                        </Button>
-                        <Button variant="secondary" onClick={() => decideApproval("rejected")} disabled={!canApprove || approval.status !== "pending"}>
-                          <Ban className="h-4 w-4" />
-                          Reject
-                        </Button>
+                        {canEditQuotation && (
+                          <>
+                            <Button variant="secondary" onClick={requestApproval} disabled={approval.status === "pending" || approval.status === "approved"}>
+                              <ShieldCheck className="h-4 w-4" />
+                              Request approval
+                            </Button>
+                            <Button onClick={() => decideApproval("approved")} disabled={!canApprove || approval.status !== "pending"}>
+                              <CheckCircle2 className="h-4 w-4" />
+                              Approve
+                            </Button>
+                            <Button variant="secondary" onClick={() => decideApproval("rejected")} disabled={!canApprove || approval.status !== "pending"}>
+                              <Ban className="h-4 w-4" />
+                              Reject
+                            </Button>
+                          </>
+                        )}
                       </div>
                       {!canApprove && <div className="mt-2 text-xs text-muted-foreground">Only admin or approver users can approve or reject.</div>}
                       {!canExportFinal && <div className="mt-1 text-xs text-muted-foreground">Quotation export is locked only for commercial approval items such as margin or discount exceptions.</div>}

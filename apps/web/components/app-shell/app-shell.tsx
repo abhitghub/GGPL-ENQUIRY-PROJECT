@@ -2,14 +2,14 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { BarChart3, Calculator, CheckCircle2, FileCheck2, FileQuestion, FileSearch, FileText, Layers3, LayoutDashboard, Menu, Plus, Search, Settings, ShoppingCart, Upload } from "lucide-react";
+import { BarChart3, CheckCircle2, FileCheck2, FileQuestion, FileSearch, FileText, Layers3, LayoutDashboard, Menu, Plus, Settings } from "lucide-react";
 
 import { ThemeToggle } from "@/components/app-shell/theme-toggle";
 import { UserMenu } from "@/components/app-shell/user-menu";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
-import { AppRole, getCurrentAppUser, USERS_CHANGED_EVENT } from "@/lib/auth/users";
+import { AppRole, canEditQuotes, getCurrentAppUser, USERS_CHANGED_EVENT } from "@/lib/auth/users";
 import { cn } from "@/lib/utils";
 
 type NavItem = {
@@ -26,30 +26,28 @@ type NavSection = {
   items: NavItem[];
 };
 
-const everyone: AppRole[] = ["admin", "management", "approver", "sales", "estimation", "technical", "planning", "purchase", "viewer"];
+const everyone: AppRole[] = ["admin", "management", "approver", "sales", "estimation", "technical", "planning", "material_planner", "purchase", "viewer"];
 
 const navSections: NavSection[] = [
   {
     title: "Overview",
     items: [
-      { href: "/dashboard", label: "Today’s work", description: "Open tasks, delayed work, and team load", icon: LayoutDashboard, roles: ["admin", "management", "approver", "sales", "estimation", "technical", "planning", "purchase"] },
+      { href: "/dashboard", label: "Today’s work", description: "Open tasks, delayed work, and team load", icon: LayoutDashboard, roles: ["admin", "management", "approver", "sales", "estimation", "technical", "planning", "material_planner", "purchase"] },
     ],
   },
   {
     title: "Main workflow",
     items: [
-      { href: "/quotes", label: "Prepare enquiry", description: "Capture, clean, review, and assign sales rep", icon: FileText, roles: ["admin", "management", "sales", "estimation", "technical"], step: "1" },
-      { href: "/material-planning", label: "Plan materials", description: "Breakdown sizes and plan stock/purchase", icon: Layers3, roles: ["admin", "management", "planning", "purchase"], step: "2" },
-      { href: "/quotes/final", label: "Prepare quotation", description: "Pricing, terms, approval, and PDF", icon: FileCheck2, roles: ["admin", "management", "approver", "sales"], step: "3" },
-      { href: "/purchase-orders", label: "Customer PO", description: "Accepted quotations and order handover", icon: CheckCircle2, roles: ["admin", "management", "approver", "sales", "planning", "purchase"], step: "4" },
+      { href: "/quotes", label: "Enquiry", description: "Capture, clean, review, and assign sales rep", icon: FileText, roles: ["admin", "management", "sales", "estimation", "technical"], step: "1" },
+      { href: "/material-planning", label: "Material planning", description: "Breakdown sizes and plan stock/purchase", icon: Layers3, roles: ["admin", "management", "planning", "material_planner", "purchase"], step: "2" },
+      { href: "/quotes/final", label: "Quotation", description: "Pricing, terms, approval, and PDF", icon: FileCheck2, roles: ["admin", "management", "approver", "sales"], step: "3" },
+      { href: "/purchase-orders", label: "Customer PO", description: "Accepted quotations and order handover", icon: CheckCircle2, roles: ["admin", "management", "approver", "sales", "planning", "material_planner", "purchase"], step: "4" },
     ],
   },
   {
     title: "Support tools",
     items: [
       { href: "/doc-assistant", label: "Read documents", description: "Ask questions from customer files", icon: FileQuestion, roles: ["admin", "management", "sales", "estimation", "technical"] },
-      { href: "/vendor-enquiries", label: "Vendor RFQs", description: "Supplier enquiries and comparison", icon: ShoppingCart, roles: ["admin", "management", "planning", "purchase"] },
-      { href: "/tools/converter", label: "Unit converter", description: "Sizes, pressure, rating, torque", icon: Calculator, roles: ["admin", "management", "estimation", "technical", "planning", "purchase"] },
       { href: "/history", label: "Activity history", description: "Exports, stage changes, and notes", icon: FileSearch, roles: everyone },
     ],
   },
@@ -59,13 +57,6 @@ const navSections: NavSection[] = [
       { href: "/settings", label: "Users & settings", description: "Roles, preferences, and access", icon: Settings, roles: ["admin"] },
     ],
   },
-];
-
-const workflowGuide = [
-  { step: "1", label: "Prepare enquiry", href: "/quotes" },
-  { step: "2", label: "Plan materials", href: "/material-planning" },
-  { step: "3", label: "Quote customer", href: "/quotes/final" },
-  { step: "4", label: "Receive PO", href: "/purchase-orders" },
 ];
 
 function SidebarNav({ activePath }: { activePath: string }) {
@@ -92,31 +83,8 @@ function SidebarNav({ activePath }: { activePath: string }) {
   const visibleSections = navSections
     .map((section) => ({ ...section, items: section.items.filter((item) => role === "admin" || !item.roles || item.roles.includes(role)) }))
     .filter((section) => section.items.length);
-  const visibleHrefs = new Set(visibleSections.flatMap((section) => section.items.map((item) => item.href)));
-  const visibleWorkflowGuide = workflowGuide.filter((item) => visibleHrefs.has(item.href));
   return (
     <nav className="space-y-5">
-      <div className="rounded-lg border bg-background p-3">
-        <div className="mb-2 text-[11px] font-semibold uppercase tracking-normal text-muted-foreground">Quote workflow</div>
-        <div className="space-y-1">
-          {visibleWorkflowGuide.map((item) => {
-            const active = activePath === item.href;
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={cn(
-                  "flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground",
-                  active && "bg-primary/10 text-foreground",
-                )}
-              >
-                <span className={cn("flex h-5 w-5 items-center justify-center rounded-full border text-[11px]", active && "border-primary bg-primary text-primary-foreground")}>{item.step}</span>
-                <span className="truncate">{item.label}</span>
-              </Link>
-            );
-          })}
-        </div>
-      </div>
       {visibleSections.map((section) => (
         <div key={section.title} className="space-y-1">
           <div className="px-3 text-[11px] font-semibold uppercase tracking-normal text-muted-foreground">{section.title}</div>
@@ -175,9 +143,20 @@ export function AppShell({
   title: string;
   breadcrumb: string;
 }) {
+  const [role, setRole] = React.useState<AppRole>("admin");
+  React.useEffect(() => {
+    const refresh = () => setRole(getCurrentAppUser().role);
+    refresh();
+    window.addEventListener(USERS_CHANGED_EVENT, refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener(USERS_CHANGED_EVENT, refresh);
+      window.removeEventListener("storage", refresh);
+    };
+  }, []);
   return (
     <div className="min-h-screen bg-background">
-      <aside className="fixed inset-y-0 left-0 hidden w-72 border-r bg-card lg:block">
+      <aside className="fixed inset-y-0 left-0 hidden w-72 flex-col border-r bg-card lg:flex">
         <div className="flex h-16 items-center gap-3 border-b px-5">
           <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
             <BarChart3 className="h-5 w-5" />
@@ -187,7 +166,7 @@ export function AppShell({
             <div className="truncate text-xs text-muted-foreground">Goodrich Gasket Pvt. Ltd.</div>
           </div>
         </div>
-        <div className="p-4">
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
           <SidebarNav activePath={activePath} />
         </div>
       </aside>
@@ -201,11 +180,11 @@ export function AppShell({
                   <Menu className="h-5 w-5" />
                 </Button>
               </SheetTrigger>
-              <SheetContent side="left">
+              <SheetContent side="left" className="flex flex-col overflow-hidden">
                 <SheetHeader>
                   <SheetTitle>GGPL Quote</SheetTitle>
                 </SheetHeader>
-                <div className="mt-6">
+                <div className="mt-6 min-h-0 flex-1 overflow-y-auto pr-2">
                   <SidebarNav activePath={activePath} />
                 </div>
               </SheetContent>
@@ -216,15 +195,11 @@ export function AppShell({
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="secondary" size="sm" className="hidden md:inline-flex" asChild>
-              <Link href="/quotes"><Plus className="h-4 w-4" />New enquiry</Link>
-            </Button>
-            <Button variant="secondary" size="sm" className="hidden md:inline-flex" asChild>
-              <Link href="/quotes"><Upload className="h-4 w-4" />Upload</Link>
-            </Button>
-            <Button variant="ghost" size="icon" className="hidden md:inline-flex" asChild aria-label="Search quotes">
-              <Link href="/history"><Search className="h-4 w-4" /></Link>
-            </Button>
+            {canEditQuotes(role) && (
+              <Button variant="secondary" size="sm" className="hidden md:inline-flex" asChild>
+                <Link href="/quotes?new=1"><Plus className="h-4 w-4" />New enquiry</Link>
+              </Button>
+            )}
             <Badge variant="outline" className="hidden md:inline-flex">
               Local workspace
             </Badge>

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import re
 import threading
 import uuid
 from copy import deepcopy
@@ -130,13 +131,15 @@ app_users_table = Table(
 
 DEFAULT_APP_USERS = [
     {
-        "id": "shashnam@flosil.com",
+        "id": "shashnam",
         "name": "Shashnam",
         "email": "shashnam@flosil.com",
         "role": "admin",
         "active": True,
     },
 ]
+
+ENQUIRY_NO_PATTERN = re.compile(r"^enq-(\d+)$", re.IGNORECASE)
 
 
 def _now() -> datetime:
@@ -151,6 +154,29 @@ def _quote_counts(items: list[dict[str, Any]]) -> dict[str, int]:
         if key in counts:
             counts[key] += 1
     return counts
+
+
+def _next_enquiry_no(values: list[str]) -> str:
+    highest = 0
+    for value in values:
+        match = ENQUIRY_NO_PATTERN.match(str(value or "").strip())
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return f"enq-{highest + 1}"
+
+
+def _prepare_created_metadata(data: dict[str, Any], user_id: str) -> None:
+    stage_meta = dict(data.get("stage_meta") or {})
+    stage_meta.setdefault("created_by_username", user_id)
+    data["stage_meta"] = stage_meta
+
+
+def _sync_quote_no(data: dict[str, Any], quote_no: str) -> None:
+    data["quote_no"] = quote_no
+    quote_data = dict(data.get("quote_data") or {})
+    if not str(quote_data.get("quote_no") or "").strip():
+        quote_data["quote_no"] = quote_no
+    data["quote_data"] = quote_data
 
 
 def _tenant_uuid(value: str) -> uuid.UUID:
@@ -230,6 +256,8 @@ class LocalJsonRepository:
         row = dict(data)
         row["created_at"] = _parse_dt(row["created_at"])
         row["updated_at"] = _parse_dt(row["updated_at"])
+        stage_meta = row.get("stage_meta") or {}
+        row["created_by"] = str(stage_meta.get("created_by_username") or row.get("created_by") or "")
         return QuoteRead(**row)
 
     def _job_from_data(self, data: dict[str, Any]) -> JobRead:
@@ -252,24 +280,55 @@ class LocalJsonRepository:
             if key not in users:
                 users[key] = {"org_id": org_id, "created_at": now, "updated_at": now, **seed}
 
+    def _ensure_quote_numbers(self, org_id: str) -> None:
+        rows = [
+            quote
+            for quote in self._state["quotes"].values()
+            if quote.get("org_id") == org_id
+        ]
+        existing = [str(quote.get("quote_no") or "") for quote in rows]
+        changed = False
+        for quote in sorted(rows, key=lambda row: str(row.get("created_at") or "")):
+            if str(quote.get("quote_no") or "").strip():
+                continue
+            next_quote_no = _next_enquiry_no(existing)
+            existing.append(next_quote_no)
+            quote_data = dict(quote.get("quote_data") or {})
+            quote_data["quote_no"] = quote_data.get("quote_no") or next_quote_no
+            quote["quote_no"] = next_quote_no
+            quote["quote_data"] = quote_data
+            changed = True
+        if changed:
+            self._save()
+
     def create_quote(self, org_id: str, user_id: str, payload: QuoteCreate) -> QuoteRead:
         now = _now()
         quote_id = str(uuid.uuid4())
         data = payload.model_dump()
-        counts = _quote_counts(data["items"])
-        quote = QuoteRead(
-            id=quote_id,
-            org_id=org_id,
-            created_by=user_id,
-            created_at=now,
-            updated_at=now,
-            version=1,
-            stage_history=[StageHistoryEntry(stage=payload.stage, at=now, user_id=user_id)],
-            **data,
-            **counts,
-        )
-        stored = quote.model_dump(mode="json")
         with self._lock:
+            if not str(data.get("quote_no") or "").strip():
+                existing = [
+                    str(quote.get("quote_no") or "")
+                    for quote in self._state["quotes"].values()
+                    if quote.get("org_id") == org_id
+                ]
+                _sync_quote_no(data, _next_enquiry_no(existing))
+            else:
+                _sync_quote_no(data, str(data.get("quote_no") or "").strip())
+            _prepare_created_metadata(data, user_id)
+            counts = _quote_counts(data["items"])
+            quote = QuoteRead(
+                id=quote_id,
+                org_id=org_id,
+                created_by=user_id,
+                created_at=now,
+                updated_at=now,
+                version=1,
+                stage_history=[StageHistoryEntry(stage=payload.stage, at=now, user_id=user_id)],
+                **data,
+                **counts,
+            )
+            stored = quote.model_dump(mode="json")
             self._state["quotes"][quote_id] = stored
             self._save()
         return deepcopy(quote)
@@ -283,7 +342,7 @@ class LocalJsonRepository:
                 if user.get("org_id") == org_id
             ]
             self._save()
-        return sorted(rows, key=lambda user: user.email)
+        return sorted(rows, key=lambda user: user.id)
 
     def create_app_user(self, org_id: str, payload: AppUserCreate) -> AppUserRead:
         now = _now().isoformat()
@@ -323,6 +382,7 @@ class LocalJsonRepository:
 
     def list_quotes(self, org_id: str) -> list[QuoteRead]:
         with self._lock:
+            self._ensure_quote_numbers(org_id)
             rows = [
                 self._quote_from_data(deepcopy(q))
                 for q in self._state["quotes"].values()
@@ -332,6 +392,7 @@ class LocalJsonRepository:
 
     def get_quote(self, org_id: str, quote_id: str) -> QuoteRead | None:
         with self._lock:
+            self._ensure_quote_numbers(org_id)
             quote = self._state["quotes"].get(quote_id)
             if not quote or quote.get("org_id") != org_id:
                 return None
@@ -541,10 +602,11 @@ class PostgresRepository:
 
     def _quote_from_row(self, row: Any) -> QuoteRead:
         data = dict(row._mapping if hasattr(row, "_mapping") else row)
+        stage_meta = data["stage_meta"] or {}
         return QuoteRead(
             id=str(data["id"]),
             org_id=str(data["org_id"]),
-            created_by=str(data["created_by"]),
+            created_by=str(stage_meta.get("created_by_username") or data["created_by"]),
             created_at=data["created_at"],
             updated_at=data["updated_at"],
             version=data["version"],
@@ -555,7 +617,7 @@ class PostgresRepository:
             items=data["items"] or [],
             quote_data=data["quote_data"] or {},
             stage=data["stage"] or "initial",
-            stage_meta=data["stage_meta"] or {},
+            stage_meta=stage_meta,
             stage_history=[StageHistoryEntry(**entry) for entry in (data["stage_history"] or [])],
             n_items=data["n_items"] or 0,
             n_ready=data["n_ready"] or 0,
@@ -619,26 +681,63 @@ class PostgresRepository:
                         )
                     )
 
+    def _ensure_quote_numbers(self, org_id: str) -> None:
+        org_uuid = _tenant_uuid(org_id)
+        with self._engine.begin() as conn:
+            rows = conn.execute(
+                select(
+                    quotes_table.c.id,
+                    quotes_table.c.quote_no,
+                    quotes_table.c.quote_data,
+                )
+                .where(quotes_table.c.org_id == org_uuid)
+                .order_by(quotes_table.c.created_at.asc())
+            ).all()
+            existing = [str(row.quote_no or "") for row in rows]
+            for row in rows:
+                if str(row.quote_no or "").strip():
+                    continue
+                next_quote_no = _next_enquiry_no(existing)
+                existing.append(next_quote_no)
+                quote_data = dict(row.quote_data or {})
+                quote_data["quote_no"] = quote_data.get("quote_no") or next_quote_no
+                conn.execute(
+                    update(quotes_table)
+                    .where(quotes_table.c.org_id == org_uuid, quotes_table.c.id == row.id)
+                    .values(quote_no=next_quote_no, quote_data=quote_data, updated_at=_now())
+                )
+
     def create_quote(self, org_id: str, user_id: str, payload: QuoteCreate) -> QuoteRead:
         now = _now()
         quote_id = uuid.uuid4()
         org_uuid = _tenant_uuid(org_id)
         user_uuid = _tenant_uuid(user_id)
         data = payload.model_dump()
-        counts = _quote_counts(data["items"])
         stage_history = [StageHistoryEntry(stage=payload.stage, at=now, user_id=user_id)]
-        values = {
-            "id": quote_id,
-            "org_id": org_uuid,
-            "created_by": user_uuid,
-            "created_at": now,
-            "updated_at": now,
-            "version": 1,
-            "stage_history": _stage_history_json(stage_history),
-            **data,
-            **counts,
-        }
         with self._engine.begin() as conn:
+            if not str(data.get("quote_no") or "").strip():
+                existing = [
+                    str(value or "")
+                    for value in conn.execute(
+                        select(quotes_table.c.quote_no).where(quotes_table.c.org_id == org_uuid)
+                    ).scalars()
+                ]
+                _sync_quote_no(data, _next_enquiry_no(existing))
+            else:
+                _sync_quote_no(data, str(data.get("quote_no") or "").strip())
+            _prepare_created_metadata(data, user_id)
+            counts = _quote_counts(data["items"])
+            values = {
+                "id": quote_id,
+                "org_id": org_uuid,
+                "created_by": user_uuid,
+                "created_at": now,
+                "updated_at": now,
+                "version": 1,
+                "stage_history": _stage_history_json(stage_history),
+                **data,
+                **counts,
+            }
             row = conn.execute(insert(quotes_table).values(**values).returning(quotes_table)).first()
         return self._quote_from_row(row)
 
@@ -647,7 +746,7 @@ class PostgresRepository:
         stmt = (
             select(app_users_table)
             .where(app_users_table.c.org_id == _tenant_uuid(org_id))
-            .order_by(app_users_table.c.email.asc())
+            .order_by(app_users_table.c.user_id.asc())
         )
         with self._engine.begin() as conn:
             return [self._app_user_from_row(row) for row in conn.execute(stmt)]
@@ -708,12 +807,14 @@ class PostgresRepository:
 
     def list_quotes(self, org_id: str) -> list[QuoteRead]:
         org_uuid = _tenant_uuid(org_id)
+        self._ensure_quote_numbers(org_id)
         stmt = select(quotes_table).where(quotes_table.c.org_id == org_uuid).order_by(quotes_table.c.created_at.desc())
         with self._engine.begin() as conn:
             return [self._quote_from_row(row) for row in conn.execute(stmt)]
 
     def get_quote(self, org_id: str, quote_id: str) -> QuoteRead | None:
         org_uuid = _tenant_uuid(org_id)
+        self._ensure_quote_numbers(org_id)
         stmt = select(quotes_table).where(quotes_table.c.org_id == org_uuid, quotes_table.c.id == _uuid(quote_id))
         with self._engine.begin() as conn:
             row = conn.execute(stmt).first()
