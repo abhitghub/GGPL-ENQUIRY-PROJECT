@@ -89,7 +89,8 @@ def build_quotation_excel(
 
     quote_data keys:
         quote_no, quote_date, rev_no, rev_date,
-        buyer_name_address, customer_enq_no, attention, designation, contact_no, email,
+        buyer_name_address, customer_enq_no, attention, designation, contact_no,
+        mobile_no, telephone_no, email,
         rep_name, rep_designation, rep_contact, rep_email,
         price_basis, validity_days, packing, freight,
         gst_type, gst_pct, discount_pct,
@@ -235,12 +236,15 @@ def build_quotation_excel(
             ws.merge_range(_range(row + i, 7, row + i, NCOLS - 1), val, f_val)
     row += addr_rows
 
-    # Customer enq / attention details
+    mobile_no = quote_data.get('mobile_no') or quote_data.get('contact_no', '')
+
+    # Customer enquiry / sender details
     buyer_detail_fields = [
         ('Customer Enq No', quote_data.get('customer_enq_no', '')),
-        ('Kind Attention', quote_data.get('attention', '')),
+        ("Sender's Name", quote_data.get('attention', '')),
         ('Designation', quote_data.get('designation', '')),
-        ('Contact No', quote_data.get('contact_no', '')),
+        ('Mobile Number', mobile_no),
+        ('Telephone No', quote_data.get('telephone_no', '')),
         ('Email ID', quote_data.get('email', '')),
     ]
     for lbl, val in buyer_detail_fields:
@@ -294,8 +298,9 @@ def build_quotation_excel(
         qty = item.get('quantity') or 0
         uom = item.get('uom') or 'NOS'
         unit_price = unit_prices[idx] if idx < len(unit_prices) else 0.0
-        total_price = qty * unit_price if unit_price else 0.0
-        total_qty  += float(qty) if qty else 0
+        quoted_qty = 0 if status == 'regret' else qty
+        total_price = quoted_qty * unit_price if unit_price else 0.0
+        total_qty  += float(quoted_qty) if quoted_qty else 0
         subtotal   += total_price
 
         ggpl_desc = ('REGRET — CANNOT PRODUCE' if status == 'regret'

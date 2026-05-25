@@ -244,12 +244,14 @@ def _draw_buyer_block(c: canvas.Canvas, quote_data: dict):
 
     label_x, value_x = 24, 109
     # Reference glyph-tops for each field row
+    mobile_no = quote_data.get("mobile_no") or quote_data.get("contact_no", "")
     rows = [
         (266.7, "Customer Enq No", quote_data.get("customer_enq_no", ""), "Followed By",  quote_data.get("rep_name", "")),
-        (285.0, "Kind Attention",  quote_data.get("attention", ""),        "Designation",  quote_data.get("rep_designation", "")),
-        (304.7, "Designation",     quote_data.get("designation", ""),      "Contact No",   quote_data.get("rep_contact", "")),
-        (324.0, "Contact No",      quote_data.get("contact_no", ""),       "Email ID",     quote_data.get("rep_email", "")),
-        (341.5, "Email ID",        quote_data.get("email", ""),            "",             ""),
+        (284.0, "Sender's Name",   quote_data.get("attention", ""),      "Designation",  quote_data.get("rep_designation", "")),
+        (301.3, "Designation",     quote_data.get("designation", ""),    "Contact No",   quote_data.get("rep_contact", "")),
+        (318.6, "Mobile Number",   mobile_no,                            "Email ID",     quote_data.get("rep_email", "")),
+        (335.9, "Telephone No",    quote_data.get("telephone_no", ""),  "",             ""),
+        (352.8, "Email ID",        quote_data.get("email", ""),         "",             ""),
     ]
     for ref_top, label, value, rlabel, rvalue in rows:
         top = _y(ref_top, 9)
@@ -378,8 +380,9 @@ def _make_legacy_items_table(items_slice: list[dict], prices_slice: list[float],
     ]
     rows = [header]
     for i, (item, unit) in enumerate(zip(items_slice, prices_slice)):
-        qty   = _num(item.get("quantity"))
-        total = qty * unit
+        qty = _num(item.get("quantity"))
+        quoted_qty = 0 if item.get("status") == "regret" else qty
+        total = quoted_qty * unit
         rows.append([
             str(start_serial + i),         # Sl. No. — continuous across pages
             str(item.get("customer_sl_no") or ""),       # Cust SL.NO
@@ -409,7 +412,8 @@ def _make_items_table(items_slice: list[dict], prices_slice: list[float], start_
     rows = [header]
     for i, (item, unit) in enumerate(zip(items_slice, prices_slice)):
         qty = _num(item.get("quantity"))
-        total = qty * unit
+        quoted_qty = 0 if item.get("status") == "regret" else qty
+        total = quoted_qty * unit
         values = {
             "serial": str(item.get("customer_sl_no") or start_serial + i) if include_customer_sl else str(start_serial + i),
             "customer_item_code": str(item.get("customer_item_code") or ""),
@@ -485,7 +489,7 @@ def _totals(items: list[dict], quote_data: dict):
     total_qty = Decimal("0")
     subtotal = Decimal("0")
     for idx, item in enumerate(items):
-        qty = Decimal(str(_num(item.get("quantity"))))
+        qty = Decimal("0") if item.get("status") == "regret" else Decimal(str(_num(item.get("quantity"))))
         unit = Decimal(str(_num(unit_prices[idx] if idx < len(unit_prices) else 0)))
         total_qty += qty
         subtotal += qty * unit

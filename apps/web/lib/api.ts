@@ -121,6 +121,22 @@ export type SignedUrl = {
   content_type: string;
 };
 
+export type OutlookLinkedMessage = {
+  mailbox_user: string;
+  message_id: string;
+  conversation_id: string;
+  internet_message_id: string;
+  web_link: string;
+  subject: string;
+  from_name: string;
+  from_email: string;
+  received_at: string;
+  sent_at: string;
+  has_attachments: boolean;
+  linked_at: string;
+  linked_by: string;
+};
+
 export type DashboardMetrics = {
   total_quotes: number;
   items_processed: number;
@@ -388,6 +404,26 @@ export async function advanceQuoteStage(
       method: "POST",
       headers: headers(),
       body: JSON.stringify({ stage, reason, metadata }),
+    }),
+  );
+}
+
+export async function resolveOutlookMessage(params: { mailboxUser: string; messageId: string }): Promise<OutlookLinkedMessage> {
+  return parse<OutlookLinkedMessage>(
+    await apiFetch(`${API_BASE}/api/v1/outlook/messages/resolve`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ mailbox_user: params.mailboxUser, message_id: params.messageId }),
+    }),
+  );
+}
+
+export async function listOutlookThreadMessages(params: { mailboxUser: string; conversationId: string }): Promise<OutlookLinkedMessage[]> {
+  return parse<OutlookLinkedMessage[]>(
+    await apiFetch(`${API_BASE}/api/v1/outlook/threads/messages`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ mailbox_user: params.mailboxUser, conversation_id: params.conversationId }),
     }),
   );
 }

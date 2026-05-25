@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     sentry_dsn: str | None = Field(default=None, alias="SENTRY_DSN")
     posthog_api_key: str | None = Field(default=None, alias="POSTHOG_API_KEY")
     posthog_host: str = Field(default="https://app.posthog.com", alias="POSTHOG_HOST")
+    microsoft_tenant_id: str | None = Field(default=None, alias="MICROSOFT_TENANT_ID")
+    microsoft_client_id: str | None = Field(default=None, alias="MICROSOFT_CLIENT_ID")
+    microsoft_client_secret: str | None = Field(default=None, alias="MICROSOFT_CLIENT_SECRET")
+    outlook_default_mailbox: str | None = Field(default=None, alias="OUTLOOK_DEFAULT_MAILBOX")
 
     model_config = SettingsConfigDict(
         env_file=".env",

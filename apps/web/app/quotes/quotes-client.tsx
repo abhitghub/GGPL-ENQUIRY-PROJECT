@@ -46,6 +46,7 @@ import {
   API_BASE,
   GasketItem,
   ITEM_FIELDS,
+  OutlookLinkedMessage,
   Quote,
   advanceQuoteStage,
   bulkRecompute,
@@ -55,8 +56,10 @@ import {
   exportQuote,
   getQuote,
   listQuotes,
+  listOutlookThreadMessages,
   patchQuote,
   reprocessText,
+  resolveOutlookMessage,
   rfiDraft,
   toNumber,
 } from "@/lib/api";
@@ -133,6 +136,8 @@ const quoteDefaults: Record<string, unknown> = {
   attention: "",
   designation: "",
   contact_no: "",
+  mobile_no: "",
+  telephone_no: "",
   email: "",
   rep_name: "",
   rep_designation: "",
@@ -170,6 +175,8 @@ const SALES_DETAIL_QUOTE_DATA_FIELDS = new Set([
   "attention",
   "designation",
   "contact_no",
+  "mobile_no",
+  "telephone_no",
   "email",
   "sales_notes",
   "technical_notes",
@@ -179,6 +186,104 @@ function pickSalesDetailQuoteData(data: Record<string, unknown>) {
   return Object.fromEntries(
     Object.entries(data).filter(([key]) => SALES_DETAIL_QUOTE_DATA_FIELDS.has(key)),
   );
+}
+
+type OutlookThreadLink = {
+  mailbox_user: string;
+  message_id: string;
+  conversation_id: string;
+  internet_message_id: string;
+  web_link: string;
+  subject: string;
+  from_name: string;
+  from_email: string;
+  received_at: string;
+  linked_at: string;
+  linked_by: string;
+};
+
+const blankOutlookThread: OutlookThreadLink = {
+  mailbox_user: "",
+  message_id: "",
+  conversation_id: "",
+  internet_message_id: "",
+  web_link: "",
+  subject: "",
+  from_name: "",
+  from_email: "",
+  received_at: "",
+  linked_at: "",
+  linked_by: "",
+};
+
+function outlookThreadFromMeta(meta: Record<string, unknown> | undefined): OutlookThreadLink | null {
+  const raw = meta?.outlook_thread;
+  if (!raw || typeof raw !== "object") return null;
+  const data = raw as Record<string, unknown>;
+  const link = {
+    mailbox_user: getString(data.mailbox_user),
+    message_id: getString(data.message_id),
+    conversation_id: getString(data.conversation_id),
+    internet_message_id: getString(data.internet_message_id),
+    web_link: getString(data.web_link),
+    subject: getString(data.subject),
+    from_name: getString(data.from_name),
+    from_email: getString(data.from_email),
+    received_at: getString(data.received_at),
+    linked_at: getString(data.linked_at),
+    linked_by: getString(data.linked_by),
+  };
+  return link.conversation_id || link.message_id || link.web_link ? link : null;
+}
+
+function outlookThreadFromMessage(message: OutlookLinkedMessage): OutlookThreadLink {
+  return {
+    mailbox_user: message.mailbox_user,
+    message_id: message.message_id,
+    conversation_id: message.conversation_id,
+    internet_message_id: message.internet_message_id,
+    web_link: message.web_link,
+    subject: message.subject,
+    from_name: message.from_name,
+    from_email: message.from_email,
+    received_at: message.received_at || message.sent_at,
+    linked_at: message.linked_at,
+    linked_by: message.linked_by,
+  };
+}
+
+function messageIdFromOutlookInput(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  try {
+    const url = new URL(trimmed);
+    for (const key of ["itemid", "ItemID", "id", "messageId", "messageid"]) {
+      const found = url.searchParams.get(key);
+      if (found) return found;
+    }
+  } catch {
+    // Plain Graph message IDs are accepted directly.
+  }
+  return /^https?:\/\//i.test(trimmed) ? "" : trimmed;
+}
+
+function webLinkFromOutlookInput(value: string) {
+  const trimmed = value.trim();
+  return /^https?:\/\//i.test(trimmed) ? trimmed : "";
+}
+
+function nextQuotationNumber(rows: Quote[], marketType: string) {
+  const prefix = QUOTATION_NUMBER_PREFIX[marketType];
+  if (!prefix) return "";
+  const pattern = new RegExp(`^${prefix}(\\d{3,})$`, "i");
+  let highest = -1;
+  rows.forEach((row) => {
+    [row.quote_no, getString(row.quote_data?.quote_no)].forEach((candidate) => {
+      const match = pattern.exec(candidate.trim());
+      if (match) highest = Math.max(highest, Number(match[1]));
+    });
+  });
+  return `${prefix}${String(highest + 1).padStart(3, "0")}`;
 }
 
 type QuotationStageId =
@@ -232,6 +337,13 @@ type GridSort = {
   field: string;
   direction: "asc" | "desc";
 } | null;
+
+type ExtractionSummaryRow = {
+  item: string;
+  count: number;
+  note1: string;
+  note2: string;
+};
 
 const TABLE_COLUMNS: TableColumn[] = [
   { label: "#", field: "line_no", kind: "readonly", width: "w-16" },
@@ -407,6 +519,10 @@ const BULK_DEFAULTS = {
 const BLANK_SELECT_VALUE = "__blank__";
 const CUSTOM_SALES_REP_VALUE = "__custom_sales_rep__";
 const WITH_WHOM_OPTIONS = ["Ashwin sir", "GTQ", "Estimation", "Arun Sir"];
+const QUOTATION_NUMBER_PREFIX: Record<string, string> = {
+  export: "EXP",
+  domestic: "DOM",
+};
 const LARGE_DRAFT_THRESHOLD = 250;
 const DRAFT_PAGE_SIZE = 500;
 const FINAL_PAGE_SIZE = 50;
@@ -852,6 +968,21 @@ function summaryKey(item: GasketItem): string {
   return ["SOFT CUT", item.moc, item.face_type, item.rating].filter(Boolean).join(" ,");
 }
 
+function normalizeExtractionSummaryRows(value: unknown): ExtractionSummaryRow[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((row) => {
+      const data = row && typeof row === "object" ? row as Record<string, unknown> : {};
+      return {
+        item: getString(data.item || data.summary_item || data.key),
+        count: toNumber(data.count, 0),
+        note1: getString(data.note1),
+        note2: getString(data.note2),
+      };
+    })
+    .filter((row) => row.item || row.count || row.note1 || row.note2);
+}
+
 function statusClass(status: string | null | undefined) {
   if (status === "ready") return "bg-emerald-50 dark:bg-emerald-950/30";
   if (status === "check") return "bg-amber-50 dark:bg-amber-950/30";
@@ -1025,6 +1156,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [currentUser, setCurrentUser] = React.useState(() => getCurrentAppUser());
   const [appUsers, setAppUsers] = React.useState(() => getAppUsers());
   const [approvalComment, setApprovalComment] = React.useState("");
+  const [outlookDraft, setOutlookDraft] = React.useState<OutlookThreadLink>(blankOutlookThread);
+  const [outlookQuickInput, setOutlookQuickInput] = React.useState("");
+  const [outlookMessages, setOutlookMessages] = React.useState<OutlookLinkedMessage[]>([]);
+  const [outlookLoading, setOutlookLoading] = React.useState(false);
   const [draftScrollTop, setDraftScrollTop] = React.useState(0);
   const [undoItems, setUndoItems] = React.useState<{ label: string; items: GasketItem[] } | null>(null);
   const [hasUnsavedLocalEdits, setHasUnsavedLocalEdits] = React.useState(false);
@@ -1048,6 +1183,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const canEditQuotation = canEditQuote;
   const canRunMaterialPhase1 = canEditWorkflow;
   const canEditMaterialPhase2 = currentUser.role === "material_planner";
+  const canSaveProgress = Boolean(quote && (canEditQuote || canAddDetails || canEditMaterialPhase2));
   const loadedQuoteId = React.useRef<string | null>(null);
   const draftGridRef = React.useRef<HTMLDivElement | null>(null);
   const filtersLoaded = React.useRef(false);
@@ -1084,6 +1220,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     ? `${createdByUsername} - ${createdByRoleLabel}`
     : createdByNameFromMeta || "Not recorded";
   const currentEnquiryStage = quote ? enquiryStageFromQuote(quote) : "draft";
+  const enquiryMarketType = getString(quote?.stage_meta?.market_type);
   const effectiveQuoteNo = getString(qd.quote_no || quote?.quote_no);
   const isLargeDraft = items.length > LARGE_DRAFT_THRESHOLD;
   const activeTableColumns = React.useMemo(
@@ -1177,6 +1314,21 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     return Object.entries(summary).sort((left, right) => right[1] - left[1]);
   }, [items]);
   const extractionSummaryNotes = quote?.stage_meta?.extraction_summary_notes as Record<string, { note1?: string; note2?: string }> | undefined;
+  const storedExtractionSummaryRows = React.useMemo(
+    () => normalizeExtractionSummaryRows(quote?.stage_meta?.extraction_summary_rows),
+    [quote?.stage_meta?.extraction_summary_rows],
+  );
+  const extractionSummaryRows = React.useMemo(
+    () => storedExtractionSummaryRows.length
+      ? storedExtractionSummaryRows
+      : extractionSummary.map(([item, count]) => ({
+          item,
+          count,
+          note1: getString(extractionSummaryNotes?.[item]?.note1),
+          note2: getString(extractionSummaryNotes?.[item]?.note2),
+        })),
+    [extractionSummary, extractionSummaryNotes, storedExtractionSummaryRows],
+  );
 
   function invalidateMaterialPlan() {
     setMaterialPlan(null);
@@ -1210,11 +1362,158 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         customer: quote.customer,
         project_ref: quote.project_ref,
         custom_label: quote.custom_label,
+        quote_no: quote.quote_no,
         quote_data: { ...(quote.quote_data ?? {}), ...pickSalesDetailQuoteData(qd) },
         stage_meta: stageMeta,
       } as Partial<Quote>,
       success,
     );
+  }
+
+  async function resolveOutlookThread() {
+    if (!outlookDraft.message_id.trim()) {
+      toast.error("Enter the Outlook message id first");
+      return;
+    }
+    setOutlookLoading(true);
+    try {
+      const resolved = await resolveOutlookMessage({
+        mailboxUser: outlookDraft.mailbox_user,
+        messageId: outlookDraft.message_id,
+      });
+      setOutlookDraft(outlookThreadFromMessage(resolved));
+      toast.success("Outlook message resolved");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Outlook lookup failed");
+    } finally {
+      setOutlookLoading(false);
+    }
+  }
+
+  async function loadOutlookThreadMessages() {
+    const source = outlookThread ?? outlookDraft;
+    if (!source.conversation_id.trim()) {
+      toast.error("Conversation id is required");
+      return;
+    }
+    setOutlookLoading(true);
+    try {
+      const messages = await listOutlookThreadMessages({
+        mailboxUser: source.mailbox_user,
+        conversationId: source.conversation_id,
+      });
+      setOutlookMessages(messages);
+      toast.success("Outlook thread refreshed");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Outlook thread refresh failed");
+    } finally {
+      setOutlookLoading(false);
+    }
+  }
+
+  async function propagateOutlookThreadToLinkedRecords(thread: OutlookThreadLink | null) {
+    if (!quote) return;
+    const linkedIds = [
+      getString(quote.stage_meta?.linked_quote_id),
+      getString(quote.stage_meta?.source_enquiry_id),
+    ].filter((id) => id && id !== quote.id);
+    for (const id of Array.from(new Set(linkedIds))) {
+      try {
+        const linked = await getQuote(id);
+        const linkedMeta = { ...(linked.stage_meta ?? {}) };
+        if (thread) linkedMeta.outlook_thread = thread;
+        else delete linkedMeta.outlook_thread;
+        await patchQuote(id, { stage_meta: linkedMeta } as Partial<Quote>);
+      } catch {
+        // Keep the current record linked even if an older linked record is unavailable.
+      }
+    }
+  }
+
+  async function saveOutlookThread(threadOverride?: OutlookThreadLink) {
+    if (!quote || !canAddDetails) return;
+    const source = threadOverride ?? outlookDraft;
+    const nextThread = {
+      ...source,
+      linked_at: source.linked_at || new Date().toISOString(),
+      linked_by: source.linked_by || currentUser.id,
+    };
+    if (!nextThread.conversation_id && !nextThread.message_id && !nextThread.web_link) {
+      toast.error("Add a conversation id, message id, or Outlook link");
+      return;
+    }
+    const nextMeta = appendActivity(
+      { ...(quote.stage_meta ?? {}), outlook_thread: nextThread },
+      {
+        kind: "workflow",
+        title: "Outlook thread linked",
+        detail: nextThread.subject || nextThread.conversation_id || nextThread.message_id,
+        user: currentUser.name || currentUser.id,
+      },
+    );
+    const saved = await savePatch({ stage_meta: nextMeta } as Partial<Quote>, "Outlook thread linked");
+    if (saved) await propagateOutlookThreadToLinkedRecords(nextThread);
+  }
+
+  async function connectOutlookThread() {
+    if (!quote || !canAddDetails) return;
+    const input = outlookQuickInput.trim();
+    if (!input) {
+      toast.error("Paste an Outlook email link or message id");
+      return;
+    }
+    const messageId = messageIdFromOutlookInput(input);
+    const webLink = webLinkFromOutlookInput(input);
+    const baseThread = {
+      ...outlookDraft,
+      message_id: messageId || outlookDraft.message_id,
+      web_link: webLink || outlookDraft.web_link,
+    };
+    if (!messageId) {
+      setOutlookDraft(baseThread);
+      await saveOutlookThread(baseThread);
+      return;
+    }
+    setOutlookLoading(true);
+    try {
+      const resolved = await resolveOutlookMessage({
+        mailboxUser: baseThread.mailbox_user,
+        messageId,
+      });
+      const nextThread = {
+        ...outlookThreadFromMessage(resolved),
+        web_link: outlookThreadFromMessage(resolved).web_link || webLink,
+      };
+      setOutlookDraft(nextThread);
+      await saveOutlookThread(nextThread);
+    } catch (error) {
+      const fallbackThread = {
+        ...baseThread,
+        linked_at: new Date().toISOString(),
+        linked_by: currentUser.id,
+      };
+      setOutlookDraft(fallbackThread);
+      await saveOutlookThread(fallbackThread);
+      toast.warning(error instanceof Error ? `Saved link without Graph lookup: ${error.message}` : "Saved link without Graph lookup");
+    } finally {
+      setOutlookLoading(false);
+    }
+  }
+
+  async function unlinkOutlookThread() {
+    if (!quote || !canAddDetails) return;
+    const nextMeta = { ...(quote.stage_meta ?? {}) };
+    delete nextMeta.outlook_thread;
+    const withActivity = appendActivity(nextMeta, {
+      kind: "workflow",
+      title: "Outlook thread unlinked",
+      detail: outlookThread?.subject || outlookThread?.conversation_id || "Thread removed",
+      user: currentUser.name || currentUser.id,
+    });
+    setOutlookDraft(blankOutlookThread);
+    setOutlookMessages([]);
+    const saved = await savePatch({ stage_meta: withActivity } as Partial<Quote>, "Outlook thread unlinked");
+    if (saved) await propagateOutlookThreadToLinkedRecords(null);
   }
 
   async function refreshQuotes(activeId?: string) {
@@ -1273,6 +1572,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     setFinalPage(0);
     setHasUnsavedLocalEdits(false);
   }, [isMaterialSection, isQuotationSection, quote]);
+
+  React.useEffect(() => {
+    const thread = outlookThreadFromMeta(quote?.stage_meta);
+    setOutlookDraft(thread ?? blankOutlookThread);
+    setOutlookQuickInput(thread?.web_link || thread?.message_id || thread?.conversation_id || "");
+    setOutlookMessages([]);
+  }, [quote?.id, quote?.stage_meta?.outlook_thread]);
 
   React.useEffect(() => {
     setDraftPage(0);
@@ -1348,6 +1654,17 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [items.length, quote, isQuotationSection]);
+
+  React.useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") return;
+      if (!canSaveProgress || saving) return;
+      event.preventDefault();
+      void saveCurrentProgress();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [canSaveProgress, saving, quote, items, qd, materialBreakdown, materialPlan, isMaterialSection]);
 
   async function startQuote() {
     if (!canEditQuote) {
@@ -1425,15 +1742,33 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       router.replace(`/quotes/final?quote=${linked.id}`);
       return;
     }
-    const savedEnquiry = await savePatch({ items, quote_data: qd, quote_no: effectiveQuoteNo } as Partial<Quote>);
+    const marketType = getString(quote.stage_meta?.market_type);
+    if (!QUOTATION_NUMBER_PREFIX[marketType]) {
+      toast.error("Select Export or Domestic before creating the quotation.");
+      return;
+    }
+    const savedEnquiry = await savePatch({ items, quote_data: qd, quote_no: effectiveQuoteNo, stage_meta: quote.stage_meta } as Partial<Quote>);
     if (!savedEnquiry) return;
     const now = new Date().toISOString();
+    const latestQuotes = await listQuotes();
+    const quotationNo = nextQuotationNumber(latestQuotes, marketType);
+    if (!quotationNo) {
+      toast.error("Could not generate quotation number. Select Export or Domestic and try again.");
+      return;
+    }
+    const quotationQuoteData = {
+      ...cloneJson(savedEnquiry.quote_data),
+      quote_no: quotationNo,
+      quotation_number_type: marketType,
+      source_enquiry_quote_no: savedEnquiry.quote_no,
+    };
     const quotationMeta = appendActivity(
       {
         ...(savedEnquiry.stage_meta ?? {}),
         source_enquiry_id: savedEnquiry.id,
         source_enquiry_version: savedEnquiry.version,
         source_enquiry_quote_no: savedEnquiry.quote_no,
+        quotation_number_type: marketType,
         created_from_enquiry_at: now,
       },
       {
@@ -1444,12 +1779,12 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       },
     );
     const quotation = await createQuote({
-      quote_no: savedEnquiry.quote_no,
+      quote_no: quotationNo,
       customer: savedEnquiry.customer,
       project_ref: savedEnquiry.project_ref,
       custom_label: savedEnquiry.custom_label,
       items: cloneJson(savedEnquiry.items),
-      quote_data: cloneJson(savedEnquiry.quote_data),
+      quote_data: quotationQuoteData,
       stage: "quote_prep",
       stage_meta: quotationMeta,
     } as Partial<Quote>);
@@ -1601,6 +1936,30 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     }
   }
 
+  async function saveCurrentProgress(success = "Progress saved") {
+    if (!quote) return;
+    if (isMaterialSection && (materialBreakdown || materialPlan)) {
+      await saveMaterialPlan(materialPlan);
+      return;
+    }
+    if (!canEditQuote) {
+      await saveSalesDetails(success);
+      return;
+    }
+    await savePatch(
+      {
+        customer: quote.customer,
+        project_ref: quote.project_ref,
+        custom_label: quote.custom_label,
+        quote_no: effectiveQuoteNo,
+        items,
+        quote_data: qd,
+        stage_meta: quote.stage_meta,
+      } as Partial<Quote>,
+      success,
+    );
+  }
+
   async function updateItems(nextItems: GasketItem[], success?: string) {
     if (!canEditLineItems) {
       toast.error("Sales users cannot edit line items.");
@@ -1620,6 +1979,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       toast.error("Create a quote workspace first");
       return;
     }
+    const marketType = getString(quote.stage_meta?.market_type);
+    if (!QUOTATION_NUMBER_PREFIX[marketType]) {
+      toast.error("Select Export or Domestic before processing the enquiry.");
+      return;
+    }
     if (sourceType === "email" && !emailText.trim()) {
       toast.error("Paste enquiry text first");
       return;
@@ -1630,6 +1994,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     }
     try {
       setStartingExtraction(true);
+      const savedContext = await savePatch({ stage_meta: quote.stage_meta } as Partial<Quote>);
+      if (!savedContext) return;
       const accepted = await createExtraction({
         quoteId: quote.id,
         sourceType,
@@ -1798,6 +2164,55 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       } as Partial<Quote>,
       "Extraction summary note saved",
     );
+  }
+
+  function setExtractionSummaryRows(rows: ExtractionSummaryRow[]) {
+    if (!quote || !canEditLineItems) return;
+    const normalizedRows = rows.map((row) => ({
+      item: row.item,
+      count: toNumber(row.count, 0),
+      note1: row.note1,
+      note2: row.note2,
+    }));
+    setQuote((current) => current ? {
+      ...current,
+      stage_meta: {
+        ...(current.stage_meta ?? {}),
+        extraction_summary_rows: normalizedRows,
+      },
+    } : current);
+    setHasUnsavedLocalEdits(true);
+  }
+
+  function updateExtractionSummaryRow(index: number, patch: Partial<ExtractionSummaryRow>) {
+    const nextRows = extractionSummaryRows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row);
+    setExtractionSummaryRows(nextRows);
+  }
+
+  function addExtractionSummaryRow() {
+    setExtractionSummaryRows([...extractionSummaryRows, { item: "", count: 1, note1: "", note2: "" }]);
+  }
+
+  function deleteExtractionSummaryRow(index: number) {
+    setExtractionSummaryRows(extractionSummaryRows.filter((_, rowIndex) => rowIndex !== index));
+  }
+
+  async function saveExtractionSummaryRows() {
+    if (!quote || !canEditLineItems) return;
+    await savePatch({
+      stage_meta: appendActivity(
+        {
+          ...(quote.stage_meta ?? {}),
+          extraction_summary_rows: extractionSummaryRows,
+        },
+        {
+          kind: "items",
+          title: "Extraction summary updated",
+          detail: `${extractionSummaryRows.length} summary row(s) saved`,
+          user: currentUser.name || currentUser.id,
+        },
+      ),
+    } as Partial<Quote>, "Extraction summary saved");
   }
 
   async function exportCurrent(type: "pdf" | "xlsx", mode: "preview" | "download" = "download") {
@@ -2239,6 +2654,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const discount = pricingSummary.discount;
   const gst = pricingSummary.gst;
   const grandTotal = pricingSummary.grandTotal;
+  const totalQuantity = pricingSummary.lines.reduce((sum, line) => sum + line.quantity, 0);
+  const totalQuantityLabel = Number.isInteger(totalQuantity) ? `${totalQuantity}` : totalQuantity.toFixed(2);
   const readyCount = items.filter((item) => item.status === "ready").length;
   const checkCount = items.filter((item) => item.status === "check").length;
   const missingCount = items.filter((item) => item.status === "missing").length;
@@ -2249,6 +2666,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const canExportFinal = approval.status === "approved" || !pricingSummary.approvalRequired;
   const materialPlanStatus = getString(quote?.stage_meta?.material_plan_status || (quote?.stage_meta?.material_plan_finished_at ? "finished" : materialPlan ? "draft" : ""));
   const materialPhase2Finished = materialPlanStatus === "finished";
+  const outlookThread = outlookThreadFromMeta(quote?.stage_meta);
   const quotationStage = quotationStageFromData(qd, quote);
   const quotationStageIndex = QUOTATION_STAGE_INDEX.get(quotationStage) ?? 0;
   const quotationStageMeta = QUOTATION_STAGES[quotationStageIndex] ?? QUOTATION_STAGES[0];
@@ -3152,6 +3570,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               {revisionLabel(quote) && <Badge variant="outline">{revisionLabel(quote)}</Badge>}
               {saving && <span className="inline-flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" />Saving</span>}
               {!saving && hasUnsavedLocalEdits && <Badge variant="warning">Unsaved edits</Badge>}
+              {!isQuotationSection && !enquiryMarketType && <Badge variant="warning">Export/domestic required</Badge>}
             </div>
             <div>
               <h2 className="font-mono text-xl font-semibold tracking-normal text-primary">{quote.quote_no || "enq-pending"}</h2>
@@ -3162,6 +3581,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
             {!isQuotationSection && (
               <div className="flex flex-wrap items-center gap-1.5">
                 <CompactMetric icon={<FileText className="h-3.5 w-3.5" />} label="Items" value={items.length} />
+                <CompactMetric icon={<FileSpreadsheet className="h-3.5 w-3.5" />} label="Total qty" value={totalQuantityLabel} tone="ready" />
                 <CompactMetric
                   icon={<ShieldCheck className="h-3.5 w-3.5" />}
                   label="RFQ"
@@ -3203,19 +3623,170 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           </div>
         </div>
 
+        <div className="mt-3 border-t pt-3">
+          <details className="rounded-md border bg-background p-2.5" open={Boolean(outlookThread)}>
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
+              <span className="inline-flex items-center gap-2"><Mail className="h-4 w-4" />Outlook thread</span>
+              <Badge variant={outlookThread ? "secondary" : "outline"}>{outlookThread ? "Linked" : "Not linked"}</Badge>
+            </summary>
+            <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+              <Field
+                label="Paste Outlook email link or message ID"
+                value={outlookQuickInput}
+                onChange={setOutlookQuickInput}
+                disabled={!canAddDetails}
+              />
+              <div className="flex flex-wrap gap-2">
+                <Button onClick={connectOutlookThread} disabled={!canAddDetails || outlookLoading || !outlookQuickInput.trim()}>
+                  {outlookLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
+                  Connect
+                </Button>
+                <Button variant="secondary" onClick={() => saveOutlookThread()} disabled={!canAddDetails || (!outlookDraft.conversation_id && !outlookDraft.message_id && !outlookDraft.web_link)}>
+                  <Save className="h-4 w-4" />
+                  Save link
+                </Button>
+              </div>
+            </div>
+            {outlookThread && (
+              <div className="mt-3 grid gap-2 rounded-md border bg-muted/30 p-3 text-sm md:grid-cols-3">
+                <div className="min-w-0">
+                  <div className="text-xs text-muted-foreground">Subject</div>
+                  <div className="truncate font-medium">{outlookThread.subject || "Outlook conversation"}</div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs text-muted-foreground">From</div>
+                  <div className="truncate">{outlookThread.from_email || outlookThread.from_name || "-"}</div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs text-muted-foreground">Linked</div>
+                  <div className="truncate">{outlookThread.linked_at ? new Date(outlookThread.linked_at).toLocaleString("en-GB") : "-"}</div>
+                </div>
+              </div>
+            )}
+            <details className="mt-3 rounded-md border p-3">
+              <summary className="cursor-pointer text-sm font-medium">Advanced Outlook details</summary>
+              <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                <Field
+                  label="Mailbox"
+                  value={outlookDraft.mailbox_user}
+                  onChange={(value) => setOutlookDraft((current) => ({ ...current, mailbox_user: value }))}
+                  disabled={!canAddDetails}
+                />
+                <Field
+                  label="Message ID"
+                  value={outlookDraft.message_id}
+                  onChange={(value) => setOutlookDraft((current) => ({ ...current, message_id: value }))}
+                  disabled={!canAddDetails}
+                />
+                <Field
+                  label="Conversation ID"
+                  value={outlookDraft.conversation_id}
+                  onChange={(value) => setOutlookDraft((current) => ({ ...current, conversation_id: value }))}
+                  disabled={!canAddDetails}
+                />
+                <Field
+                  label="Internet message ID"
+                  value={outlookDraft.internet_message_id}
+                  onChange={(value) => setOutlookDraft((current) => ({ ...current, internet_message_id: value }))}
+                  disabled={!canAddDetails}
+                />
+                <Field
+                  label="Outlook link"
+                  value={outlookDraft.web_link}
+                  onChange={(value) => setOutlookDraft((current) => ({ ...current, web_link: value }))}
+                  disabled={!canAddDetails}
+                />
+                <Field
+                  label="Subject"
+                  value={outlookDraft.subject}
+                  onChange={(value) => setOutlookDraft((current) => ({ ...current, subject: value }))}
+                  disabled={!canAddDetails}
+                />
+                <Field
+                  label="From"
+                  value={outlookDraft.from_email || outlookDraft.from_name}
+                  onChange={(value) => setOutlookDraft((current) => ({ ...current, from_email: value }))}
+                  disabled={!canAddDetails}
+                />
+                <Field
+                  label="Received"
+                  value={outlookDraft.received_at}
+                  onChange={(value) => setOutlookDraft((current) => ({ ...current, received_at: value }))}
+                  disabled={!canAddDetails}
+                />
+              </div>
+              <div className="mt-3">
+                <Button variant="secondary" onClick={resolveOutlookThread} disabled={!canAddDetails || outlookLoading || !outlookDraft.message_id}>
+                  {outlookLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                  Resolve message ID
+                </Button>
+              </div>
+            </details>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {outlookDraft.web_link && (
+                <Button variant="secondary" asChild>
+                  <a href={outlookDraft.web_link} target="_blank" rel="noreferrer">
+                    <Mail className="h-4 w-4" />
+                    Open Outlook
+                  </a>
+                </Button>
+              )}
+              <Button variant="secondary" onClick={loadOutlookThreadMessages} disabled={outlookLoading || !outlookDraft.conversation_id}>
+                {outlookLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                Refresh thread
+              </Button>
+              {outlookThread && canAddDetails && (
+                <Button variant="secondary" onClick={unlinkOutlookThread}>
+                  <X className="h-4 w-4" />
+                  Unlink
+                </Button>
+              )}
+            </div>
+            {outlookMessages.length > 0 && (
+              <div className="mt-3 overflow-auto rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Subject</TableHead>
+                      <TableHead>From</TableHead>
+                      <TableHead>Received</TableHead>
+                      <TableHead>Attachments</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {outlookMessages.map((message) => (
+                      <TableRow key={message.message_id}>
+                        <TableCell className="max-w-xl truncate">
+                          {message.web_link ? <a className="text-primary hover:underline" href={message.web_link} target="_blank" rel="noreferrer">{message.subject || message.message_id}</a> : message.subject || message.message_id}
+                        </TableCell>
+                        <TableCell>{message.from_email || message.from_name}</TableCell>
+                        <TableCell>{message.received_at ? new Date(message.received_at).toLocaleString("en-GB") : ""}</TableCell>
+                        <TableCell>{message.has_attachments ? "Yes" : "No"}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </details>
+        </div>
+
         {!isQuotationSection && (
           <div className="mt-3 grid gap-2 border-t pt-3 lg:grid-cols-2 2xl:grid-cols-4">
-            <details className="rounded-md border bg-background p-2.5" open={!quote.customer || !quote.project_ref}>
+            <details className="rounded-md border bg-background p-2.5" open={!quote.customer || !quote.quote_no}>
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
-                <span className="inline-flex items-center gap-2"><FileText className="h-4 w-4" />Header details</span>
-                <Badge variant={quote.customer && quote.project_ref ? "secondary" : "outline"}>{quote.customer && quote.project_ref ? "Saved context" : "Needs context"}</Badge>
+                <span className="inline-flex items-center gap-2"><FileText className="h-4 w-4" />Enquiry details</span>
+                <Badge variant={quote.customer && quote.quote_no ? "secondary" : "outline"}>{quote.customer && quote.quote_no ? "Saved context" : "Needs context"}</Badge>
               </summary>
-              <div className="mt-3 grid gap-3 md:grid-cols-[1fr_1fr_auto] md:items-end">
+              <div className="mt-3 grid gap-3 md:grid-cols-3">
                 <Field label="Customer" value={quote.customer} onChange={(value) => setQuote({ ...quote, customer: value })} disabled={!canAddDetails} />
-                <Field label="Project / PO reference" value={quote.project_ref} onChange={(value) => setQuote({ ...quote, project_ref: value })} disabled={!canAddDetails} />
+                <Field label="Email subject" value={quote.custom_label} onChange={(value) => setQuote({ ...quote, custom_label: value })} disabled={!canAddDetails} />
+                <Field label="Enq reference" value={quote.quote_no} onChange={(value) => setQuote({ ...quote, quote_no: value })} disabled={!canAddDetails} />
+              </div>
+              <div className="mt-3">
                 <Button
                   variant="secondary"
-                  onClick={() => canEditQuote ? savePatch({ customer: quote.customer, project_ref: quote.project_ref } as Partial<Quote>, "Enquiry details saved") : saveSalesDetails("Enquiry details saved")}
+                  onClick={() => canEditQuote ? savePatch({ customer: quote.customer, custom_label: quote.custom_label, quote_no: quote.quote_no } as Partial<Quote>, "Enquiry details saved") : saveSalesDetails("Enquiry details saved")}
                   disabled={!canAddDetails}
                 >
                   <Save className="h-4 w-4" />
@@ -3229,6 +3800,34 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 <span className="inline-flex items-center gap-2"><FileText className="h-4 w-4" />Sales notes</span>
                 <Badge variant="outline">{getString(quote.stage_meta?.sales_notes) ? "Saved notes" : "No notes"}</Badge>
               </summary>
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                <Field label="Project name" value={quote.project_ref} onChange={(value) => setQuote({ ...quote, project_ref: value })} disabled={!canAddDetails} />
+                <Field label="Country" value={getString(quote.stage_meta?.country)} onChange={(value) => setQuote({ ...quote, stage_meta: { ...(quote.stage_meta ?? {}), country: value } })} disabled={!canAddDetails} />
+                <Field label="City" value={getString(quote.stage_meta?.city)} onChange={(value) => setQuote({ ...quote, stage_meta: { ...(quote.stage_meta ?? {}), city: value } })} disabled={!canAddDetails} />
+                <Field label="EPC name" value={getString(quote.stage_meta?.epc_name)} onChange={(value) => setQuote({ ...quote, stage_meta: { ...(quote.stage_meta ?? {}), epc_name: value } })} disabled={!canAddDetails} />
+                <div className="space-y-1.5">
+                  <Label>Bidding or firm</Label>
+                  <Select value={getString(quote.stage_meta?.bid_type) || BLANK_SELECT_VALUE} onValueChange={(value) => setQuote({ ...quote, stage_meta: { ...(quote.stage_meta ?? {}), bid_type: value === BLANK_SELECT_VALUE ? "" : value } })} disabled={!canAddDetails}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={BLANK_SELECT_VALUE}>Select</SelectItem>
+                      <SelectItem value="bidding">Bidding</SelectItem>
+                      <SelectItem value="firm">Firm</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Export or domestic *</Label>
+                  <Select value={getString(quote.stage_meta?.market_type) || BLANK_SELECT_VALUE} onValueChange={(value) => setQuote({ ...quote, stage_meta: { ...(quote.stage_meta ?? {}), market_type: value === BLANK_SELECT_VALUE ? "" : value } })} disabled={!canAddDetails}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={BLANK_SELECT_VALUE}>Select</SelectItem>
+                      <SelectItem value="export">Export</SelectItem>
+                      <SelectItem value="domestic">Domestic</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
               <div className="mt-3 space-y-3">
                 <Field
                   label="Notes / extra details"
@@ -4107,7 +4706,25 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
 
               <div className="grid gap-4">
                 <div className="rounded-md border p-3">
-                  <div className="text-sm font-medium">Extraction summary</div>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-sm font-medium">Extraction summary</div>
+                    {canEditLineItems && (
+                      <div className="flex flex-wrap gap-2">
+                        <Button variant="secondary" size="sm" onClick={addBlankRow}>
+                          <Plus className="h-4 w-4" />
+                          Item row
+                        </Button>
+                        <Button variant="secondary" size="sm" onClick={addExtractionSummaryRow}>
+                          <Plus className="h-4 w-4" />
+                          Summary row
+                        </Button>
+                        <Button variant="secondary" size="sm" onClick={saveExtractionSummaryRows}>
+                          <Save className="h-4 w-4" />
+                          Save summary
+                        </Button>
+                      </div>
+                    )}
+                  </div>
                   <div className="mt-2 overflow-hidden rounded-md border bg-background">
                     <Table className={SHEET_TABLE_CLASS}>
                       <TableHeader className={SHEET_HEADER_CLASS}>
@@ -4117,38 +4734,59 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                           <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Count</TableHead>
                           <TableHead className={`${SHEET_HEAD_CLASS} min-w-56`}>Note 1</TableHead>
                           <TableHead className={`${SHEET_HEAD_CLASS} min-w-56`}>Note 2</TableHead>
+                          {canEditLineItems && <TableHead className={`${SHEET_HEAD_CLASS} w-20`}>Actions</TableHead>}
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {extractionSummary.length > 0 ? extractionSummary.map(([key, count], index) => (
-                          <TableRow key={key}>
+                        {extractionSummaryRows.length > 0 ? extractionSummaryRows.map((row, index) => (
+                          <TableRow key={`${row.item}-${index}`}>
                             <TableCell className={SHEET_ROW_HEADER_CLASS}>{index + 1}</TableCell>
-                            <TableCell className={SHEET_CELL_CLASS}>{key}</TableCell>
-                            <TableCell className={SHEET_CELL_CLASS}>{count}</TableCell>
                             <TableCell className={SHEET_CELL_CLASS}>
                               <Input
                                 className={SHEET_INPUT_CLASS}
-                                value={getString(extractionSummaryNotes?.[key]?.note1)}
-                                onChange={(event) => {
-                                  void updateExtractionSummaryNote(key, "note1", event.target.value);
-                                }}
-                                placeholder="Add note"
+                                value={row.item}
+                                onChange={(event) => updateExtractionSummaryRow(index, { item: event.target.value })}
+                                disabled={!canEditLineItems}
                               />
                             </TableCell>
                             <TableCell className={SHEET_CELL_CLASS}>
                               <Input
                                 className={SHEET_INPUT_CLASS}
-                                value={getString(extractionSummaryNotes?.[key]?.note2)}
-                                onChange={(event) => {
-                                  void updateExtractionSummaryNote(key, "note2", event.target.value);
-                                }}
-                                placeholder="Add note"
+                                type="number"
+                                value={getString(row.count)}
+                                onChange={(event) => updateExtractionSummaryRow(index, { count: Number(event.target.value) || 0 })}
+                                disabled={!canEditLineItems}
                               />
                             </TableCell>
+                            <TableCell className={SHEET_CELL_CLASS}>
+                              <Input
+                                className={SHEET_INPUT_CLASS}
+                                value={row.note1}
+                                onChange={(event) => updateExtractionSummaryRow(index, { note1: event.target.value })}
+                                placeholder="Add note"
+                                disabled={!canEditLineItems}
+                              />
+                            </TableCell>
+                            <TableCell className={SHEET_CELL_CLASS}>
+                              <Input
+                                className={SHEET_INPUT_CLASS}
+                                value={row.note2}
+                                onChange={(event) => updateExtractionSummaryRow(index, { note2: event.target.value })}
+                                placeholder="Add note"
+                                disabled={!canEditLineItems}
+                              />
+                            </TableCell>
+                            {canEditLineItems && (
+                              <TableCell className={`${SHEET_CELL_CLASS} text-center`}>
+                                <Button variant="ghost" size="sm" onClick={() => deleteExtractionSummaryRow(index)} title="Delete summary row">
+                                  <Trash2 className="h-4 w-4" />
+                                </Button>
+                              </TableCell>
+                            )}
                           </TableRow>
                         )) : (
                           <TableRow>
-                            <TableCell className={SHEET_CELL_CLASS} colSpan={5}>No items yet.</TableCell>
+                            <TableCell className={SHEET_CELL_CLASS} colSpan={canEditLineItems ? 6 : 5}>No items yet.</TableCell>
                           </TableRow>
                         )}
                       </TableBody>
@@ -4736,6 +5374,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <CompactMetric icon={<FileText className="h-3.5 w-3.5" />} label="Rows" value={items.length} />
+                    <CompactMetric icon={<FileSpreadsheet className="h-3.5 w-3.5" />} label="Total qty" value={totalQuantityLabel} tone="ready" />
                     <CompactMetric icon={<Download className="h-3.5 w-3.5" />} label="Total" value={`${grandTotal.toFixed(2)} ${currency}`} tone="ready" />
                     <CompactMetric
                       icon={<ShieldCheck className="h-3.5 w-3.5" />}
@@ -4818,9 +5457,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       <Field label="Buyer name/address" value={getString(qd.buyer_name_address)} onChange={(value) => updateQd("buyer_name_address", value)} textarea disabled={!canAddDetails} />
                       <div className="grid gap-3 md:grid-cols-2">
                         <Field label="Customer enquiry no" value={getString(qd.customer_enq_no)} onChange={(value) => updateQd("customer_enq_no", value)} disabled={!canAddDetails} />
-                        <Field label="Attention" value={getString(qd.attention)} onChange={(value) => updateQd("attention", value)} disabled={!canAddDetails} />
+                        <Field label="Sender's name" value={getString(qd.attention)} onChange={(value) => updateQd("attention", value)} disabled={!canAddDetails} />
                         <Field label="Designation" value={getString(qd.designation)} onChange={(value) => updateQd("designation", value)} disabled={!canAddDetails} />
-                        <Field label="Contact no" value={getString(qd.contact_no)} onChange={(value) => updateQd("contact_no", value)} disabled={!canAddDetails} />
+                        <Field label="Mobile number" value={getString(qd.mobile_no || qd.contact_no)} onChange={(value) => updateQd("mobile_no", value)} disabled={!canAddDetails} />
+                        <Field label="Telephone number" value={getString(qd.telephone_no)} onChange={(value) => updateQd("telephone_no", value)} disabled={!canAddDetails} />
                         <Field label="Email" value={getString(qd.email)} onChange={(value) => updateQd("email", value)} disabled={!canAddDetails} />
                       </div>
                     </div>
@@ -5071,6 +5711,21 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {canSaveProgress && (
+        <div className="fixed bottom-4 right-4 z-50">
+          <Button
+            className="h-11 shadow-lg"
+            onClick={() => saveCurrentProgress()}
+            disabled={saving}
+            title="Save progress (Ctrl+S)"
+          >
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            Save
+            <span className="hidden rounded border border-primary-foreground/30 px-1.5 py-0.5 text-[10px] opacity-80 sm:inline">Ctrl+S</span>
+          </Button>
+        </div>
       )}
 
       <Dialog open={Boolean(previewUrl)} onOpenChange={(open) => { if (!open) setPreviewUrl(""); }}>
