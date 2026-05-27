@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import openpyxl
+import pdfplumber
 
 from core.quote_exporter import build_quotation_excel
 from core.quote_pdf import build_quotation_pdf
@@ -60,6 +61,7 @@ def _sample_quote_data(currency: str = "INR") -> dict:
         "attention": "Procurement",
         "designation": "Manager",
         "contact_no": "9999999999",
+        "telephone_no": "022-40000000",
         "email": "buyer@example.com",
         "rep_name": "GGPL Sales",
         "rep_designation": "Sales",
@@ -84,6 +86,8 @@ def _sample_quote_data(currency: str = "INR") -> dict:
         "ld_clause": "Not Applicable",
         "cancellation": "Products are manufactured on order.",
         "min_order_value": "Minimum Order Value is INR 10,000.",
+        "technical_deviation_remarks": "Technical deviation accepted as per customer drawing.",
+        "commercial_tnc": "Commercial terms remain subject to final PO acceptance.",
         "technical_notes": "Technical note line one.\nTechnical note line two.",
     }
 
@@ -99,6 +103,8 @@ def test_excel_export_service_matches_current_python_exporter():
     values = [cell for row in workbook.active.iter_rows(values_only=True) for cell in row]
     assert "C-10" in values
     assert "ITEM-777" in values
+    assert "Technical deviation accepted as per customer drawing." in values
+    assert "Commercial terms remain subject to final PO acceptance." in values
 
 
 def test_pdf_export_service_text_matches_current_python_exporter():
@@ -109,5 +115,57 @@ def test_pdf_export_service_text_matches_current_python_exporter():
     matched, expected, actual = compare_pdf_text(direct, wrapped)
     assert matched, f"Expected PDF text:\n{expected}\n\nActual PDF text:\n{actual}"
     text = extract_pdf_text(direct)
+    assert "*SALES QUOTATION" in text
+    assert "QUOTATION NO.:" in text
+    assert "*Please refer to the email" in text
     assert "C-10" in text
     assert "ITEM-777" in text
+    assert "Technical Deviation / Remarks:" in text
+    assert "Technical deviation accepted as per customer drawing." in text
+    assert "Commercial T&C:" in text
+    assert "Commercial terms remain subject to final PO acceptance." in text
+    assert text.index("GENERAL TERMS OF QUOTATION:") < text.index("Other Terms & Conditions")
+    assert text.index("Other Terms & Conditions") < text.index("Technical Notes")
+    assert "For Goodrich Gaskets" in text
+    assert "Authorized Signatory and Company Seal" in text
+    assert "Accepted By -" in text
+    assert "Client Name :" in text
+    assert "This is a Computer Generated Document" not in text
+    with pdfplumber.open(io.BytesIO(direct)) as pdf:
+        first_page = pdf.pages[0]
+        words = first_page.extract_words(x_tolerance=1, y_tolerance=3)
+        buyer_email = next(word for word in words if word["text"] == "buyer@example.com")
+        buyer_bottom_lines = [
+            line["top"]
+            for line in first_page.lines
+            if 357.8 <= line.get("top", 0) <= 358.5
+        ]
+        assert buyer_bottom_lines
+        assert buyer_email["bottom"] < min(buyer_bottom_lines)
+        telephone_label = next(
+            word
+            for word in words
+            if word["text"] == "Telephone" and word["x0"] < 30 and 320 <= word["top"] <= 340
+        )
+        customer_email_label = next(
+            word
+            for word in words
+            if word["text"] == "Email" and word["x0"] < 30 and 335 <= word["top"] <= 355
+        )
+        assert customer_email_label["top"] - telephone_label["top"] >= 14
+        other_page = next(page for page in pdf.pages if "Other Terms & Conditions" in (page.extract_text() or ""))
+        other_words = other_page.extract_words(x_tolerance=1, y_tolerance=3)
+        price_word = next(word for word in other_words if word["text"] == "Price")
+        price_colon = next(
+            word
+            for word in other_words
+            if word["text"] == ":" and abs(word["top"] - price_word["top"]) < 1
+        )
+        price_value = next(
+            word
+            for word in other_words
+            if word["text"] == "FOR" and abs(word["top"] - price_word["top"]) < 1
+        )
+        assert 46 <= price_word["x0"] <= 49
+        assert 176 <= price_colon["x0"] <= 179
+        assert 181 <= price_value["x0"] <= 184

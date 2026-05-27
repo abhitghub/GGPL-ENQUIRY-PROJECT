@@ -165,6 +165,8 @@ const quoteDefaults: Record<string, unknown> = {
   ld_clause: "Not Applicable",
   cancellation: "Products are manufactured on order and hence Goodrich will not be able to accept cancellation of order or reduction in quantity. The product shall to invoiced as per the PO.",
   min_order_value: "Minimum Order Value is INR 10,000,No order can be processed below the same. If processed, INR 3,500 shall be paid extra on document charges.",
+  technical_deviation_remarks: "",
+  commercial_tnc: "",
   technical_notes: "",
 };
 
@@ -2620,7 +2622,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   function updateQd(key: string, value: unknown) {
     if (!canEditQuote && !(currentUser.role === "sales" && SALES_DETAIL_QUOTE_DATA_FIELDS.has(key))) return;
     const next = { ...qd, [key]: value };
-  if (key === "currency") {
+    if (key === "currency") {
       next.fx_rate = defaultFx[getString(value)] ?? 1;
     }
     if (key === "discount_pct") {
@@ -5331,7 +5333,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     Save
                   </Button>
                 )}
-                <Button variant="secondary" size="sm" onClick={() => exportCurrent("pdf", "preview")} disabled={!canEditQuotation || !canExportFinal}>
+                <Button variant="secondary" size="sm" onClick={() => exportCurrent("pdf", "preview")} disabled={!canEditQuotation}>
                   {exporting === "pdf" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
                   Preview
                 </Button>
@@ -5682,6 +5684,22 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                           disabled={!canEditQuotation && key !== "technical_notes"}
                         />
                       ))}
+                    </div>
+                    <div className="mt-4 grid gap-3">
+                      <Field
+                        label="Technical Deviation / Remarks"
+                        value={getString(qd.technical_deviation_remarks)}
+                        onChange={(value) => updateQd("technical_deviation_remarks", value)}
+                        textarea
+                        disabled={!canEditQuotation}
+                      />
+                      <Field
+                        label="Commercial T&C"
+                        value={getString(qd.commercial_tnc)}
+                        onChange={(value) => updateQd("commercial_tnc", value)}
+                        textarea
+                        disabled={!canEditQuotation}
+                      />
                     </div>
                   </div>
                 </TabsContent>

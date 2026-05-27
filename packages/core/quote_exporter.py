@@ -13,28 +13,30 @@ import xlsxwriter
 # ---------------------------------------------------------------------------
 COMPANY_NAME = "GOODRICH GASKET PRIVATE LIMITED"
 COMPANY_ADDRESS_LINES = [
-    "Regd.Office & Works : 40, Velichai Village, Next to: Pasupathi Eswaran Temple,",
+    "Regd. Office & Works: 40, Velichai Village, Next to: Pasupathi Eswaran Temple,",
     "Opp.Road to: Pudupakkam Anjaneyar Hill Temple, Vandalur-Kelambakkam Road,",
     "Chennai - 600127, Tamil Nadu, India.",
-    "Tel: +91-44-67400004 - 99 / +91-7824017150 / 7824017151   Fax: +91-44-67400003",
+    "Tel: +91-44-67400004 - 99 / +91-7824017150/7824017151   Fax: +91-44-67400003",
     "Email: goodrichgasket@gmail.com / info@flosil.com",
-    "Web: www.goodrichgasket.com / www.flosil.com",
     "IT PAN No.: AABCG2902K   CIN: U27209TN1987PTC014031   GSTIN NO: 33AABCG2902K1ZY",
 ]
 
 GENERAL_TERMS = (
     "GENERAL TERMS OF QUOTATION:\n"
-    "1) The \"purchase\" fully acknowledges that he/she has read the \"General Terms of Quote\" and agrees to mention the "
-    "above clauses in the Purchase Order.\n"
-    "2) Products will be shipped only to the \"Shipping Address\" mentioned in the Purchase Order.\n"
-    "3) For any dispute jurisdiction will be Chennai city civil court or Chennai High Court Only.\n"
-    "4) The delivery quoted is subject to standard Force Majeure conditions which will be beyond our control like "
-    "Lockdowns, Natural disasters, Epidemics, Pandemics Act of God, Ordinance of all relevant Government Authorities "
-    "and if there is a delay on account of the above, Goodrich shall not be considered in default in the performance "
-    "of its obligations.\n"
-    "5) The above offer pricing is ONLY applicable for the offered part numbers and quantities despatched in one lot. "
-    "GGPL reserves the right to change the prices if the order is partial or dispatch in several shipments.\n"
-    "6) Ex-stock items are subject to prior sales."
+    "1. Delivery Terms: Delivery is subject to final acceptance of the purchase order by Goodrich, including acceptance of commercial terms and conditions, technical deviations, and replies to technical queries. Production release note and contractual delivery date will start only after pending issues are resolved.\n"
+    "2. Express Deliveries: Any shorter delivery requirement must be requested in writing before purchase order placement. Goodrich may accept or reject the request. Approved express delivery charges shall be borne by the customer, and LD shall not apply for express deliveries.\n"
+    "3. Payment Terms: Payment terms shall be as negotiated and agreed. Delayed payments beyond agreed terms shall attract interest at 18% per annum on a pro-rata basis.\n"
+    "4. Liquidated Damages LD Clause: Not applicable.\n"
+    "5. Storage Charge: If dispatch approval or dispatch arrangement is delayed by the customer, storage charges at 1% per month plus GST shall apply on a pro-rata basis. Delays beyond 60 days will not be accepted, and the consignment may be dispatched without further notice.\n"
+    "6. Order Cancellation or Amendment: After purchase order placement, cancellation or amendment will not be accepted. If cancelled or amended, full payment shall be made as per the original purchase order.\n"
+    "7. Delivery Dates: If production is completed early, the customer shall settle payment and authorize dispatch.\n"
+    "8. Acknowledgement of Terms: The purchaser acknowledges that they have read and agreed to the General Terms of Quotation and shall include these clauses in the purchase order.\n"
+    "9. Shipping Address: Products will be shipped only to the \"Shipping Address\" mentioned in the purchase order.\n"
+    "10. Jurisdiction for Disputes: For any dispute, jurisdiction will be Chennai City Civil Court or Chennai High Court only.\n"
+    "11. Force Majeure: Delivery is subject to Force Majeure conditions beyond Goodrich control, including lockdowns, natural disasters, epidemics, pandemics, acts of God, and government ordinances. Delays due to such events shall not be considered default by Goodrich.\n"
+    "12. Pricing Validity: Pricing is applicable only for the offered part numbers and quantities dispatched in one lot. Goodrich reserves the right to revise prices for partial or multiple shipments.\n"
+    "13. Ex-Stock Items: Ex-stock items are subject to prior sales.\n"
+    "We trust that our rates are competitive and our terms and conditions are acceptable. We look forward to receiving your valued order."
 )
 
 # ---------------------------------------------------------------------------
@@ -96,6 +98,7 @@ def build_quotation_excel(
         gst_type, gst_pct, discount_pct,
         payment_terms, bank_charges, delivery, inspection, insurance,
         ld_clause, cancellation, min_order_value, hsn_code,
+        technical_deviation_remarks, commercial_tnc,
         technical_notes,
         unit_prices (list of floats, parallel to items)
     """
@@ -184,19 +187,19 @@ def build_quotation_excel(
 
     # ── SALES QUOTATION title ────────────────────────────────────────────────
     ws.set_row(row, 22)
-    ws.merge_range(_range(row, 0, row, NCOLS - 1), 'SALES QUOTATION', f_title)
+    ws.merge_range(_range(row, 0, row, NCOLS - 1), '*SALES QUOTATION', f_title)
     row += 1
 
     # ── Quote reference block ────────────────────────────────────────────────
     ws.set_row(row, 16)
     # [QUOTE NO label][val][DATE label][val][REV NO label][val][REV DATE label][val]  (squeeze into 10 cols)
-    ws.merge_range(_range(row, 0, row, 1), 'QUOTE NO :', f_ref_label)
+    ws.merge_range(_range(row, 0, row, 1), 'QUOTATION NO.:', f_ref_label)
     ws.merge_range(_range(row, 2, row, 4), quote_data.get('quote_no', ''), f_ref_val)
-    ws.write(row, 5, 'DATE :', f_ref_label)
+    ws.write(row, 5, 'Date:', f_ref_label)
     ws.write(row, 6, quote_data.get('quote_date', ''), f_ref_val)
-    ws.write(row, 7, 'REV NO :', f_ref_label)
+    ws.write(row, 7, 'Rev. No.:', f_ref_label)
     ws.write(row, 8, str(quote_data.get('rev_no', '0')), f_ref_val)
-    ws.write(row, 9, 'REV DATE :', f_ref_label) if NCOLS > 9 else None
+    ws.write(row, 9, 'Rev. Date:', f_ref_label) if NCOLS > 9 else None
     row += 1
     ws.set_row(row, 16)
     ws.merge_range(_range(row, 0, row, 1), '', f_ref_label)
@@ -382,10 +385,21 @@ def build_quotation_excel(
                         border_color=_BORDER, num_format='#,##0.00'))
     row += 1
 
-    # ── Terms & Conditions ───────────────────────────────────────────────────
+    # ── General Terms ────────────────────────────────────────────────────────
+    ws.set_row(row, 14)
+    ws.merge_range(_range(row, 0, row, NCOLS - 1), 'GENERAL TERMS OF QUOTATION:', f_terms_hdr)
+    row += 1
+    gt_h = max(110, 11 * (GENERAL_TERMS.count('\n') + 4))
+    ws.set_row(row, min(gt_h, 260))
+    ws.merge_range(_range(row, 0, row, NCOLS - 1), GENERAL_TERMS,
+                   _fmt(font_size=7.5, align='left', text_wrap=True, border=1,
+                        border_color=_BORDER, valign='top'))
+    row += 1
+
+    # ── Other Terms & Conditions ─────────────────────────────────────────────
     ws.set_row(row, 14)
     ws.merge_range(_range(row, 0, row, NCOLS - 1),
-                   'Terms & Conditions :', f_terms_hdr)
+                   'Other Terms & Conditions :', f_terms_hdr)
     row += 1
 
     terms = [
@@ -422,6 +436,19 @@ def build_quotation_excel(
         ws.merge_range(_range(row, 2, row, NCOLS - 1), val, f_terms_val)
         row += 1
 
+    for title, value in [
+        ('Technical Deviation / Remarks:', quote_data.get('technical_deviation_remarks', '')),
+        ('Commercial T&C:', quote_data.get('commercial_tnc', '')),
+    ]:
+        if value:
+            ws.set_row(row, 14)
+            ws.merge_range(_range(row, 0, row, NCOLS - 1), title, f_terms_hdr)
+            row += 1
+            note_h = max(30, min(120, 12 * (value.count('\n') + 2)))
+            ws.set_row(row, note_h)
+            ws.merge_range(_range(row, 0, row, NCOLS - 1), value, f_notes)
+            row += 1
+
     # ── Technical Notes ──────────────────────────────────────────────────────
     tech_notes = quote_data.get('technical_notes', '')
     if tech_notes:
@@ -432,17 +459,6 @@ def build_quotation_excel(
         ws.set_row(row, note_h)
         ws.merge_range(_range(row, 0, row, NCOLS - 1), tech_notes, f_notes)
         row += 1
-
-    # ── General Terms ────────────────────────────────────────────────────────
-    ws.set_row(row, 14)
-    ws.merge_range(_range(row, 0, row, NCOLS - 1), '', f_terms_hdr)
-    row += 1
-    gt_h = max(80, 11 * (GENERAL_TERMS.count('\n') + 2))
-    ws.set_row(row, min(gt_h, 180))
-    ws.merge_range(_range(row, 0, row, NCOLS - 1), GENERAL_TERMS,
-                   _fmt(font_size=7.5, align='left', text_wrap=True, border=1,
-                        border_color=_BORDER, valign='top'))
-    row += 1
 
     # ── Authorized Signatory ─────────────────────────────────────────────────
     ws.set_row(row, 14)
