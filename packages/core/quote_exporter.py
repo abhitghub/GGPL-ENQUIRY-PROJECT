@@ -187,7 +187,7 @@ def build_quotation_excel(
 
     # ── SALES QUOTATION title ────────────────────────────────────────────────
     ws.set_row(row, 22)
-    ws.merge_range(_range(row, 0, row, NCOLS - 1), '*SALES QUOTATION', f_title)
+    ws.merge_range(_range(row, 0, row, NCOLS - 1), 'SALES QUOTATION', f_title)
     row += 1
 
     # ── Quote reference block ────────────────────────────────────────────────

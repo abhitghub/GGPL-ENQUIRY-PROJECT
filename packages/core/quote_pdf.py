@@ -316,7 +316,7 @@ def _draw_header(c: canvas.Canvas, quote_data: dict, logo_path: str | None, show
 
     # ── Right section: "SALES QUOTATION" ─────────────────────────────────────
     right_center = (DIVX + RIGHT) / 2             # ≈ 481.35
-    _draw(c, right_center, _y(32.7, 9.5), "*SALES QUOTATION", size=9.5, bold=True, align="center")
+    _draw(c, right_center, _y(32.7, 9.5), "SALES QUOTATION", size=9.5, bold=True, align="center")
 
     # ── Quote details (y-positions matched to reference glyph-tops) ───────────
     lx = DIVX + 7                                 # ≈ 394.5
@@ -359,7 +359,7 @@ def _draw_buyer_block(c: canvas.Canvas, quote_data: dict):
 
     # ── Content (all y-coords are reference glyph-tops, converted via _y()) ─────
     _draw(c, 25,  _y(171.2, 9), "Name & Address of the Buyer :", size=9)
-    _draw(c, 555, _y(171.2, 9), "GGPL/MKT/REC03", size=9, align="right")
+    _draw(c, 555, _y(171.2, 9), "GOODRICH/MKT/REC03", size=9, align="right")
 
     buyer_lines = str(quote_data.get("buyer_name_address", "")).splitlines()
     for ref_top, line in zip([185.7, 202.7, 219.7, 236.7, 253.7], buyer_lines):
@@ -378,11 +378,11 @@ def _draw_buyer_block(c: canvas.Canvas, quote_data: dict):
     ]
     for ref_top, label, value, rlabel, rvalue in rows:
         top = _y(ref_top, 9)
-        _draw(c, label_x,  top, label, size=9)
+        _draw(c, label_x,  top, label, size=9, bold=True)
         _draw(c, 101,      top, ":",   size=9)
         _draw_wrapped(c, value_x, top, value, 200, size=9, leading=10, max_lines=1)
         if rlabel:
-            _draw(c, _COL_DIV + 6,  top, rlabel, size=9)
+            _draw(c, _COL_DIV + 6,  top, rlabel, size=9, bold=True)
             _draw(c, _COL_DIV + 75, top, ":",    size=9)
             _draw_wrapped(c, _COL_DIV + 82, top, rvalue, 160, size=9, leading=10, max_lines=2)
 
@@ -484,7 +484,7 @@ def _description_cell(item: dict):
     if cust and cust != ggpl:
         return KeepInFrame(0, 0, [
             Paragraph(cust, _PS_DESC),
-            Paragraph(f"GGPL: {ggpl}", _PS_GGPL),
+            Paragraph(f"Goodrich: {ggpl}", _PS_GGPL),
         ], mode='shrink')
     return Paragraph(cust or ggpl, _PS_DESC)
 

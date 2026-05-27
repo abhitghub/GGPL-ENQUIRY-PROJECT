@@ -115,7 +115,7 @@ def test_pdf_export_service_text_matches_current_python_exporter():
     matched, expected, actual = compare_pdf_text(direct, wrapped)
     assert matched, f"Expected PDF text:\n{expected}\n\nActual PDF text:\n{actual}"
     text = extract_pdf_text(direct)
-    assert "*SALES QUOTATION" in text
+    assert "SALES QUOTATION" in text
     assert "QUOTATION NO.:" in text
     assert "*Please refer to the email" in text
     assert "C-10" in text
