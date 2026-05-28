@@ -22,6 +22,8 @@ UserRole = Literal[
 
 class AppUserBase(BaseModel):
     name: str = ""
+    designation: str = ""
+    contact: str = ""
     email: str
     role: UserRole = "sales"
     active: bool = True
@@ -33,6 +35,8 @@ class AppUserCreate(AppUserBase):
 
 class AppUserPatch(BaseModel):
     name: str | None = None
+    designation: str | None = None
+    contact: str | None = None
     email: str | None = None
     role: UserRole | None = None
     active: bool | None = None

@@ -122,6 +122,8 @@ app_users_table = Table(
     Column("org_id", uuid_type, primary_key=True),
     Column("user_id", Text, primary_key=True),
     Column("name", Text, nullable=False, default=""),
+    Column("designation", Text, nullable=False, default=""),
+    Column("contact", Text, nullable=False, default=""),
     Column("email", Text, nullable=False, default=""),
     Column("role", Text, nullable=False, default="sales"),
     Column("active", Boolean, nullable=False, default=True),
@@ -143,6 +145,8 @@ DEFAULT_APP_USERS = [
     {
         "id": "shashnam",
         "name": "Shashnam",
+        "designation": "Admin",
+        "contact": "",
         "email": "shashnam@flosil.com",
         "role": "admin",
         "active": True,
@@ -295,6 +299,8 @@ class LocalJsonRepository:
             else:
                 users[key].update({
                     "name": users[key].get("name") or seed["name"],
+                    "designation": users[key].get("designation") or seed["designation"],
+                    "contact": users[key].get("contact") or seed["contact"],
                     "email": users[key].get("email") or seed["email"],
                     "role": "admin",
                     "active": True,
@@ -633,6 +639,8 @@ class PostgresRepository:
                 conn.execute(text("alter table quotes add column if not exists version int not null default 1"))
                 conn.execute(text("create index if not exists quotes_org_created_idx on quotes (org_id, created_at desc)"))
                 conn.execute(text("create index if not exists generated_exports_org_created_idx on generated_exports (org_id, created_at desc)"))
+                conn.execute(text("alter table app_users add column if not exists designation text not null default ''"))
+                conn.execute(text("alter table app_users add column if not exists contact text not null default ''"))
                 conn.execute(text("create index if not exists app_users_org_email_idx on app_users (org_id, email)"))
 
     def _quote_from_row(self, row: Any) -> QuoteRead:
@@ -684,6 +692,8 @@ class PostgresRepository:
             id=data["user_id"],
             org_id=str(data["org_id"]),
             name=data["name"] or "",
+            designation=data.get("designation") or "",
+            contact=data.get("contact") or "",
             email=data["email"] or "",
             role=data["role"] or "sales",
             active=bool(data["active"]),
@@ -708,6 +718,8 @@ class PostgresRepository:
                             org_id=org_uuid,
                             user_id=seed["id"],
                             name=seed["name"],
+                            designation=seed["designation"],
+                            contact=seed["contact"],
                             email=seed["email"],
                             role=seed["role"],
                             active=seed["active"],
@@ -722,6 +734,8 @@ class PostgresRepository:
                         .where(app_users_table.c.org_id == org_uuid, app_users_table.c.user_id == seed["id"])
                         .values(
                             name=data["name"] or seed["name"],
+                            designation=data["designation"] or seed["designation"],
+                            contact=data["contact"] or seed["contact"],
                             email=data["email"] or seed["email"],
                             role="admin",
                             active=True,
@@ -807,6 +821,8 @@ class PostgresRepository:
                 org_id=_tenant_uuid(org_id),
                 user_id=user_id,
                 name=payload.name,
+                designation=payload.designation,
+                contact=payload.contact,
                 email=str(payload.email).lower(),
                 role=payload.role,
                 active=payload.active,

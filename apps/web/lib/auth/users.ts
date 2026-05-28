@@ -6,6 +6,8 @@ export type AppUser = {
   id: string;
   name: string;
   email: string;
+  designation?: string;
+  contact?: string;
   password?: string;
   role: AppRole;
   active: boolean;
@@ -64,6 +66,8 @@ function normalizeUser(user: Partial<AppUser>, fallbackId: string): AppUser {
     id,
     name: String(user.name || user.email || id).trim(),
     email: String(user.email || "").trim().toLowerCase(),
+    designation: String(user.designation || "").trim(),
+    contact: String(user.contact || "").trim(),
     password: String(user.password ?? (id === defaultAdmin.id ? defaultAdmin.password : "")).trim(),
     role,
     active: user.active !== false,

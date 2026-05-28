@@ -147,18 +147,29 @@ def test_user_roles_are_persisted_and_not_trusted_from_header():
     created = client.post(
         "/api/v1/users",
         headers=admin_headers,
-        json={"name": "Estimator", "email": user_email, "role": "sales", "active": True},
+        json={
+            "name": "Estimator",
+            "designation": "Sales Engineer",
+            "contact": "+1 555-0188",
+            "email": user_email,
+            "role": "sales",
+            "active": True,
+        },
     )
     assert created.status_code == 201
     assert created.json()["role"] == "sales"
+    assert created.json()["designation"] == "Sales Engineer"
+    assert created.json()["contact"] == "+1 555-0188"
 
     promoted = client.patch(
         f"/api/v1/users/{user_email}",
         headers=admin_headers,
-        json={"role": "approver"},
+        json={"role": "approver", "designation": "Approver", "contact": "+1 555-0199"},
     )
     assert promoted.status_code == 200
     assert promoted.json()["role"] == "approver"
+    assert promoted.json()["designation"] == "Approver"
+    assert promoted.json()["contact"] == "+1 555-0199"
 
 
 def test_access_settings_are_admin_managed_and_persisted():

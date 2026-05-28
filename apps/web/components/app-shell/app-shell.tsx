@@ -33,7 +33,7 @@ const navSections: NavSection[] = [
   {
     title: "Overview",
     items: [
-      { href: "/dashboard", label: "Today’s work", description: "Open tasks, delayed work, and team load", icon: LayoutDashboard, capability: "view_dashboard" },
+      { href: "/dashboard", label: "Dashboard", description: "Overview, quick stats, and recent activity", icon: LayoutDashboard, capability: "view_dashboard" },
     ],
   },
   {
@@ -49,13 +49,13 @@ const navSections: NavSection[] = [
     title: "Support tools",
     items: [
       { href: "/doc-assistant", label: "Read documents", description: "Ask questions from customer files", icon: FileQuestion, capability: "view_doc_assistant" },
-      { href: "/history", label: "Activity history", description: "Exports, stage changes, and notes", icon: FileSearch, capability: "view_history" },
+      { href: "/history", label: "Reports / Analytics", description: "System usage, exports, stage changes, and notes", icon: FileSearch, capability: "view_history" },
     ],
   },
   {
     title: "Admin",
     items: [
-      { href: "/settings", label: "Users & settings", description: "Roles, preferences, and access", icon: Settings, capability: "view_settings" },
+      { href: "/settings", label: "User Management", description: "Manage users, roles, permissions, and system settings", icon: Settings, capability: "view_settings" },
     ],
   },
 ];

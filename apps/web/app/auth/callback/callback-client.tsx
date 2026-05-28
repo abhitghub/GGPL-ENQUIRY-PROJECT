@@ -22,7 +22,9 @@ export function AuthCallbackClient() {
         if (supabase && code) {
           const { error } = await supabase.auth.exchangeCodeForSession(code);
           if (error) {
-            throw error;
+            toast.error("This sign-in link has expired or was already used. Please sign in again.");
+            router.replace("/login");
+            return;
           }
         }
         setLocalSession();

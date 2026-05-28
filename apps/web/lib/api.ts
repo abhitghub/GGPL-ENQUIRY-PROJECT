@@ -481,7 +481,15 @@ export async function createAppUser(payload: Omit<AppUser, "id"> & { id?: string
     await apiFetch(`${API_BASE}/api/v1/users`, {
       method: "POST",
       headers: headers(),
-      body: JSON.stringify({ user_id: payload.id, name: payload.name, email: payload.email, role: payload.role, active: payload.active }),
+      body: JSON.stringify({
+        user_id: payload.id,
+        name: payload.name,
+        designation: payload.designation,
+        contact: payload.contact,
+        email: payload.email,
+        role: payload.role,
+        active: payload.active,
+      }),
     }),
   );
 }
