@@ -600,6 +600,43 @@ const SUMMARY_LIMIT = 40;
 const VIRTUAL_ROW_HEIGHT = 58;
 const VIRTUAL_VIEWPORT_HEIGHT = 620;
 const VIRTUAL_OVERSCAN = 6;
+const AUTO_UPDATE_DELAY_MS = 700;
+const AUTO_UPDATE_FIELDS = new Set([
+  "gasket_type",
+  "size",
+  "size_norm",
+  "od_mm",
+  "id_mm",
+  "rating",
+  "moc",
+  "face_type",
+  "thickness_mm",
+  "standard",
+  "series",
+  "special",
+  "ring_no",
+  "rtj_groove_type",
+  "rtj_hardness_bhn",
+  "sw_winding_material",
+  "sw_filler",
+  "sw_outer_ring",
+  "sw_inner_ring",
+  "isk_gasket_material",
+  "isk_core_material",
+  "isk_sleeve_material",
+  "isk_washer_material",
+  "isk_primary_seal",
+  "isk_secondary_seal",
+  "isk_insulating_washer",
+  "kamm_core_material",
+  "kamm_surface_material",
+  "kamm_covering_layer",
+  "kamm_rib",
+  "kamm_core_thk",
+  "dji_filler",
+  "dji_rib",
+  "dji_face_type",
+]);
 const GRID_INPUT_CLASS =
   "h-7 w-full min-w-0 rounded-none border-0 bg-transparent px-2 py-1 text-xs shadow-none focus-visible:ring-1 focus-visible:ring-ring";
 const GRID_TEXTAREA_CLASS =
@@ -1213,6 +1250,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [draftScrollTop, setDraftScrollTop] = React.useState(0);
   const [undoItems, setUndoItems] = React.useState<{ label: string; items: GasketItem[] } | null>(null);
   const [hasUnsavedLocalEdits, setHasUnsavedLocalEdits] = React.useState(false);
+  const [autoUpdateRows, setAutoUpdateRows] = React.useState<Set<number>>(new Set());
   const [activeCell, setActiveCell] = React.useState<GridCell | null>(null);
   const [editingCell, setEditingCell] = React.useState<GridCell | null>(null);
   const [selectionAnchor, setSelectionAnchor] = React.useState<GridCell | null>(null);
@@ -1376,12 +1414,6 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     : !excelFile
       ? "Choose an Excel file first"
       : "Create line items from the selected Excel file";
-  const updateRowsDisabled = saving || startingExtraction || !hasActionRows;
-  const updateRowsTitle = !hasActionRows
-    ? "No rows available to update"
-    : selectedIndices.length
-      ? "Update generated descriptions for selected rows"
-      : "Update generated descriptions for visible rows";
   const rereadRowsDisabled = saving || startingExtraction || !hasRowsWithCustomerText;
   const rereadRowsTitle = !hasActionRows
     ? "No rows available to re-read"
@@ -1667,6 +1699,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     setDraftPage(0);
     setFinalPage(0);
     setHasUnsavedLocalEdits(false);
+    setAutoUpdateRows(new Set());
   }, [isMaterialSection, isQuotationSection, quote]);
 
   React.useEffect(() => {
@@ -1778,6 +1811,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [canSaveProgress, saveProgressDisabled, quote, items, qd, materialBreakdown, materialPlan, isMaterialSection]);
+
+  React.useEffect(() => {
+    if (!quote || !canEditLineItems || !autoUpdateRows.size) return undefined;
+    const timer = window.setTimeout(() => {
+      const target = Array.from(autoUpdateRows).filter((index) => Boolean(items[index]));
+      setAutoUpdateRows(new Set());
+      if (target.length) {
+        void recomputeRows(target, { success: undefined });
+      }
+    }, AUTO_UPDATE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [autoUpdateRows, canEditLineItems, items, quote]);
 
   async function startQuote() {
     if (!canCreateEnquiry) {
@@ -2162,16 +2207,17 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     setIntakeCollapsed(true);
   }
 
-  async function recomputeRows(indices: number[] = selectedIndices) {
+  async function recomputeRows(indices: number[] = selectedIndices, options?: { sourceItems?: GasketItem[]; success?: string }) {
     if (!canEditLineItems) {
       toast.error("Sales users cannot update line items.");
       return;
     }
     if (!quote) return;
     const target = indices.length ? indices : items.map((_, idx) => idx);
-    const rows = target.map((idx) => items[idx]).filter(Boolean);
+    const sourceItems = options?.sourceItems ?? items;
+    const rows = target.map((idx) => sourceItems[idx]).filter(Boolean);
     const recomputed = await bulkRecompute(quote.id, rows);
-    const next = [...items];
+    const next = [...sourceItems];
     target.forEach((idx, offset) => {
       if (next[idx] && recomputed[offset]) {
         const current = next[idx];
@@ -2188,7 +2234,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         };
       }
     });
-    await updateItems(next, "Rules and descriptions refreshed");
+    const success = options && "success" in options ? options.success : "Rules and descriptions refreshed";
+    await updateItems(next, success);
   }
 
   async function reprocessRows(indices?: number[]) {
@@ -2511,6 +2558,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     next[index] = setItemValue(next[index] ?? blankItem(index + 1), field, value);
     setQuote((current) => (current ? { ...current, items: next } : current));
     setHasUnsavedLocalEdits(true);
+    if (AUTO_UPDATE_FIELDS.has(field)) {
+      setAutoUpdateRows((current) => {
+        const updated = new Set(current);
+        updated.add(index);
+        return updated;
+      });
+    }
   }
 
   function setBulkValue(field: string, value: string) {
@@ -2620,7 +2674,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       if (bulkValues.standard.trim()) row = setItemValue(row, "standard", bulkValues.standard.trim());
       next[index] = row;
     });
-    await updateItems(next, `Applied bulk edit to ${target.length} row(s)`);
+    await recomputeRows(target, { sourceItems: next, success: `Applied bulk edit to ${target.length} row(s)` });
   }
 
   async function persistInlineEdits() {
@@ -4367,10 +4421,6 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               {canEditLineItems && (
               <div className={`flex flex-wrap items-center gap-2 ${tableMode === "spreadsheet" ? "rounded-md border bg-muted/20 p-2" : ""}`}>
                 <div className="flex flex-wrap gap-2 rounded-md border bg-background p-1">
-                <Button variant="ghost" size="sm" onClick={() => recomputeRows(selectedOrVisibleIndices)} disabled={updateRowsDisabled} title={updateRowsTitle}>
-                  <RefreshCw className="h-4 w-4" />
-                  Update
-                </Button>
                 <Button variant="ghost" size="sm" onClick={() => reprocessRows()} disabled={rereadRowsDisabled} title={rereadRowsTitle}>
                   {startingExtraction ? <Loader2 className="h-4 w-4 animate-spin" /> : <WandSparkles className="h-4 w-4" />}
                   Re-read rows
@@ -4652,18 +4702,6 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                           {tableMode !== "spreadsheet" && (
                             <TableCell className="sticky left-10 z-20 border-r bg-card p-0 align-middle">
                               <div className="flex h-full items-center justify-center gap-1 px-1">
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-7 w-7"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    recomputeRows([index]);
-                                  }}
-                                  title="Update row"
-                                >
-                                  <RefreshCw className="h-3.5 w-3.5" />
-                                </Button>
                                 <Button
                                   variant="ghost"
                                   size="icon"
