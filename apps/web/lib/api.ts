@@ -30,6 +30,7 @@ export type GasketItem = Record<string, unknown> & {
   sw_outer_ring?: string | null;
   rtj_groove_type?: string | null;
   rtj_hardness_bhn?: number | null;
+  isk_fire_safety?: string | null;
   ggpl_description?: string;
   status?: string | null;
   status_source?: string | null;
@@ -266,6 +267,7 @@ export const BULK_EDIT_FIELDS = [
   "sw_filler",
   "sw_outer_ring",
   "sw_inner_ring",
+  "isk_fire_safety",
   "standard",
 ] as const;
 
@@ -372,7 +374,7 @@ export async function rfiDraft(id: string): Promise<{ text: string; groups: Reco
 
 export async function createExtraction(params: {
   quoteId: string;
-  sourceType: "email" | "excel";
+  sourceType: "email" | "excel" | "csv";
   text?: string;
   file?: File | null;
   customer: string;

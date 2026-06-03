@@ -400,7 +400,7 @@ def _fmt_isk(item: dict) -> str:
     isk_style = (item.get('isk_style') or '').strip().upper()
     face_type = item.get('face_type') or ''
     standard = item.get('standard') or ''
-    fire_safety = (item.get('isk_fire_safety') or '').strip().upper()
+    fire_safety = '' if item.get('isk_fire_safety_defaulted') else (item.get('isk_fire_safety') or '').strip().upper()
     # Normalize to always use hyphen: "NON FIRE SAFE" → "NON-FIRE SAFE"
     fire_safety = fire_safety.replace('NON FIRE SAFE', 'NON-FIRE SAFE')
     # Only include standard in output when explicitly stated by customer (not rules-defaulted),

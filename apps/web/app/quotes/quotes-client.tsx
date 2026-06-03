@@ -118,6 +118,7 @@ const TYPE_OPTIONS = ["SOFT_CUT", "SHEET_GASKET", "CORRUGATED", "PLUG_GASKET", "
 const FACE_OPTIONS = ["RF", "FF", ""];
 const UOM_OPTIONS = ["NOS", "M"];
 const GROOVE_OPTIONS = ["OCT", "OVAL", ""];
+const ISK_FIRE_SAFETY_OPTIONS = ["NON FIRE SAFE", "FIRE SAFE"];
 
 const defaultFx: Record<string, number> = {
   INR: 1,
@@ -468,6 +469,7 @@ const TABLE_COLUMNS: TableColumn[] = [
   { label: "ISK Primary Seal", field: "isk_primary_seal", width: "w-44" },
   { label: "ISK Secondary Seal", field: "isk_secondary_seal", width: "w-44" },
   { label: "ISK Ins Washer", field: "isk_insulating_washer", width: "w-44" },
+  { label: "ISK Fire Safe", field: "isk_fire_safety", kind: "select", options: ISK_FIRE_SAFETY_OPTIONS, width: "w-36" },
   { label: "KAMM Core", field: "kamm_core_material", width: "w-36" },
   { label: "KAMM Surface", field: "kamm_surface_material", width: "w-40" },
   { label: "KAMM Covering", field: "kamm_covering_layer", width: "w-40" },
@@ -530,6 +532,7 @@ const STREAMLIT_TABLE_FIELDS = [
   "isk_primary_seal",
   "isk_secondary_seal",
   "isk_insulating_washer",
+  "isk_fire_safety",
   "kamm_core_material",
   "kamm_surface_material",
   "kamm_covering_layer",
@@ -554,7 +557,7 @@ const COLUMN_PRESET_FIELDS: Record<string, string[]> = {
   rtj: ["line_no", "status", "ggpl_description", "quantity", "ring_no", "rtj_groove_type", "moc", "rtj_hardness_bhn", "standard", "confidence"],
   kammprofile: ["line_no", "status", "ggpl_description", "quantity", "size", "rating", "kamm_core_material", "kamm_surface_material", "kamm_covering_layer", "kamm_rib", "kamm_core_thk", "confidence"],
   dji: ["line_no", "status", "ggpl_description", "quantity", "od_mm", "id_mm", "dji_filler", "dji_rib", "dji_face_type", "thickness_mm", "confidence"],
-  isk: ["line_no", "status", "ggpl_description", "quantity", "isk_gasket_material", "isk_core_material", "isk_sleeve_material", "isk_washer_material", "isk_primary_seal", "isk_secondary_seal", "confidence"],
+  isk: ["line_no", "status", "ggpl_description", "quantity", "isk_fire_safety", "isk_gasket_material", "isk_core_material", "isk_sleeve_material", "isk_washer_material", "isk_primary_seal", "isk_secondary_seal", "confidence"],
   full_technical: TABLE_COLUMNS.map((column) => column.field),
 };
 
@@ -627,6 +630,7 @@ const AUTO_UPDATE_FIELDS = new Set([
   "isk_primary_seal",
   "isk_secondary_seal",
   "isk_insulating_washer",
+  "isk_fire_safety",
   "kamm_core_material",
   "kamm_surface_material",
   "kamm_covering_layer",
@@ -1456,8 +1460,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const excelCreateTitle = !hasRequiredMarketType
     ? "Select Export or Domestic first"
     : !excelFile
-      ? "Choose an Excel file first"
-      : "Create line items from the selected Excel file";
+      ? "Choose an Excel or CSV file first"
+      : "Create line items from the selected Excel or CSV file";
   const rereadRowsDisabled = saving || startingExtraction || !hasRowsWithCustomerText;
   const rereadRowsTitle = !hasActionRows
     ? "No rows available to re-read"
@@ -1979,7 +1983,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       setSelectedRows(new Set());
       setRfiText("");
       setIntakeCollapsed(false);
-      router.replace(`/quotes?quote=${created.id}`);
+      router.push(`/quotes?quote=${created.id}`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not create quote");
     } finally {
@@ -2007,7 +2011,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     setSaving(false);
     setExporting(null);
     setIntakeCollapsed(false);
-    router.replace(sectionBasePath);
+    router.push(sectionBasePath);
   }
 
   async function openQuotationScreen() {
@@ -2026,7 +2030,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       setQuote(linked);
       rememberRecentQuote(linked);
       await refreshQuotes(linked.id);
-      router.replace(`/quotes/final?quote=${linked.id}`);
+      router.push(`/quotes/final?quote=${linked.id}`);
       return;
     }
     const marketType = getString(quote.stage_meta?.market_type);
@@ -2094,17 +2098,17 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     setQuote(quotation);
     rememberRecentQuote(quotation);
     await refreshQuotes(quotation.id);
-    router.replace(`/quotes/final?quote=${quotation.id}`);
+    router.push(`/quotes/final?quote=${quotation.id}`);
   }
 
   function closeQuotationScreen() {
     if (!canDiscardUnsavedEdits("Leave this quotation")) return;
     if (!quote) {
-      router.replace("/quotes");
+      router.push("/quotes");
       return;
     }
     const sourceEnquiryId = getString(quote.stage_meta?.source_enquiry_id);
-    router.replace(`/quotes?quote=${sourceEnquiryId || quote.id}`);
+    router.push(`/quotes?quote=${sourceEnquiryId || quote.id}`);
   }
 
   async function syncLinkedQuotationFromEnquiry(enquiry: Quote, nextItems: GasketItem[]) {
@@ -2259,7 +2263,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     if (updated) await syncLinkedQuotationFromEnquiry(updated, nextItems);
   }
 
-  async function runExtraction(sourceType: "email" | "excel", file?: File | null) {
+  async function runExtraction(sourceType: "email" | "excel" | "csv", file?: File | null) {
     if (!canEditQuote) {
       toast.error("Sales users cannot run enquiry extraction.");
       return;
@@ -2298,7 +2302,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         id: accepted.job_id,
         quoteId: quote.id,
         sourceType,
-        label: `Reading ${sourceType === "excel" ? "Excel" : "email"} enquiry`,
+        label: `Reading ${sourceType === "excel" ? "Excel" : sourceType === "csv" ? "CSV" : "email"} enquiry`,
         startedAt: new Date().toISOString(),
       });
       invalidateMaterialPlan();
@@ -2879,7 +2883,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       setRfiText("");
       setIntakeCollapsed(Boolean(revision.items.length));
       await refreshQuotes(revision.id);
-      router.replace(`/quotes?quote=${revision.id}`);
+      router.push(`/quotes?quote=${revision.id}`);
       toast.success(`Revision ${revNo} enquiry created`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not create revision");
@@ -3029,7 +3033,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       rememberRecentQuote(active);
       setSelectedRows(new Set());
       setRfiText("");
-      router.replace(`${sectionBasePath}?quote=${row.id}`);
+      router.push(`${sectionBasePath}?quote=${row.id}`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not open quote");
     }
@@ -4604,16 +4608,16 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                           <FileUp className="h-5 w-5 text-muted-foreground" />
                         </div>
                         <div>
-                          <div className="text-sm font-medium">{excelFile?.name || "Choose an Excel file"}</div>
-                          <div className="text-xs text-muted-foreground">.xlsx and .xls enquiries</div>
+                          <div className="text-sm font-medium">{excelFile?.name || "Choose an Excel or CSV file"}</div>
+                          <div className="text-xs text-muted-foreground">.xlsx, .xls, and .csv enquiries</div>
                         </div>
                       </div>
-                      <Input className="max-w-sm" type="file" accept=".xlsx,.xls" onChange={(event) => setExcelFile(event.target.files?.[0] ?? null)} />
+                      <Input className="max-w-sm" type="file" accept=".xlsx,.xls,.csv" onChange={(event) => setExcelFile(event.target.files?.[0] ?? null)} />
                     </div>
                   </div>
-                  <Button className="mt-3" onClick={() => runExtraction("excel", excelFile)} disabled={excelCreateDisabled} title={excelCreateTitle}>
+                  <Button className="mt-3" onClick={() => runExtraction(excelFile?.name.toLowerCase().endsWith(".csv") ? "csv" : "excel", excelFile)} disabled={excelCreateDisabled} title={excelCreateTitle}>
                     <Upload className="h-4 w-4" />
-                    Create items from Excel
+                    Create items from file
                   </Button>
                 </TabsContent>
                 <TabsContent value="manual" className="mt-3">

@@ -148,7 +148,8 @@ _SW_RING_ALIASES = {
     'INCONEL 625': 'INCONEL 625', 'INCONEL625': 'INCONEL 625',
     'INC 625': 'INCONEL 625', 'INC625': 'INCONEL 625', 'ALLOY 625': 'INCONEL 625',
     'INCOLY 625': 'INCONEL 625', 'INCONEL': 'INCONEL 625',
-    'UNS N06625': 'INCONEL 625', 'N06625': 'INCONEL 625',
+    'UNS N06625': 'UNS N06625', 'N06625': 'UNS N06625',
+    'UNS N08825': 'UNS N08825', 'N08825': 'UNS N08825',
     # --- Other nickel/high alloys ---
     'HASTELLOY C276': 'HASTELLOY C276', 'HAST ALLOY C276': 'HASTELLOY C276',
     'HASTELLOY C-276': 'HASTELLOY C276', 'C276': 'HASTELLOY C276',
@@ -402,7 +403,7 @@ def _set_b1647_standard(item: dict, flags: list, applied_defaults: list) -> None
 
 def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
     """Apply spiral wound-specific defaults and validation (mutates item in place)."""
-    winding_mat = item.get('sw_winding_material')
+    winding_mat = _norm_ring(item.get('sw_winding_material'))
     filler = _norm_filler(item.get('sw_filler'))
     outer_ring = _norm_ring(item.get('sw_outer_ring'))
     inner_ring = _norm_ring(item.get('sw_inner_ring'))
@@ -428,6 +429,23 @@ def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
 
     size_val = _size_nps_value(item.get('size_norm'))
 
+    ss_grades = {
+        value for value in (winding_mat, inner_ring, outer_ring)
+        if isinstance(value, str) and re.fullmatch(r'SS\d{3}[A-Z]?', value)
+    }
+    if len(ss_grades) == 1:
+        ss_grade = next(iter(ss_grades))
+        if winding_mat == 'SS':
+            winding_mat = ss_grade
+            applied_defaults.append(f'generic SS winding resolved to {ss_grade} from same SPW row')
+        if inner_ring == 'SS':
+            inner_ring = ss_grade
+            applied_defaults.append(f'generic SS inner ring resolved to {ss_grade} from same SPW row')
+        if outer_ring == 'SS':
+            outer_ring = ss_grade
+            applied_defaults.append(f'generic SS outer ring resolved to {ss_grade} from same SPW row')
+
+    item['sw_winding_material'] = winding_mat or None
     item['sw_outer_ring'] = outer_ring or None
     item['sw_inner_ring'] = inner_ring or None
     item['sw_filler'] = filler
@@ -608,7 +626,7 @@ _RTJ_MOC_ALIASES = {
     'MONEL': 'MONEL 400', 'MONEL 400': 'MONEL 400', 'MONEL400': 'MONEL 400', 'ALLOY 400': 'MONEL 400',
     'MONEL 800': 'MONEL 800', 'MONEL800': 'MONEL 800',
     'INCONEL 600': 'INCONEL 600', 'INCONEL600': 'INCONEL 600', 'INC 600': 'INCONEL 600', 'ALLOY 600': 'INCONEL 600',
-    'UNS N06600': 'INCONEL 600', 'N06600': 'INCONEL 600',
+    'UNS N06600': 'UNS N06600', 'N06600': 'UNS N06600',
     'INCONEL 718': 'INCONEL 718', 'INCONEL718': 'INCONEL 718',
     'INCONEL': 'INCONEL 625', 'INCONEL 625': 'INCONEL 625', 'INCONEL625': 'INCONEL 625',
     'INC 625': 'INCONEL 625', 'INC625': 'INCONEL 625',
@@ -627,7 +645,8 @@ _RTJ_MOC_ALIASES = {
     '6MO': '6MO', '6 MO': '6MO',
     '254 SMO': 'UNS S31254', '254SMO': 'UNS S31254', 'AVESTA 254 SMO': 'UNS S31254',
     # UNS numbers
-    'UNS N06625': 'INCONEL 625', 'N06625': 'INCONEL 625',
+    'UNS N06625': 'UNS N06625', 'N06625': 'UNS N06625',
+    'UNS N08825': 'UNS N08825', 'N08825': 'UNS N08825',
     'UNS S31254': 'UNS S31254', 'S31254': 'UNS S31254',
     'UNS S31803': 'UNS S31803', 'S31803': 'UNS S31803',
     'UNS S32205': 'UNS S32205', 'S32205': 'UNS S32205',
@@ -646,7 +665,7 @@ _RTJ_MOC_ALIASES = {
 
 _RTJ_MOC_PATTERN = (
     r'SOFT\s+IRON|G10100|UNS\s+G10100|S30400|UNS\s+S30400|S31600|UNS\s+S31600|'
-    r'INCOLOY\s*825|INCOLY\s*825|ALLOY\s*825|INCONEL\s*625|UNS\s*S\s*3\d{4}|'
+    r'UNS\s*N\s*0\d{4}|INCOLOY\s*825|INCOLY\s*825|ALLOY\s*825|INCONEL\s*625|UNS\s*S\s*3\d{4}|'
     r'SS[-\s]*316L?|316L?SS|SS[-\s]*304L?|304L?SS|F\d{1,2}|'
     r'LOW\s+CARBON\s+STEEL|LCS|LTCS|MONEL\s*400|HASTELLOY\s*C[-\s]*276'
 )
@@ -922,7 +941,9 @@ def _recover_kamm_fields_from_description(item: dict) -> None:
 def _apply_kamm_rules(item: dict, flags: list, applied_defaults: list) -> None:
     _recover_kamm_fields_from_description(item)
 
-    winding_mat = item.get('sw_winding_material')
+    winding_mat = item.get('sw_winding_material') or item.get('kamm_core_material')
+    if winding_mat and not item.get('sw_winding_material'):
+        item['sw_winding_material'] = winding_mat
     filler = _norm_filler(item.get('sw_filler')) or 'GRAPHITE'
     outer_ring = _norm_ring(item.get('sw_outer_ring'))
     inner_ring = _norm_ring(item.get('sw_inner_ring'))
@@ -1228,10 +1249,23 @@ def _apply_isk_rules(item: dict, flags: list, applied_defaults: list) -> None:
     if item.get('special'):
         item['special'] = _normalize_isk_special(item['special'])
 
-    # Default seal/gasket material to PTFE SPRING ENERGIZED SEAL if nothing extracted
+    has_component_evidence = any(item.get(key) for key in (
+        'isk_core_material',
+        'isk_sleeve_material',
+        'isk_washer_material',
+        'isk_primary_seal',
+        'isk_insulating_washer',
+    ))
+
+    # Default seal/gasket material only when the row already contains kit
+    # component evidence. Vague ISK rows need clarification, not a polished
+    # assumed kit description.
     if not item.get('isk_gasket_material') and not item.get('special'):
-        item['isk_gasket_material'] = 'PTFE SPRING ENERGIZED SEAL'
-        applied_defaults.append('ISK gasket material defaulted to PTFE SPRING ENERGIZED SEAL')
+        if has_component_evidence:
+            item['isk_gasket_material'] = 'PTFE SPRING ENERGIZED SEAL'
+            applied_defaults.append('ISK gasket material defaulted to PTFE SPRING ENERGIZED SEAL')
+        else:
+            flags.append('Missing critical field: ISK component specification')
 
     # Recover core material the LLM may have dropped (e.g. "316 SS CORE" → appended to special)
     _recover_isk_core(item)
@@ -1242,7 +1276,12 @@ def _apply_isk_rules(item: dict, flags: list, applied_defaults: list) -> None:
     inferred_fs = _infer_isk_fire_safety(item)
     if inferred_fs:
         item['isk_fire_safety'] = inferred_fs
-    # else: keep LLM value (if any) or leave None
+        item.pop('isk_fire_safety_defaulted', None)
+    elif item.get('isk_fire_safety'):
+        item.pop('isk_fire_safety_defaulted', None)
+    elif not item.get('isk_fire_safety'):
+        item['isk_fire_safety'] = 'NON FIRE SAFE'
+        item['isk_fire_safety_defaulted'] = True
 
     # Track whether the customer explicitly stated a standard (used by formatter)
     customer_standard = item.get('standard')

@@ -5,6 +5,7 @@ calls (one per chunk of rows) and returns structured gasket line items.
 from __future__ import annotations
 
 import io
+import csv
 import json
 import hashlib
 import logging
@@ -93,6 +94,7 @@ NORMALISATION:
     * Chrome-moly grades — keep both the F-grade AND the composition when both appear, prefer the F-grade alone otherwise: "F5" / "5% Cr - 1/2 Mo" → F5; "F11" / "1-1/4 Cr - 1/2 Mo" → F11; "F22" / "2-1/4 Cr - 1 Mo" → F22; "F91" / "9% Cr 1 Mo V" → F91
     * Duplex / 2205 / S31803 → UNS S31803; Super Duplex / 2507 / S32750 → UNS S32750
     * INCONEL X / INCOLOY X / HASTELLOY X / MONEL X — keep as stated; normalise to UPPERCASE with grade
+    * Any explicit UNS material (e.g. UNS N06625, UNS N08825, UNS S31600) must stay as the UNS code. Do NOT translate customer-specified UNS into INCONEL, INCOLOY, SS, duplex, or trade names.
 - Ignore plant area tags, line numbers, equipment tags, MR / RFQ / PO references, drawing numbers — they are not materials, sizes, or ring numbers
 - uom "M" (metres) = sheet / roll supply, not individual gaskets
 
@@ -100,6 +102,7 @@ REPETITION DISCIPLINE:
 - The document may contain many rows with nearly-identical descriptions differing only in size or rating. Extract every one as a separate item with its own size and rating.
 - Do NOT carry forward fields from a previous row by assumption — read every row's text on its own.
 - Material/filler fields stay fully populated for every spiral wound / kammprofile / DJI / ISK row, even when the source repeats the same construction for dozens of rows.
+- For SPIRAL_WOUND rows, if the customer writes generic SS in one component and a specific SS grade (SS316/SS316L/SS304/etc.) in another component of the same row, use that same specific grade for the generic SS component. Do not infer a grade across different rows.
 """
 
 
@@ -126,7 +129,8 @@ def _excel_to_text(excel_bytes: bytes, max_rows: int | None = None) -> tuple[str
 
     Improvements over openpyxl approach:
     - Drops columns that are >80% empty (PO numbers, plant tags, etc.)
-    - Detects header row automatically (first row with ≥3 non-empty cells)
+    - Detects header row automatically, preferring item-list headers when present
+    - For review-pack workbooks, skips dashboards/deviation logs/quote-output sheets
     - Strips whitespace, collapses runs of spaces, removes literal 'nan'
     - Outputs markdown tables — more readable for the LLM than tab-separated
     """
@@ -136,6 +140,7 @@ def _excel_to_text(excel_bytes: bytes, max_rows: int | None = None) -> tuple[str
     parts: list[str] = []
     total_rows = 0
     was_truncated = False
+    prepared_sheets: list[dict] = []
 
     all_sheets: dict = pd.read_excel(
         io.BytesIO(excel_bytes),
@@ -145,17 +150,78 @@ def _excel_to_text(excel_bytes: bytes, max_rows: int | None = None) -> tuple[str
         na_filter=False,
     )
 
+    def _clean(val: str) -> str:
+        val = str(val).strip()
+        val = re.sub(r'\s+', ' ', val)
+        if val.lower() in ('nan', 'none', '#n/a', 'n/a', '#na', '-'):
+            return ''
+        return val
+
+    def _norm(val: object) -> str:
+        return re.sub(r'[^a-z0-9]+', ' ', str(val).strip().lower()).strip()
+
+    def _row_score(row) -> int:
+        cells = [_norm(c) for c in row if str(c).strip()]
+        joined = ' | '.join(cells)
+        score = 0
+        if not cells:
+            return score
+
+        if any(term in joined for term in (
+            'issue type', 'action required', 'customer said', 'severity', 'priority',
+            'metric value', 'parameter required value',
+        )):
+            score -= 12
+
+        if 'customer enquiry description' in joined:
+            score += 8
+        if 'ggpl quote description' in joined or 'quote description' in joined:
+            score += 6
+        if 'enquiry description' in joined:
+            score += 5
+        if 'description' in joined:
+            score += 3
+        if 'detected product type' in joined or 'product type' in joined:
+            score += 3
+        if 'drawing reference' in joined or 'drawing ref' in joined:
+            score += 3
+        if any(term in joined for term in ('qty', 'quantity')):
+            score += 3
+        if any(term in joined for term in ('uom', 'unit')):
+            score += 2
+        if any(term in joined for term in ('s no', 'sl no', 'sr no')):
+            score += 1
+        if any(term in joined for term in ('size', 'nps', 'pressure class', 'rating', 'class')):
+            score += 1
+        if any(term in joined for term in ('material', 'facing', 'seal', 'sleeve', 'washer')):
+            score += 1
+        return score
+
+    def _sheet_score(sheet_name: str, df) -> tuple[int, int]:
+        name = _norm(sheet_name)
+        best_idx = df.index[0]
+        best_score = -999
+
+        for i, row in df.head(25).iterrows():
+            score = _row_score(row)
+            if score > best_score:
+                best_idx = i
+                best_score = score
+
+        if any(term in name for term in ('enquiry check', 'enquiry items', 'line items', 'item list')):
+            best_score += 8
+        elif 'quote' in name and 'deviation' not in name:
+            best_score += 2
+        elif any(term in name for term in ('summary', 'dashboard', 'deviation', 'issues', 'log')):
+            best_score -= 12
+        elif 'technical data' in name:
+            best_score -= 3
+
+        return int(best_idx), best_score
+
     for sheet_name, raw_df in all_sheets.items():
         if raw_df.empty:
             continue
-
-        # Clean every cell: strip whitespace, collapse spaces, drop 'nan'/'none'/'#N/A'
-        def _clean(val: str) -> str:
-            val = str(val).strip()
-            val = re.sub(r'\s+', ' ', val)
-            if val.lower() in ('nan', 'none', '#n/a', 'n/a', '#na', '-'):
-                return ''
-            return val
 
         df = raw_df.map(_clean)  # type: ignore[arg-type]
 
@@ -164,12 +230,27 @@ def _excel_to_text(excel_bytes: bytes, max_rows: int | None = None) -> tuple[str
         if df.empty:
             continue
 
-        # Detect header row: first row with ≥3 non-empty cells
-        header_idx = df.index[0]
-        for i, row in df.iterrows():
-            if sum(1 for c in row if c) >= 3:
-                header_idx = i
-                break
+        header_idx, score = _sheet_score(str(sheet_name), df)
+        prepared_sheets.append({
+            'name': str(sheet_name),
+            'df': df,
+            'header_idx': header_idx,
+            'score': score,
+        })
+
+    preferred = [
+        sheet for sheet in prepared_sheets
+        if sheet['score'] >= 12
+        and any(term in _norm(sheet['name']) for term in ('enquiry check', 'enquiry items', 'line items', 'item list'))
+    ]
+    selected_sheets = preferred or [sheet for sheet in prepared_sheets if sheet['score'] >= 10]
+    if not selected_sheets:
+        selected_sheets = prepared_sheets
+
+    for sheet in selected_sheets:
+        sheet_name = sheet['name']
+        df = sheet['df']
+        header_idx = sheet['header_idx']
 
         df.columns = df.loc[header_idx].tolist()
         df = df[df.index > header_idx].copy()
@@ -228,6 +309,108 @@ def _excel_to_text(excel_bytes: bytes, max_rows: int | None = None) -> tuple[str
     return '\n'.join(parts), was_truncated, total_rows
 
 
+def _csv_to_text(csv_source, max_rows: int | None = None) -> tuple[str, bool, int]:
+    """Convert CSV/table-like enquiry data to a markdown table for Smart Parse."""
+
+    def _decode(source) -> str:
+        if isinstance(source, bytes):
+            for encoding in ('utf-8-sig', 'utf-8', 'cp1252'):
+                try:
+                    return source.decode(encoding)
+                except UnicodeDecodeError:
+                    continue
+            return source.decode('utf-8', errors='replace')
+        return str(source or '')
+
+    def _clean(val: object) -> str:
+        val = str(val or '').strip()
+        val = re.sub(r'\s+', ' ', val)
+        if val.lower() in ('nan', 'none', '#n/a', 'n/a', '#na', '-'):
+            return ''
+        return val
+
+    def _norm(val: object) -> str:
+        return re.sub(r'[^a-z0-9]+', ' ', str(val).strip().lower()).strip()
+
+    def _is_headerish(val: object) -> bool:
+        norm = _norm(val)
+        return bool(re.search(
+            r'\b(customer|enq|description|discription|desc|ggpl|quote|deviation|type|product|'
+            r'non standard|s no|sr no|sl no|qty|quantity|uom|unit|size|rating|material|moc)\b',
+            norm,
+        ))
+
+    def _looks_like_item_text(val: object) -> bool:
+        text = str(val or '').upper()
+        return bool(re.search(
+            r'\b(GASKET|SPIRAL|WOUND|RTJ|RING|INSULAT|ISOLAT|KAMM|CAMPROFILE|JACKET|'
+            r'CNAF|PTFE|EPDM|GRAPHITE|NPS|CLASS|CL\.?|LB|PN|OD|ID|PIPE|FLANGE)\b',
+            text,
+        ))
+
+    text = _decode(csv_source)
+    parsed_rows = [
+        (line_no, [_clean(cell) for cell in row])
+        for line_no, row in enumerate(csv.reader(io.StringIO(text)), 1)
+    ]
+    indexed_rows = [(line_no, row) for line_no, row in parsed_rows if any(row)]
+    if not indexed_rows:
+        return '', False, 0
+
+    width = max(len(row) for _, row in indexed_rows)
+    indexed_rows = [(line_no, row + [''] * (width - len(row))) for line_no, row in indexed_rows]
+    first_line_no, first = indexed_rows[0]
+    headerish_count = sum(1 for cell in first if _is_headerish(cell))
+    was_truncated = False
+
+    if headerish_count >= 2:
+        headers = list(first)
+        data_rows = indexed_rows[1:]
+        # Some historical CSV exports put the first customer description in the
+        # first header cell, then the real headers in the remaining cells.
+        if headers and not _is_headerish(headers[0]) and _looks_like_item_text(headers[0]):
+            first_value = headers[0]
+            headers[0] = 'Customer Enquiry Description'
+            data_rows = [(first_line_no, [first_value] + [''] * (width - 1))] + data_rows
+    else:
+        headers = [f'Column {i + 1}' for i in range(width)]
+        data_rows = indexed_rows
+
+    normalized_headers: list[str] = []
+    seen: dict[str, int] = {}
+    for index, header in enumerate(headers):
+        name = _clean(header) or f'Column {index + 1}'
+        lower = name.strip().lower()
+        if lower in ('discription', 'description', 'desc'):
+            name = 'Customer Enquiry Description'
+        elif lower in ('ggpl descriptpion', 'ggpl description', 'ggpl quote description'):
+            name = 'GGPL Quote Description'
+        elif lower in ('type of product', 'type product'):
+            name = 'Product Type'
+        key = name.lower()
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] > 1:
+            name = f'{name} {seen[key]}'
+        normalized_headers.append(name)
+
+    clean_rows = [(line_no, row) for line_no, row in data_rows if any(_clean(cell) for cell in row)]
+    if max_rows is not None and len(clean_rows) > max_rows:
+        clean_rows = clean_rows[:max_rows]
+        was_truncated = True
+
+    rendered_headers = ['source_sheet', 'source_row', 'source_index', *normalized_headers]
+    md_rows = [
+        '=== Sheet: CSV ===',
+        '| ' + ' | '.join(rendered_headers) + ' |',
+        '| ' + ' | '.join(['---'] * len(rendered_headers)) + ' |',
+    ]
+    for source_index, (source_row, row) in enumerate(clean_rows, 1):
+        cells = ['CSV', str(source_row), str(source_index), *[str(v).replace('|', '/') for v in row]]
+        md_rows.append('| ' + ' | '.join(cells) + ' |')
+
+    return '\n'.join(md_rows), was_truncated, len(clean_rows)
+
+
 def _sanitize_text(text: str) -> str:
     import unicodedata
     import re
@@ -247,6 +430,11 @@ def _prepare_document_text(source, source_type: str) -> tuple[str, dict]:
             metadata['was_truncated'] = True
     elif source_type == 'excel':
         text, was_truncated, row_count = _excel_to_text(source, max_rows=None)
+        text = _sanitize_text(text)
+        metadata['was_truncated'] = was_truncated
+        metadata['row_count'] = row_count
+    elif source_type == 'csv':
+        text, was_truncated, row_count = _csv_to_text(source, max_rows=None)
         text = _sanitize_text(text)
         metadata['was_truncated'] = was_truncated
         metadata['row_count'] = row_count

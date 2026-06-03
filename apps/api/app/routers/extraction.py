@@ -12,7 +12,7 @@ from app.schemas.jobs import ExtractionAccepted, ExtractionCreate, JobRead, JobS
 from app.services.extraction_runner import run_extraction_job
 
 router = APIRouter(prefix="/api/v1", tags=["extractions"])
-ALLOWED_SOURCE_TYPES = {"email", "excel"}
+ALLOWED_SOURCE_TYPES = {"email", "excel", "csv"}
 
 
 def _job_or_404(user: CurrentUser, job_id: str) -> JobRead:
@@ -37,7 +37,9 @@ async def _parse_extraction_request(request: Request) -> tuple[ExtractionCreate,
         uploaded = form.get("file")
         text = form.get("text")
         source = await uploaded.read() if hasattr(uploaded, "read") else text
-        source_type = str(form.get("source_type") or ("excel" if getattr(uploaded, "filename", "").lower().endswith((".xls", ".xlsx")) else "email"))
+        filename = getattr(uploaded, "filename", "").lower()
+        inferred_type = "excel" if filename.endswith((".xls", ".xlsx")) else "csv" if filename.endswith(".csv") else "email"
+        source_type = str(form.get("source_type") or inferred_type)
         return ExtractionCreate(
             source_type=source_type,
             text=source.decode("utf-8", errors="replace") if isinstance(source, bytes) and source_type == "email" else str(text or ""),
@@ -60,7 +62,7 @@ async def create_extraction(
     require_capability(user, "edit_line_items")
     payload, source = await _parse_extraction_request(request)
     if payload.source_type not in ALLOWED_SOURCE_TYPES:
-        raise HTTPException(status_code=400, detail="Only email text and Excel upload extraction are supported.")
+        raise HTTPException(status_code=400, detail="Only email text, Excel, and CSV upload extraction are supported.")
     if payload.quote_id and not repo.get_quote(user.org_id, payload.quote_id, **_repo_visibility_kwargs(user)):
         raise HTTPException(status_code=404, detail="Quote not found")
     if not source:

@@ -334,4 +334,4 @@ def test_extraction_rejects_pdf_input():
         },
     )
     assert response.status_code == 400
-    assert "email text and Excel" in response.json()["detail"]
+    assert "email text, Excel, and CSV" in response.json()["detail"]
