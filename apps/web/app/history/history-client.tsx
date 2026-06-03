@@ -9,6 +9,7 @@ import { readActivityLog } from "@/components/quotes/activity-utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PageIntro } from "@/components/app-shell/page-intro";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -150,24 +151,17 @@ export function HistoryClient() {
   });
 
   return (
-    <div className="space-y-4">
-      <div className="rounded-lg border bg-card p-4 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-md border bg-background">
-              <Clock3 className="h-5 w-5 text-muted-foreground" />
-            </div>
-            <div>
-              <h1 className="text-xl font-semibold tracking-normal">Activity history</h1>
-              <div className="text-xs text-muted-foreground">{visible.length} visible event(s) from {events.length} total</div>
-            </div>
-          </div>
-          <Button variant="secondary" size="sm" onClick={refresh}>
+    <div className="space-y-3">
+      <PageIntro
+        title="Search activity"
+        description="Search workflow changes, exports, and vendor activity."
+        meta={`${visible.length} visible event(s) from ${events.length} total`}
+        actions={<Button variant="secondary" size="sm" onClick={refresh}>
             <RefreshCw className="h-4 w-4" />
             Refresh
-          </Button>
-        </div>
-        <div className="mt-3 grid gap-2 md:grid-cols-[minmax(0,1fr)_180px_180px]">
+          </Button>}
+      />
+      <div className="grid gap-2 rounded-md border bg-card p-3 md:grid-cols-[minmax(0,1fr)_180px_180px]">
           <div className="relative">
             <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
             <Input className="pl-9" placeholder="Search customer, project, quote no, activity" value={query} onChange={(event) => setQuery(event.target.value)} />
@@ -189,32 +183,20 @@ export function HistoryClient() {
               {stages.map((item) => <SelectItem key={item} value={item}>{stageLabel(item)}</SelectItem>)}
             </SelectContent>
           </Select>
-        </div>
-      </div>
-
-      <div className="grid gap-2 md:grid-cols-3">
-        <div className="rounded-md border bg-background p-3">
-          <div className="text-xs text-muted-foreground">Activity events</div>
-          <div className="text-lg font-semibold">{events.length}</div>
-        </div>
-        <div className="rounded-md border bg-background p-3">
-          <div className="text-xs text-muted-foreground">Stage changes</div>
-          <div className="text-lg font-semibold">{events.filter((event) => event.kind === "stage").length}</div>
-        </div>
-        <div className="rounded-md border bg-background p-3">
-          <div className="text-xs text-muted-foreground">Workflow events</div>
-          <div className="text-lg font-semibold">{events.filter((event) => event.kind === "activity" || event.kind === "vendor").length}</div>
-        </div>
       </div>
 
       <Card>
         <CardHeader className="flex-row items-center justify-between border-b px-4 py-3">
           <CardTitle className="flex items-center gap-2 text-base"><Clock3 className="h-4 w-4" />Timeline</CardTitle>
-          <Badge variant="outline">{visible.length} events</Badge>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <Badge variant="outline">{visible.length} events</Badge>
+            <span>{events.filter((event) => event.kind === "stage").length} stage changes</span>
+            <span>{events.filter((event) => event.kind === "activity" || event.kind === "vendor").length} workflow events</span>
+          </div>
         </CardHeader>
         <CardContent className="p-0">
-          <div className="overflow-auto rounded-md border">
-            <Table>
+          <div className="overflow-auto">
+            <Table className="min-w-[980px]">
               <TableHeader>
                 <TableRow>
                   <TableHead className="min-w-44">Time</TableHead>
@@ -231,7 +213,7 @@ export function HistoryClient() {
                     <TableCell className="text-sm text-muted-foreground">{formatDate(event.at)}</TableCell>
                     <TableCell>
                       <div className="font-medium">{event.title}</div>
-                      <Badge variant="outline" className="mt-1">{event.kind === "export" ? "Export" : event.kind === "vendor" ? "Vendor" : event.kind === "activity" ? "Workflow" : "Stage"}</Badge>
+                      <div className="mt-1 text-xs text-muted-foreground">{event.kind === "export" ? "Export" : event.kind === "vendor" ? "Vendor" : event.kind === "activity" ? "Workflow" : "Stage"}</div>
                     </TableCell>
                     <TableCell>
                       <div className="font-medium">{event.quote.custom_label || event.quote.customer || "Untitled customer"}</div>

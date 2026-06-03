@@ -52,7 +52,8 @@ export function TechnicalIssuesPanel({
   onBuildClarification: () => void;
 }) {
   const summary = technicalIssueSummary(items);
-  const blockerCount = summary.reduce((sum, group) => sum + group.rows.length, 0);
+  const issueCount = summary.reduce((sum, group) => sum + group.rows.length, 0);
+  const affectedRowCount = new Set(summary.flatMap((group) => group.rows.map(({ index }) => index))).size;
 
   return (
     <div className="rounded-md border p-3">
@@ -62,7 +63,7 @@ export function TechnicalIssuesPanel({
             <AlertTriangle className="h-4 w-4" />
             Technical review
           </div>
-          <div className="mt-1 text-xs text-muted-foreground">{blockerCount} issue row(s) across {summary.length} group(s)</div>
+          <div className="mt-1 text-xs text-muted-foreground">{affectedRowCount} row(s) need attention &middot; {issueCount} issue(s) across {summary.length} group(s)</div>
         </div>
         <Button variant="secondary" size="sm" onClick={onBuildClarification}>
           <Mail className="h-4 w-4" />

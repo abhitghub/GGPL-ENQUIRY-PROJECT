@@ -64,13 +64,25 @@ def run_extraction_job(
         return
 
     if quote_id:
-        quote = repo.get_quote(org_id, quote_id)
-        if quote:
-            repo.update_quote(
+        try:
+            quote = repo.get_quote(org_id, quote_id)
+            if quote:
+                repo.update_quote(
+                    org_id,
+                    quote_id,
+                    QuotePatch(items=[*quote.items, *items], expected_version=quote.version),
+                )
+        except Exception as exc:
+            repo.update_job(
                 org_id,
-                quote_id,
-                QuotePatch(items=[*quote.items, *items]),
+                job_id,
+                status="failed",
+                progress=1.0,
+                skipped_count=skipped_count,
+                error=str(exc),
+                message="Could not save extracted items",
             )
+            return
     repo.update_job(
         org_id,
         job_id,

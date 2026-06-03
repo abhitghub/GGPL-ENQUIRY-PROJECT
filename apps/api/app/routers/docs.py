@@ -11,7 +11,7 @@ from docx import Document
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.db import repo
-from app.deps import CurrentUser, get_current_user
+from app.deps import CurrentUser, get_current_user, require_capability
 from app.schemas.common import APIMessage
 from app.schemas.chat import (
     DocAssistantMessageCreate,
@@ -30,6 +30,10 @@ SYSTEM_PROMPT = (
 )
 MAX_CONTEXT_CHARS = 120_000
 DOC_ASSISTANT_MODEL = os.environ.get("DOC_ASSISTANT_MODEL", "gpt-5.2")
+
+
+def _require_doc_assistant(user: CurrentUser) -> None:
+    require_capability(user, "view_doc_assistant")
 
 
 def _extract_pdf(raw: bytes) -> str:
@@ -84,6 +88,7 @@ def create_session(
     payload: DocAssistantSessionCreate,
     user: CurrentUser = Depends(get_current_user),
 ) -> DocAssistantSessionRead:
+    _require_doc_assistant(user)
     session = repo.create_doc_session(user.org_id, payload.documents)
     return DocAssistantSessionRead(id=session["id"], document_names=list(session["documents"].keys()))
 
@@ -93,6 +98,7 @@ async def create_session_from_uploads(
     request: Request,
     user: CurrentUser = Depends(get_current_user),
 ) -> DocAssistantSessionRead:
+    _require_doc_assistant(user)
     form = await request.form()
     documents: dict[str, str] = {}
     for _, value in form.multi_items():
@@ -114,6 +120,7 @@ def create_message(
     payload: DocAssistantMessageCreate,
     user: CurrentUser = Depends(get_current_user),
 ) -> DocAssistantMessageRead:
+    _require_doc_assistant(user)
     session = repo.get_doc_session(user.org_id, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Document session not found")
@@ -173,6 +180,7 @@ def remove_document(
     document_name: str,
     user: CurrentUser = Depends(get_current_user),
 ) -> DocAssistantSessionRead:
+    _require_doc_assistant(user)
     session = repo.get_doc_session(user.org_id, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Document session not found")
@@ -189,6 +197,7 @@ def clear_session(
     session_id: str,
     user: CurrentUser = Depends(get_current_user),
 ) -> APIMessage:
+    _require_doc_assistant(user)
     updated = repo.update_doc_session(user.org_id, session_id, documents={}, messages=[])
     if not updated:
         raise HTTPException(status_code=404, detail="Document session not found")

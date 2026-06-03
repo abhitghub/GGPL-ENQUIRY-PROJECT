@@ -3,46 +3,46 @@
 @tailwind utilities;
 
 :root {
-  --background: 220 33% 98%;
-  --foreground: 222 38% 13%;
+  --background: 40 20% 98%;
+  --foreground: 30 10% 14%;
   --card: 0 0% 100%;
-  --card-foreground: 222 38% 13%;
+  --card-foreground: 30 10% 14%;
   --popover: 0 0% 100%;
-  --popover-foreground: 222 38% 13%;
-  --muted: 214 32% 92%;
-  --muted-foreground: 216 16% 42%;
-  --border: 214 24% 86%;
-  --input: 214 24% 86%;
-  --ring: 218 38% 33%;
-  --primary: 218 38% 27%;
+  --popover-foreground: 30 10% 14%;
+  --muted: 35 14% 94%;
+  --muted-foreground: 30 7% 42%;
+  --border: 35 12% 86%;
+  --input: 35 12% 80%;
+  --ring: 155 35% 32%;
+  --primary: 30 9% 20%;
   --primary-foreground: 0 0% 100%;
-  --secondary: 154 52% 34%;
+  --secondary: 155 39% 32%;
   --secondary-foreground: 0 0% 100%;
-  --accent: 42 88% 54%;
-  --accent-foreground: 222 38% 13%;
+  --accent: 42 86% 55%;
+  --accent-foreground: 30 10% 14%;
   --destructive: 0 72% 48%;
   --destructive-foreground: 0 0% 100%;
   --radius: 0.5rem;
 }
 
 .dark {
-  --background: 222 31% 9%;
-  --foreground: 210 24% 94%;
-  --card: 222 28% 12%;
-  --card-foreground: 210 24% 94%;
-  --popover: 222 28% 12%;
-  --popover-foreground: 210 24% 94%;
-  --muted: 221 22% 18%;
-  --muted-foreground: 215 14% 68%;
-  --border: 221 20% 23%;
-  --input: 221 20% 23%;
-  --ring: 211 72% 62%;
-  --primary: 211 72% 62%;
-  --primary-foreground: 222 31% 9%;
-  --secondary: 154 48% 46%;
-  --secondary-foreground: 222 31% 9%;
+  --background: 30 7% 9%;
+  --foreground: 40 10% 92%;
+  --card: 30 6% 12%;
+  --card-foreground: 40 10% 92%;
+  --popover: 30 6% 12%;
+  --popover-foreground: 40 10% 92%;
+  --muted: 30 5% 18%;
+  --muted-foreground: 35 6% 67%;
+  --border: 30 5% 23%;
+  --input: 30 5% 28%;
+  --ring: 155 38% 48%;
+  --primary: 40 7% 88%;
+  --primary-foreground: 30 7% 10%;
+  --secondary: 155 38% 43%;
+  --secondary-foreground: 30 7% 9%;
   --accent: 42 88% 58%;
-  --accent-foreground: 222 31% 9%;
+  --accent-foreground: 30 7% 9%;
   --destructive: 0 68% 54%;
   --destructive-foreground: 0 0% 100%;
 }
@@ -51,6 +51,7 @@ body {
   background: hsl(var(--background));
   color: hsl(var(--foreground));
   font-feature-settings: "rlig" 1, "calt" 1;
+  text-rendering: optimizeLegibility;
 }
 
 * {

@@ -10,6 +10,7 @@ import { stageLabel } from "@/components/quotes/stage-utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PageIntro } from "@/components/app-shell/page-intro";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -161,22 +162,22 @@ export function VendorEnquiriesClient() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
+      <PageIntro
+        title="Supplier workspace"
+        description="Choose a quotation, create supplier enquiries, and compare vendor responses."
+        actions={<Button variant="secondary" size="sm" onClick={() => refresh().catch((error) => toast.error(error.message))}>
+          <RefreshCw className="h-4 w-4" />
+          Refresh
+        </Button>}
+      />
       <Card>
         <CardHeader className="gap-3 border-b px-4 py-3 md:flex-row md:items-center md:justify-between md:space-y-0">
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-md border bg-background">
-              <ShoppingCart className="h-4 w-4 text-muted-foreground" />
-            </div>
             <div>
-              <CardTitle className="text-base">Vendor enquiry workflow</CardTitle>
-              <div className="mt-1 text-xs text-muted-foreground">Create supplier enquiries from quote items or material plan rows.</div>
+              <CardTitle className="flex items-center gap-2 text-base"><ShoppingCart className="h-4 w-4" />Create enquiry</CardTitle>
             </div>
           </div>
-          <Button variant="secondary" size="sm" onClick={() => refresh().catch((error) => toast.error(error.message))}>
-            <RefreshCw className="h-4 w-4" />
-            Refresh
-          </Button>
         </CardHeader>
         <CardContent className="grid gap-3 p-3 lg:grid-cols-[300px_1fr]">
           <div className="space-y-2">
@@ -205,7 +206,7 @@ export function VendorEnquiriesClient() {
           <div className="grid gap-3 rounded-md border bg-background p-3 md:grid-cols-4">
             <div className="flex items-center gap-2 text-sm font-medium md:col-span-4">
               <PackageCheck className="h-4 w-4" />
-              Create vendor enquiry
+              Supplier details
             </div>
             <div className="space-y-1.5">
               <Label>Source</Label>
@@ -218,12 +219,12 @@ export function VendorEnquiriesClient() {
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label>Vendor name</Label>
-              <Input value={draft.vendor_name} onChange={(event) => updateDraft({ vendor_name: event.target.value })} />
+              <Label>Vendor name *</Label>
+              <Input value={draft.vendor_name} onChange={(event) => updateDraft({ vendor_name: event.target.value })} placeholder="Supplier company" />
             </div>
             <div className="space-y-1.5">
               <Label>Contact</Label>
-              <Input value={draft.contact} onChange={(event) => updateDraft({ contact: event.target.value })} />
+              <Input value={draft.contact} onChange={(event) => updateDraft({ contact: event.target.value })} placeholder="Email or phone" />
             </div>
             <div className="space-y-1.5">
               <Label>Status</Label>
@@ -245,11 +246,11 @@ export function VendorEnquiriesClient() {
               <Input type="date" value={draft.required_date} onChange={(event) => updateDraft({ required_date: event.target.value })} />
             </div>
             <div className="space-y-1.5">
-              <Label>Quoted price</Label>
+              <Label>Price quoted</Label>
               <Input type="number" value={getString(draft.quoted_price)} onChange={(event) => updateDraft({ quoted_price: Number(event.target.value) })} />
             </div>
             <div className="space-y-1.5">
-              <Label>Lead time days</Label>
+              <Label>Lead time</Label>
               <Input type="number" value={getString(draft.lead_time_days)} onChange={(event) => updateDraft({ lead_time_days: Number(event.target.value) })} />
             </div>
             <div className="space-y-1.5 md:col-span-2">
@@ -259,7 +260,7 @@ export function VendorEnquiriesClient() {
             <div className="flex items-end">
               <Button size="sm" onClick={() => saveEnquiry()} disabled={!quote || saving}>
                 <Save className="h-4 w-4" />
-                Save enquiry
+                Save
               </Button>
             </div>
           </div>
@@ -269,11 +270,11 @@ export function VendorEnquiriesClient() {
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0 border-b px-4 py-3">
           <CardTitle className="flex items-center gap-2 text-base"><PackageCheck className="h-4 w-4" />Vendor comparison</CardTitle>
-          <Badge variant="outline">{enquiries.length} enquiry{enquiries.length === 1 ? "" : "ies"}</Badge>
+          <Badge variant="outline">{enquiries.length} {enquiries.length === 1 ? "enquiry" : "enquiries"}</Badge>
         </CardHeader>
         <CardContent className="p-0">
           <div className="overflow-auto">
-            <Table>
+            <Table className="min-w-[980px]">
               <TableHeader>
                 <TableRow>
                   <TableHead>Vendor</TableHead>
@@ -294,7 +295,7 @@ export function VendorEnquiriesClient() {
                     <TableCell>{row.material_group}</TableCell>
                     <TableCell>{row.quantity}</TableCell>
                     <TableCell>{row.required_date || "-"}</TableCell>
-                    <TableCell><Badge variant={row.status === "selected" ? "secondary" : "outline"}>{row.status}</Badge></TableCell>
+                    <TableCell><Badge variant={row.status === "selected" ? "secondary" : "outline"}>{row.status === "selected" ? "Selected" : row.status}</Badge></TableCell>
                     <TableCell>{row.quoted_price ? row.quoted_price.toFixed(2) : "-"}</TableCell>
                     <TableCell>{row.lead_time_days || "-"}</TableCell>
                     <TableCell className="min-w-64 text-sm text-muted-foreground">{row.remarks || "-"}</TableCell>
@@ -302,11 +303,11 @@ export function VendorEnquiriesClient() {
                       <div className="flex justify-end gap-2">
                         <Button size="sm" variant="secondary" onClick={() => updateEnquiry(row, { status: "sent" })}>
                           <Send className="h-4 w-4" />
-                          Sent
+                          Mark sent
                         </Button>
                         <Button size="sm" onClick={() => updateEnquiry(row, { status: "selected" })}>
                           <CheckCircle2 className="h-4 w-4" />
-                          Select
+                          Choose
                         </Button>
                       </div>
                     </TableCell>

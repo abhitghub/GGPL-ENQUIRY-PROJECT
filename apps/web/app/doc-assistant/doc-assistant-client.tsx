@@ -8,6 +8,7 @@ import { askDocAssistant, clearDocAssistantSession, removeDocAssistantDocument, 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PageIntro } from "@/components/app-shell/page-intro";
 import { Input } from "@/components/ui/input";
 
 const quickQuestions = [
@@ -108,7 +109,9 @@ export function DocAssistantClient() {
   }
 
   return (
-    <div className="grid min-h-[calc(100vh-8rem)] gap-3 xl:grid-cols-[300px_minmax(0,1fr)_260px]">
+    <div className="space-y-3">
+      <PageIntro title="Ask documents" description="Upload enquiry files, then ask for missing details, specifications, and quotation risks." />
+      <div className="grid min-h-[calc(100vh-13rem)] gap-3 xl:grid-cols-[280px_minmax(0,1fr)]">
       <Card className="overflow-hidden">
         <CardHeader className="border-b px-4 py-3">
           <div className="flex items-center justify-between gap-3">
@@ -124,11 +127,12 @@ export function DocAssistantClient() {
               multiple
               accept=".pdf,.docx,.xlsx,.xls,.xlsm,.csv,.txt"
               onChange={(event) => upload(event.target.files)}
+              className="hidden"
             />
             <div className="mt-2 flex flex-wrap gap-2">
-              <Button variant="secondary" size="sm" onClick={() => fileInputRef.current?.click()}>
+              <Button size="sm" onClick={() => fileInputRef.current?.click()}>
                 <Upload className="h-4 w-4" />
-                Upload
+                Add files
               </Button>
               <Button variant="secondary" size="sm" onClick={() => setChat([])} disabled={!chat.length}>
                 <Trash2 className="h-4 w-4" />
@@ -154,9 +158,21 @@ export function DocAssistantClient() {
             )}
           </div>
 
-          <Button variant="destructive" size="sm" onClick={resetAll} disabled={!sessionId && !documents.length && !chat.length} className="w-full">
+          <details className="rounded-md border bg-background">
+            <summary className="cursor-pointer px-3 py-2 text-sm font-medium">Quick prompts</summary>
+            <div className="space-y-2 border-t p-2">
+              {quickQuestions.map((item) => (
+                <Button key={item} variant="secondary" className="h-auto w-full justify-start whitespace-normal text-left" onClick={() => ask(item)} disabled={!sessionId || loading}>
+                  <Send className="h-4 w-4 shrink-0" />
+                  {item}
+                </Button>
+              ))}
+            </div>
+          </details>
+
+          <Button variant="secondary" size="sm" onClick={resetAll} disabled={!sessionId && !documents.length && !chat.length} className="w-full">
             <Trash2 className="h-4 w-4" />
-            Reset
+            Reset session
           </Button>
         </CardContent>
       </Card>
@@ -164,11 +180,10 @@ export function DocAssistantClient() {
       <Card className="flex min-h-0 flex-col overflow-hidden">
         <CardHeader className="border-b px-4 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="space-y-1">
+            <div>
               <CardTitle className="flex items-center gap-2 text-base"><Bot className="h-4 w-4" />Document Q&A</CardTitle>
-              <div className="text-xs text-muted-foreground">Answers use loaded document text and cite filenames where possible.</div>
             </div>
-            <Badge variant="outline">GPT-5.2 default</Badge>
+            <Badge variant={sessionId ? "secondary" : "outline"}>{sessionId ? "Ready" : "Upload first"}</Badge>
           </div>
         </CardHeader>
         <CardContent className="flex min-h-0 flex-1 flex-col gap-3 p-3">
@@ -198,10 +213,10 @@ export function DocAssistantClient() {
                 </div>
               )}
               {!chat.length && !loading && (
-                <div className="flex h-[320px] items-center justify-center rounded-md border border-dashed bg-muted/20 text-sm text-muted-foreground">
+                <div className="flex h-[360px] items-center justify-center rounded-md border border-dashed bg-muted/20 text-sm text-muted-foreground">
                   <div className="flex items-center gap-2">
                     <MessageSquare className="h-4 w-4" />
-                    Upload documents and ask a question.
+                    Upload documents, then ask a question.
                   </div>
                 </div>
               )}
@@ -220,31 +235,18 @@ export function DocAssistantClient() {
                   ask(question);
                 }
               }}
-              placeholder="Ask about specifications, missing details, risks, or quoted requirements"
+              placeholder="Ask about missing details, risks, specifications, or customer requirements"
             />
             <div className="mt-2 flex justify-end">
               <Button size="sm" onClick={() => ask(question)} disabled={loading || !question.trim()}>
                 {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                Ask
+                Send
               </Button>
             </div>
           </div>
         </CardContent>
       </Card>
-
-      <Card className="overflow-hidden">
-        <CardHeader className="border-b px-4 py-3">
-          <CardTitle className="flex items-center gap-2 text-base"><MessageSquare className="h-4 w-4" />Quick prompts</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-2 p-3">
-          {quickQuestions.map((item) => (
-            <Button key={item} variant="secondary" className="h-auto w-full justify-start whitespace-normal text-left" onClick={() => ask(item)} disabled={!sessionId || loading}>
-              <Send className="h-4 w-4 shrink-0" />
-              {item}
-            </Button>
-          ))}
-        </CardContent>
-      </Card>
+      </div>
     </div>
   );
 }

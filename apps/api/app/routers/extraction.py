@@ -1,15 +1,33 @@
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from app.db import repo
-from app.deps import CurrentUser, get_current_user
+from app.deps import CurrentUser, get_current_user, require_capability
+from app.routers.quotes import _can_read_quote, _repo_visibility_kwargs
 from app.schemas.jobs import ExtractionAccepted, ExtractionCreate, JobRead, JobStatusRead
 from app.services.extraction_runner import run_extraction_job
 
 router = APIRouter(prefix="/api/v1", tags=["extractions"])
 ALLOWED_SOURCE_TYPES = {"email", "excel"}
+
+
+def _job_or_404(user: CurrentUser, job_id: str) -> JobRead:
+    job = repo.get_job(user.org_id, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.quote_id:
+        quote = repo.get_quote(user.org_id, job.quote_id, **_repo_visibility_kwargs(user))
+        if not quote or not _can_read_quote(user, quote):
+            raise HTTPException(status_code=404, detail="Job not found")
+    elif user.role != "admin":
+        stored_user_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"ggpl-gasket-quote/{user.user_id}"))
+        if job.created_by not in {user.user_id, stored_user_id}:
+            raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 
 async def _parse_extraction_request(request: Request) -> tuple[ExtractionCreate, str | bytes | None]:
@@ -39,15 +57,16 @@ async def create_extraction(
     background_tasks: BackgroundTasks,
     user: CurrentUser = Depends(get_current_user),
 ) -> ExtractionAccepted:
+    require_capability(user, "edit_line_items")
     payload, source = await _parse_extraction_request(request)
     if payload.source_type not in ALLOWED_SOURCE_TYPES:
         raise HTTPException(status_code=400, detail="Only email text and Excel upload extraction are supported.")
-    if payload.quote_id and not repo.get_quote(user.org_id, payload.quote_id):
+    if payload.quote_id and not repo.get_quote(user.org_id, payload.quote_id, **_repo_visibility_kwargs(user)):
         raise HTTPException(status_code=404, detail="Quote not found")
     if not source:
         raise HTTPException(status_code=400, detail="Extraction source is required")
 
-    job = repo.create_job(user.org_id, payload.source_type, quote_id=payload.quote_id)
+    job = repo.create_job(user.org_id, payload.source_type, quote_id=payload.quote_id, created_by=user.user_id)
     background_tasks.add_task(
         run_extraction_job,
         org_id=user.org_id,
@@ -62,17 +81,12 @@ async def create_extraction(
 
 @router.get("/jobs/{job_id}", response_model=JobRead)
 def get_job(job_id: str, user: CurrentUser = Depends(get_current_user)) -> JobRead:
-    job = repo.get_job(user.org_id, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
+    return _job_or_404(user, job_id)
 
 
 @router.get("/jobs/{job_id}/status", response_model=JobStatusRead)
 def get_job_status(job_id: str, user: CurrentUser = Depends(get_current_user)) -> JobStatusRead:
-    job = repo.get_job(user.org_id, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    job = _job_or_404(user, job_id)
     return JobStatusRead(
         id=job.id,
         status=job.status,
@@ -89,12 +103,10 @@ def get_job_status(job_id: str, user: CurrentUser = Depends(get_current_user)) -
 
 @router.get("/jobs/{job_id}/stream")
 def stream_job(job_id: str, user: CurrentUser = Depends(get_current_user)) -> StreamingResponse:
-    job = repo.get_job(user.org_id, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    _job_or_404(user, job_id)
 
     def events():
-        current = repo.get_job(user.org_id, job_id)
+        current = _job_or_404(user, job_id)
         if current:
             yield f"event: status\ndata: {current.model_dump_json()}\n\n"
 

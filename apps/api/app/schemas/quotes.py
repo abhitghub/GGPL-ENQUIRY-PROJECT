@@ -24,6 +24,7 @@ class QuoteCreate(QuoteBase):
 
 
 class QuotePatch(BaseModel):
+    expected_version: int | None = None
     quote_no: str | None = None
     customer: str | None = None
     project_ref: str | None = None
@@ -47,6 +48,11 @@ class QuoteRead(QuoteBase):
     n_missing: int = 0
     n_regret: int = 0
     stage_history: list[StageHistoryEntry] = Field(default_factory=list)
+    estimated_quote_value: float = 0.0
+    high_risk_count: int = 0
+    has_clarification: bool = False
+    next_action: str = ""
+    opportunity_id: str = ""
 
 
 class BulkItemPatch(BaseModel):
@@ -55,11 +61,13 @@ class BulkItemPatch(BaseModel):
 
 
 class BulkItemsRequest(BaseModel):
+    expected_version: int | None = None
     patches: list[BulkItemPatch] = Field(default_factory=list)
     delete_indices: list[int] = Field(default_factory=list)
 
 
 class BulkRecomputeRequest(BaseModel):
+    expected_version: int | None = None
     indices: list[int] | None = None
     rows: list[dict[str, Any]] | None = None
 
@@ -79,3 +87,4 @@ class StageAdvanceRequest(BaseModel):
     stage: QuoteStage
     reason: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
+    expected_version: int | None = None

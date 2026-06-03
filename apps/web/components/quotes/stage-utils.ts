@@ -19,6 +19,7 @@ export const ENQUIRY_STAGES: Array<{ id: EnquiryStageId; label: string }> = [
 ];
 
 const ENQUIRY_STAGE_IDS = new Set<EnquiryStageId>(ENQUIRY_STAGES.map((stage) => stage.id));
+const OPEN_CLARIFICATION_STATUSES = new Set(["required", "drafted", "requested"]);
 
 export function revisionLabel(quote: Quote): string {
   const revNo = getString(quote.quote_data?.rev_no);
@@ -43,7 +44,7 @@ export function enquiryStageFromQuote(quote: Quote): EnquiryStageId {
   if (quote.stage_meta?.price_breakup || quote.stage_meta?.price_breakup_updated_at) return "price_breakup";
   if (quote.stage === "quote_prep" || quote.stage === "repricing" || quote.stage === "sent" || quote.stage === "po") return "pricing";
   if (quote.stage_meta?.material_planning_enabled === true) return "material_planning";
-  if (quote.stage_meta?.clarification_status === "required" || quote.items.some((item) => getString(item.clarification_note))) return "technical_clarification";
+  if (OPEN_CLARIFICATION_STATUSES.has(getString(quote.stage_meta?.clarification_status)) || quote.items.some((item) => getString(item.clarification_note))) return "technical_clarification";
   return "draft";
 }
 

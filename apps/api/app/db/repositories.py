@@ -40,11 +40,19 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.schemas.access_settings import AccessSettings
+from app.schemas.customers import CustomerSettings
 from app.config import get_settings
 from app.schemas.common import StageHistoryEntry
 from app.schemas.jobs import JobRead
 from app.schemas.quotes import QuoteCreate, QuotePatch, QuoteRead
 from app.schemas.users import AppUserCreate, AppUserPatch, AppUserRead
+from app.services.quote_rules import (
+    QuoteConflictError,
+    QuoteValidationError,
+    apply_update_invariants,
+    prepare_created_metadata,
+    quote_owner_matches,
+)
 
 
 metadata = MetaData()
@@ -269,10 +277,19 @@ def _next_enquiry_no(values: list[str]) -> str:
     return f"enq-{highest + 1}"
 
 
-def _prepare_created_metadata(data: dict[str, Any], user_id: str) -> None:
-    stage_meta = dict(data.get("stage_meta") or {})
-    stage_meta.setdefault("created_by_username", user_id)
-    data["stage_meta"] = stage_meta
+def _prepare_created_metadata(
+    data: dict[str, Any],
+    user_id: str,
+    quote_id: str,
+    source_quote: QuoteRead | None = None,
+) -> None:
+    data["stage_meta"] = prepare_created_metadata(
+        dict(data.get("stage_meta") or {}),
+        quote_id=quote_id,
+        user_id=user_id,
+        items=data.get("items") or [],
+        source_quote=source_quote,
+    )
 
 
 def _sync_quote_no(data: dict[str, Any], quote_no: str) -> None:
@@ -448,7 +465,22 @@ class LocalJsonRepository:
                 _sync_quote_no(data, _next_enquiry_no(existing))
             else:
                 _sync_quote_no(data, str(data.get("quote_no") or "").strip())
-            _prepare_created_metadata(data, user_id)
+            duplicate = next(
+                (
+                    quote
+                    for quote in self._state["quotes"].values()
+                    if quote.get("org_id") == org_id
+                    and str(quote.get("quote_no") or "").strip().lower() == data["quote_no"].lower()
+                ),
+                None,
+            )
+            if duplicate:
+                raise QuoteValidationError(f"Quote number already exists: {data['quote_no']}")
+            source_quote_id = str((data.get("stage_meta") or {}).get("source_enquiry_id") or "").strip()
+            source_quote = self.get_quote(org_id, source_quote_id) if source_quote_id else None
+            if source_quote_id and not source_quote:
+                raise QuoteValidationError("Source enquiry was not found")
+            _prepare_created_metadata(data, user_id, quote_id, source_quote)
             counts = _quote_counts(data["items"])
             quote = QuoteRead(
                 id=quote_id,
@@ -463,6 +495,14 @@ class LocalJsonRepository:
             )
             stored = quote.model_dump(mode="json")
             self._state["quotes"][quote_id] = stored
+            if source_quote_id:
+                source = self._state["quotes"][source_quote_id]
+                source_meta = dict(source.get("stage_meta") or {})
+                source_meta["linked_quote_id"] = quote_id
+                source_meta.setdefault("opportunity_id", source_quote_id)
+                source["stage_meta"] = source_meta
+                source["updated_at"] = now.isoformat()
+                source["version"] = int(source.get("version") or 1) + 1
             self._save()
         return deepcopy(quote)
 
@@ -552,7 +592,27 @@ class LocalJsonRepository:
             self._save()
             return _access_settings_with_defaults(deepcopy(data))
 
-    def list_quotes(self, org_id: str) -> list[QuoteRead]:
+    def get_customer_settings(self, org_id: str) -> CustomerSettings:
+        with self._lock:
+            value = self._state.setdefault("app_settings", {}).get(f"{org_id}:customers") or {"customers": []}
+            return CustomerSettings(**deepcopy(value))
+
+    def update_customer_settings(self, org_id: str, settings: CustomerSettings) -> CustomerSettings:
+        with self._lock:
+            data = settings.model_dump(mode="json")
+            self._state.setdefault("app_settings", {})[f"{org_id}:customers"] = data
+            self._save()
+            return CustomerSettings(**deepcopy(data))
+
+    def list_quotes(
+        self,
+        org_id: str,
+        *,
+        viewer_id: str | None = None,
+        viewer_name: str = "",
+        viewer_email: str = "",
+        is_admin: bool = False,
+    ) -> list[QuoteRead]:
         with self._lock:
             self._ensure_quote_numbers(org_id)
             rows = [
@@ -560,25 +620,64 @@ class LocalJsonRepository:
                 for q in self._state["quotes"].values()
                 if q.get("org_id") == org_id
             ]
-        return sorted(rows, key=lambda q: q.created_at, reverse=True)
+        rows = sorted(rows, key=lambda q: q.created_at, reverse=True)
+        if viewer_id is None or is_admin:
+            return rows
+        return [
+            quote
+            for quote in rows
+            if quote_owner_matches(quote, user_id=viewer_id, user_name=viewer_name, user_email=viewer_email)
+        ]
 
-    def get_quote(self, org_id: str, quote_id: str) -> QuoteRead | None:
+    def get_quote(
+        self,
+        org_id: str,
+        quote_id: str,
+        *,
+        viewer_id: str | None = None,
+        viewer_name: str = "",
+        viewer_email: str = "",
+        is_admin: bool = False,
+    ) -> QuoteRead | None:
         with self._lock:
             self._ensure_quote_numbers(org_id)
             quote = self._state["quotes"].get(quote_id)
             if not quote or quote.get("org_id") != org_id:
                 return None
-            return self._quote_from_data(deepcopy(quote))
+            result = self._quote_from_data(deepcopy(quote))
+            if viewer_id is not None and not is_admin and not quote_owner_matches(
+                result,
+                user_id=viewer_id,
+                user_name=viewer_name,
+                user_email=viewer_email,
+            ):
+                return None
+            return result
 
-    def update_quote(self, org_id: str, quote_id: str, payload: QuotePatch) -> QuoteRead | None:
+    def update_quote(self, org_id: str, quote_id: str, payload: QuotePatch, *, actor_id: str = "") -> QuoteRead | None:
         with self._lock:
             quote = self._state["quotes"].get(quote_id)
             if not quote or quote.get("org_id") != org_id:
                 return None
             data = self._quote_from_data(deepcopy(quote)).model_dump()
-            for key, value in payload.model_dump(exclude_unset=True).items():
+            if payload.expected_version is not None and data["version"] != payload.expected_version:
+                raise QuoteConflictError(f"Quote has changed. Latest version is {data['version']}")
+            for key, value in payload.model_dump(exclude_unset=True, exclude={"expected_version"}).items():
                 if value is not None:
                     data[key] = value
+            duplicate = next(
+                (
+                    other
+                    for other_id, other in self._state["quotes"].items()
+                    if other_id != quote_id
+                    and other.get("org_id") == org_id
+                    and str(other.get("quote_no") or "").strip().lower() == str(data.get("quote_no") or "").strip().lower()
+                ),
+                None,
+            )
+            if duplicate and str(data.get("quote_no") or "").strip():
+                raise QuoteValidationError(f"Quote number already exists: {data['quote_no']}")
+            data = apply_update_invariants(self._quote_from_data(deepcopy(quote)), data, actor_id=actor_id)
             updated = QuoteRead(
                 **{
                     **data,
@@ -608,12 +707,15 @@ class LocalJsonRepository:
         user_id: str,
         reason: str = "",
         metadata: dict[str, Any] | None = None,
+        expected_version: int | None = None,
     ) -> QuoteRead | None:
         with self._lock:
             quote = self._state["quotes"].get(quote_id)
             if not quote or quote.get("org_id") != org_id:
                 return None
             data = self._quote_from_data(deepcopy(quote)).model_dump()
+            if expected_version is not None and data["version"] != expected_version:
+                raise QuoteConflictError(f"Quote has changed. Latest version is {data['version']}")
             stage_meta = dict(data.get("stage_meta") or {})
             if metadata:
                 stage_meta.update(metadata)
@@ -635,11 +737,12 @@ class LocalJsonRepository:
             self._save()
             return deepcopy(updated)
 
-    def create_job(self, org_id: str, source_type: str, quote_id: str | None = None) -> JobRead:
+    def create_job(self, org_id: str, source_type: str, quote_id: str | None = None, created_by: str = "") -> JobRead:
         now = _now()
         job = JobRead(
             id=str(uuid.uuid4()),
             org_id=org_id,
+            created_by=created_by,
             status="queued",
             source_type=source_type,
             quote_id=quote_id,
@@ -822,6 +925,7 @@ class PostgresRepository:
         return JobRead(
             id=str(data["id"]),
             org_id=str(data["org_id"]),
+            created_by=str(data["created_by"]) if data.get("created_by") else "",
             status=data["status"],
             source_type=data["source_type"],
             quote_id=str(data["quote_id"]) if data.get("quote_id") else None,
@@ -925,6 +1029,8 @@ class PostgresRepository:
         data = payload.model_dump()
         stage_history = [StageHistoryEntry(stage=payload.stage, at=now, user_id=user_id)]
         with self._engine.begin() as conn:
+            if self._engine.dialect.name == "postgresql":
+                conn.execute(text("select pg_advisory_xact_lock(hashtext(:org_id))"), {"org_id": str(org_uuid)})
             if not str(data.get("quote_no") or "").strip():
                 existing = [
                     str(value or "")
@@ -935,7 +1041,31 @@ class PostgresRepository:
                 _sync_quote_no(data, _next_enquiry_no(existing))
             else:
                 _sync_quote_no(data, str(data.get("quote_no") or "").strip())
-            _prepare_created_metadata(data, user_id)
+            duplicate = conn.execute(
+                select(quotes_table.c.id).where(
+                    quotes_table.c.org_id == org_uuid,
+                    quotes_table.c.quote_no == data["quote_no"],
+                )
+            ).first()
+            if duplicate:
+                raise QuoteValidationError(f"Quote number already exists: {data['quote_no']}")
+            source_quote_id = str((data.get("stage_meta") or {}).get("source_enquiry_id") or "").strip()
+            source_row = None
+            if source_quote_id:
+                source_row = conn.execute(
+                    select(quotes_table).where(
+                        quotes_table.c.org_id == org_uuid,
+                        quotes_table.c.id == _uuid(source_quote_id),
+                    )
+                ).first()
+                if not source_row:
+                    raise QuoteValidationError("Source enquiry was not found")
+            _prepare_created_metadata(
+                data,
+                user_id,
+                str(quote_id),
+                self._quote_from_row(source_row) if source_row else None,
+            )
             counts = _quote_counts(data["items"])
             values = {
                 "id": quote_id,
@@ -949,6 +1079,15 @@ class PostgresRepository:
                 **counts,
             }
             row = conn.execute(insert(quotes_table).values(**values).returning(quotes_table)).first()
+            if source_row:
+                source_meta = dict(source_row.stage_meta or {})
+                source_meta["linked_quote_id"] = str(quote_id)
+                source_meta.setdefault("opportunity_id", source_quote_id)
+                conn.execute(
+                    update(quotes_table)
+                    .where(quotes_table.c.org_id == org_uuid, quotes_table.c.id == source_row.id)
+                    .values(stage_meta=source_meta, updated_at=now, version=source_row.version + 1)
+                )
         return self._quote_from_row(row)
 
     def list_app_users(self, org_id: str) -> list[AppUserRead]:
@@ -1086,29 +1225,103 @@ class PostgresRepository:
                 )
         return _access_settings_with_defaults(value)
 
-    def list_quotes(self, org_id: str) -> list[QuoteRead]:
+    def get_customer_settings(self, org_id: str) -> CustomerSettings:
+        org_uuid = _tenant_uuid(org_id)
+        stmt = select(app_settings_table.c.value).where(
+            app_settings_table.c.org_id == org_uuid,
+            app_settings_table.c.key == "customers",
+        )
+        with self._engine.begin() as conn:
+            value = conn.execute(stmt).scalar_one_or_none()
+        return CustomerSettings(**dict(value or {"customers": []}))
+
+    def update_customer_settings(self, org_id: str, settings: CustomerSettings) -> CustomerSettings:
+        org_uuid = _tenant_uuid(org_id)
+        value = settings.model_dump(mode="json")
+        with self._engine.begin() as conn:
+            existing = conn.execute(
+                select(app_settings_table.c.key).where(
+                    app_settings_table.c.org_id == org_uuid,
+                    app_settings_table.c.key == "customers",
+                )
+            ).first()
+            if existing:
+                conn.execute(
+                    update(app_settings_table)
+                    .where(app_settings_table.c.org_id == org_uuid, app_settings_table.c.key == "customers")
+                    .values(value=value, updated_at=_now())
+                )
+            else:
+                conn.execute(insert(app_settings_table).values(org_id=org_uuid, key="customers", value=value, updated_at=_now()))
+        return CustomerSettings(**value)
+
+    def list_quotes(
+        self,
+        org_id: str,
+        *,
+        viewer_id: str | None = None,
+        viewer_name: str = "",
+        viewer_email: str = "",
+        is_admin: bool = False,
+    ) -> list[QuoteRead]:
         org_uuid = _tenant_uuid(org_id)
         self._ensure_quote_numbers(org_id)
         stmt = select(quotes_table).where(quotes_table.c.org_id == org_uuid).order_by(quotes_table.c.created_at.desc())
         with self._engine.begin() as conn:
-            return [self._quote_from_row(row) for row in conn.execute(stmt)]
+            rows = [self._quote_from_row(row) for row in conn.execute(stmt)]
+        if viewer_id is None or is_admin:
+            return rows
+        return [
+            quote
+            for quote in rows
+            if quote_owner_matches(quote, user_id=viewer_id, user_name=viewer_name, user_email=viewer_email)
+        ]
 
-    def get_quote(self, org_id: str, quote_id: str) -> QuoteRead | None:
+    def get_quote(
+        self,
+        org_id: str,
+        quote_id: str,
+        *,
+        viewer_id: str | None = None,
+        viewer_name: str = "",
+        viewer_email: str = "",
+        is_admin: bool = False,
+    ) -> QuoteRead | None:
         org_uuid = _tenant_uuid(org_id)
         self._ensure_quote_numbers(org_id)
         stmt = select(quotes_table).where(quotes_table.c.org_id == org_uuid, quotes_table.c.id == _uuid(quote_id))
         with self._engine.begin() as conn:
             row = conn.execute(stmt).first()
-        return self._quote_from_row(row) if row else None
+        quote = self._quote_from_row(row) if row else None
+        if quote and viewer_id is not None and not is_admin and not quote_owner_matches(
+            quote,
+            user_id=viewer_id,
+            user_name=viewer_name,
+            user_email=viewer_email,
+        ):
+            return None
+        return quote
 
-    def update_quote(self, org_id: str, quote_id: str, payload: QuotePatch) -> QuoteRead | None:
+    def update_quote(self, org_id: str, quote_id: str, payload: QuotePatch, *, actor_id: str = "") -> QuoteRead | None:
         current = self.get_quote(org_id, quote_id)
         if not current:
             return None
+        if payload.expected_version is not None and current.version != payload.expected_version:
+            raise QuoteConflictError(f"Quote has changed. Latest version is {current.version}")
         data = current.model_dump()
-        for key, value in payload.model_dump(exclude_unset=True).items():
+        for key, value in payload.model_dump(exclude_unset=True, exclude={"expected_version"}).items():
             if value is not None:
                 data[key] = value
+        if str(data.get("quote_no") or "").strip():
+            duplicate_stmt = select(quotes_table.c.id).where(
+                quotes_table.c.org_id == _tenant_uuid(org_id),
+                quotes_table.c.id != _uuid(quote_id),
+                quotes_table.c.quote_no == data["quote_no"],
+            )
+            with self._engine.begin() as conn:
+                if conn.execute(duplicate_stmt).first():
+                    raise QuoteValidationError(f"Quote number already exists: {data['quote_no']}")
+        data = apply_update_invariants(current, data, actor_id=actor_id)
         counts = _quote_counts(data["items"])
         values = {
             "quote_no": data["quote_no"],
@@ -1126,12 +1339,18 @@ class PostgresRepository:
         }
         stmt = (
             update(quotes_table)
-            .where(quotes_table.c.org_id == _tenant_uuid(org_id), quotes_table.c.id == _uuid(quote_id))
+            .where(
+                quotes_table.c.org_id == _tenant_uuid(org_id),
+                quotes_table.c.id == _uuid(quote_id),
+                quotes_table.c.version == current.version,
+            )
             .values(**values)
             .returning(quotes_table)
         )
         with self._engine.begin() as conn:
             row = conn.execute(stmt).first()
+        if not row and self.get_quote(org_id, quote_id):
+            raise QuoteConflictError("Quote has changed. Reload the latest version")
         return self._quote_from_row(row) if row else None
 
     def delete_quote(self, org_id: str, quote_id: str) -> bool:
@@ -1148,10 +1367,13 @@ class PostgresRepository:
         user_id: str,
         reason: str = "",
         metadata: dict[str, Any] | None = None,
+        expected_version: int | None = None,
     ) -> QuoteRead | None:
         current = self.get_quote(org_id, quote_id)
         if not current:
             return None
+        if expected_version is not None and current.version != expected_version:
+            raise QuoteConflictError(f"Quote has changed. Latest version is {current.version}")
         stage_meta = dict(current.stage_meta or {})
         if metadata:
             stage_meta.update(metadata)
@@ -1159,7 +1381,10 @@ class PostgresRepository:
             *current.stage_history,
             StageHistoryEntry(stage=stage, reason=reason, metadata=metadata or {}, user_id=user_id),
         ]
-        return self._advance_stage_direct(org_id, quote_id, stage, stage_meta, history, current.version)
+        updated = self._advance_stage_direct(org_id, quote_id, stage, stage_meta, history, current.version)
+        if not updated and self.get_quote(org_id, quote_id):
+            raise QuoteConflictError("Quote has changed. Reload the latest version")
+        return updated
 
     def _advance_stage_direct(
         self,
@@ -1172,7 +1397,11 @@ class PostgresRepository:
     ) -> QuoteRead | None:
         stmt = (
             update(quotes_table)
-            .where(quotes_table.c.org_id == _tenant_uuid(org_id), quotes_table.c.id == _uuid(quote_id))
+            .where(
+                quotes_table.c.org_id == _tenant_uuid(org_id),
+                quotes_table.c.id == _uuid(quote_id),
+                quotes_table.c.version == version,
+            )
             .values(
                 stage=stage,
                 stage_meta=stage_meta,
@@ -1186,11 +1415,12 @@ class PostgresRepository:
             row = conn.execute(stmt).first()
         return self._quote_from_row(row) if row else None
 
-    def create_job(self, org_id: str, source_type: str, quote_id: str | None = None) -> JobRead:
+    def create_job(self, org_id: str, source_type: str, quote_id: str | None = None, created_by: str = "") -> JobRead:
         now = _now()
         values = {
             "id": uuid.uuid4(),
             "org_id": _tenant_uuid(org_id),
+            "created_by": _tenant_uuid(created_by) if created_by else None,
             "quote_id": _uuid(quote_id) if quote_id else None,
             "status": "queued",
             "source_type": source_type,

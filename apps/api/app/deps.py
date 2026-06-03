@@ -14,6 +14,7 @@ class CurrentUser:
     user_id: str
     role: str = "sales"
     name: str = ""
+    email: str = ""
 
 
 def get_current_user(
@@ -35,6 +36,7 @@ def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     role = "sales"
     name = ""
+    email = ""
     try:
         from app.db import repo
 
@@ -48,8 +50,10 @@ def get_current_user(
             None,
         )
         if app_user:
+            user_id = app_user.id
             role = app_user.role
             name = app_user.name
+            email = app_user.email
         elif not header_fallback_allowed:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     except Exception:
@@ -62,6 +66,7 @@ def get_current_user(
         user_id=user_id,
         role=role,
         name=name or (x_user_name or "").strip(),
+        email=email,
     )
 
 

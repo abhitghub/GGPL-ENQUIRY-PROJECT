@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, ClipboardList, FileSpreadsheet, Layers3, ShoppingCart, Trash2 } from "lucide-react";
+import { ArrowRight, Trash2 } from "lucide-react";
 
 import { Quote } from "@/lib/api";
 import type { AppUser } from "@/lib/auth/users";
@@ -31,10 +31,11 @@ export function QuoteSummaryRow({
 }) {
   const isFinalSection = section === "final";
   const isPoSection = section === "po";
-  const isMaterialSection = section === "material";
   const showsCommercialValue = isFinalSection || isPoSection;
   const rowQuality = evaluateQuoteQuality(quote, quote.items, quote.quote_data ?? {});
-  const highRisks = rowQuality.risks.filter((risk) => risk.severity === "high").length;
+  const highRisks = typeof quote.high_risk_count === "number"
+    ? quote.high_risk_count
+    : rowQuality.risks.filter((risk) => risk.severity === "high").length;
   const reviewCount = quote.n_missing + quote.n_check;
   const nextAction = quoteNextAction(quote);
   const priority = String(quote.stage_meta?.priority || "normal");
@@ -51,42 +52,35 @@ export function QuoteSummaryRow({
 
   return (
     <TableRow className="cursor-pointer hover:bg-muted/40" onClick={() => onOpen(quote)}>
-      <TableCell className="py-2">
-        <div className="flex items-center gap-2">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border bg-background">
-            {isPoSection ? <ShoppingCart className="h-4 w-4" /> : isFinalSection ? <FileSpreadsheet className="h-4 w-4" /> : isMaterialSection ? <Layers3 className="h-4 w-4" /> : <ClipboardList className="h-4 w-4" />}
+      <TableCell className="py-1.5">
+        <div className="min-w-0 max-w-[360px]">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="font-mono text-xs font-semibold text-primary">{quote.quote_no || "enq-pending"}</span>
+            {priority !== "normal" ? <Badge variant={priority === "urgent" || priority === "high" ? "warning" : "outline"}>{priority}</Badge> : null}
           </div>
-          <div className="min-w-0 max-w-[320px]">
-            <div className="flex min-w-0 items-center gap-2">
-              <span className="font-mono text-sm font-semibold text-primary">{quote.quote_no || "enq-pending"}</span>
-              {priority !== "normal" ? <Badge variant={priority === "urgent" || priority === "high" ? "warning" : "outline"}>{priority}</Badge> : null}
-            </div>
-            <div className="truncate text-sm font-medium">{quote.customer || quote.custom_label || "No customer"}</div>
-            {quote.project_ref ? <div className="truncate text-xs text-muted-foreground">{quote.project_ref}</div> : null}
-            <div className="truncate text-xs text-muted-foreground">Sales rep: {salesRepLabel}</div>
-          </div>
+          <div className="truncate text-sm font-medium">{quote.customer || quote.custom_label || "No customer"}</div>
+          <div className="truncate text-xs text-muted-foreground">{[quote.project_ref, salesRepLabel].filter(Boolean).join(" / ")}</div>
         </div>
       </TableCell>
-      <TableCell className="py-2">
-        <div className="space-y-1">
+      <TableCell className="py-1.5">
+        <div>
           <div className="text-sm font-medium">{workflowLabel}</div>
           <div className="text-xs text-muted-foreground">{quoteAgeDays(quote)}d {ageLabel}</div>
         </div>
       </TableCell>
-      <TableCell className="py-2">
-        <div className="flex flex-wrap gap-1">
-          <Badge variant={reviewCount ? "outline" : "secondary"}>{reviewCount ? `${reviewCount} review` : "Ready"}</Badge>
-          {highRisks ? <Badge variant="warning">{highRisks} risk</Badge> : null}
-          <Badge variant="muted">{rowQuality.score}% RFQ</Badge>
+      <TableCell className="py-1.5">
+        <div className="text-sm">{reviewCount ? `${reviewCount} review` : "Ready"}</div>
+        <div className="text-xs text-muted-foreground">
+          {rowQuality.score}% RFQ{highRisks ? ` / ${highRisks} risk` : ""}
         </div>
       </TableCell>
-      <TableCell className="py-2">
+      <TableCell className="py-1.5">
         <div className="text-sm">{quote.n_items} item{quote.n_items === 1 ? "" : "s"}</div>
         {showsCommercialValue ? <div className="font-medium">{formatCurrencyValue(quoteEstimatedValue(quote))}</div> : null}
         {nextAction ? <div className="max-w-48 truncate text-xs text-muted-foreground">{nextAction}</div> : null}
       </TableCell>
-      <TableCell className="py-2 text-sm text-muted-foreground">{new Date(quote.updated_at).toLocaleString("en-GB", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</TableCell>
-      <TableCell className="py-2 text-right">
+      <TableCell className="py-1.5 text-sm text-muted-foreground">{new Date(quote.updated_at).toLocaleString("en-GB", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</TableCell>
+      <TableCell className="py-1.5 text-right">
         <div className="flex justify-end gap-1">
           <Button
             variant="ghost"

@@ -74,6 +74,7 @@ export const actionCapabilities = [
 export const allCapabilities = [...pageCapabilities, ...actionCapabilities];
 
 const appRoles: AppRole[] = ["admin", "management", "approver", "sales", "estimation", "technical", "planning", "material_planner", "purchase", "viewer"];
+const ACCESS_SETTINGS_STORAGE_KEY = "gq-access-settings";
 
 function permissions(enabled: AppCapability[]): Record<AppCapability, boolean> {
   const allowed = new Set(enabled);
@@ -162,11 +163,20 @@ export function normalizeAccessSettings(settings?: Partial<AccessSettings> | nul
 }
 
 export function getAccessSettings(): AccessSettings {
-  return defaultAccessSettings;
+  if (typeof window === "undefined") return defaultAccessSettings;
+  try {
+    const stored = window.localStorage.getItem(ACCESS_SETTINGS_STORAGE_KEY);
+    return stored ? normalizeAccessSettings(JSON.parse(stored) as Partial<AccessSettings>) : defaultAccessSettings;
+  } catch {
+    return defaultAccessSettings;
+  }
 }
 
 export function saveAccessSettings(settings: Partial<AccessSettings>) {
-  normalizeAccessSettings(settings);
+  const normalized = normalizeAccessSettings(settings);
+  if (typeof window !== "undefined") {
+    window.localStorage.setItem(ACCESS_SETTINGS_STORAGE_KEY, JSON.stringify(normalized));
+  }
   notifyChanged();
 }
 

@@ -3,7 +3,7 @@ import { HistoryClient } from "./history-client";
 
 export default function HistoryPage() {
   return (
-    <AppShell activePath="/history" title="Activity History" breadcrumb="Workspace / Activity History">
+    <AppShell activePath="/history" title="Reports" breadcrumb="More / Reports">
       <HistoryClient />
     </AppShell>
   );

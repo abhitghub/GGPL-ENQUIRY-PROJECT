@@ -3,7 +3,7 @@ import { DashboardClient } from "./dashboard-client";
 
 export default function DashboardPage() {
   return (
-    <AppShell activePath="/dashboard" title="Dashboard" breadcrumb="Workspace">
+    <AppShell activePath="/dashboard" title="My work" breadcrumb="Start">
       <DashboardClient />
     </AppShell>
   );

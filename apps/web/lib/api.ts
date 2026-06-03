@@ -64,6 +64,11 @@ export type Quote = {
   n_check: number;
   n_missing: number;
   n_regret: number;
+  estimated_quote_value?: number;
+  high_risk_count?: number;
+  has_clarification?: boolean;
+  next_action?: string;
+  opportunity_id?: string;
 };
 
 export type VendorEnquiryStatus = "draft" | "sent" | "replied" | "selected" | "rejected";
@@ -158,6 +163,31 @@ export type DashboardMetrics = {
   due_today?: number;
   open_quote_value?: number;
   generated_at?: string;
+};
+
+export type CustomerRecord = {
+  id: string;
+  name: string;
+  address_line1: string;
+  address_line2: string;
+  city: string;
+  state: string;
+  pin_code: string;
+  country: string;
+  contact_name: string;
+  designation: string;
+  email: string;
+  phone: string;
+  gst_no: string;
+  default_currency: string;
+  payment_terms: string;
+  delivery_terms: string;
+  active: boolean;
+};
+
+export type BusinessMasterData = {
+  customers: CustomerRecord[];
+  epc_names: string[];
 };
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
@@ -273,6 +303,13 @@ async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<R
 export async function listQuotes(): Promise<Quote[]> {
   return parse<Quote[]>(
     await apiFetch(`${API_BASE}/api/v1/quotes?summary=true`, { headers: headers({ "Content-Type": "application/json" }) }),
+  );
+}
+
+export async function searchQuotes(query: string, limit = 8): Promise<Quote[]> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  return parse<Quote[]>(
+    await apiFetch(`${API_BASE}/api/v1/quotes/search?${params.toString()}`, { headers: headers({ "Content-Type": "application/json" }) }),
   );
 }
 
@@ -487,6 +524,20 @@ export async function getAccessSettingsRemote(): Promise<AccessSettings> {
 export async function putAccessSettingsRemote(payload: AccessSettings): Promise<AccessSettings> {
   return parse<AccessSettings>(
     await apiFetch(`${API_BASE}/api/v1/access-settings`, {
+      method: "PUT",
+      headers: headers(),
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export async function getBusinessMasterData(): Promise<BusinessMasterData> {
+  return parse<BusinessMasterData>(await apiFetch(`${API_BASE}/api/v1/customers`, { headers: headers() }));
+}
+
+export async function putBusinessMasterData(payload: BusinessMasterData): Promise<BusinessMasterData> {
+  return parse<BusinessMasterData>(
+    await apiFetch(`${API_BASE}/api/v1/customers`, {
       method: "PUT",
       headers: headers(),
       body: JSON.stringify(payload),

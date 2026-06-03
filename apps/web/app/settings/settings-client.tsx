@@ -1,18 +1,19 @@
 "use client";
 import * as React from "react";
-import { Bell, CheckCircle2, Edit3, KeyRound, MoreVertical, Plus, ShieldCheck, SlidersHorizontal, Trash2, UserCog, X } from "lucide-react";
+import { AlertCircle, Bell, Building2, CheckCircle2, Edit3, KeyRound, Loader2, Lock, MoreVertical, Plus, ShieldCheck, SlidersHorizontal, Trash2, UserCog, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PageIntro } from "@/components/app-shell/page-intro";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { createAppUser, deleteAppUser, getAccessSettingsRemote, getCurrentAppUserRemote, listAppUsers, loginAppUser, patchAppUser, putAccessSettingsRemote } from "@/lib/api";
+import { createAppUser, deleteAppUser, getAccessSettingsRemote, getBusinessMasterData, getCurrentAppUserRemote, listAppUsers, loginAppUser, patchAppUser, putAccessSettingsRemote, putBusinessMasterData, type BusinessMasterData, type CustomerRecord } from "@/lib/api";
 import { ACCESS_SETTINGS_CHANGED_EVENT, AccessSettings, AppCapability, actionCapabilities, canRole, capabilityLabels, getAccessSettings, normalizeAccessSettings, pageCapabilities, saveAccessSettings } from "@/lib/auth/access-control";
 import { AppRole, AppUser, canManageUsers, getCurrentAppUser, roleLabels, setCurrentAppUser, USERS_CHANGED_EVENT } from "@/lib/auth/users";
 
@@ -27,6 +28,13 @@ const blankUser: AppUser = {
   active: true,
 };
 
+const blankCustomer: CustomerRecord = {
+  id: "", name: "", address_line1: "", address_line2: "", city: "", state: "", pin_code: "", country: "",
+  contact_name: "", designation: "", email: "", phone: "", gst_no: "", default_currency: "INR", payment_terms: "", delivery_terms: "", active: true,
+};
+
+type AccessSaveState = "idle" | "saving" | "saved" | "error";
+
 export function SettingsClient() {
   const [users, setUsers] = React.useState<AppUser[]>([]);
   const [currentUser, setCurrentUserState] = React.useState(() => getCurrentAppUser());
@@ -36,8 +44,31 @@ export function SettingsClient() {
   const [addUserOpen, setAddUserOpen] = React.useState(false);
   const [editingUser, setEditingUser] = React.useState<AppUser | null>(null);
   const [accessSettings, setAccessSettings] = React.useState<AccessSettings>(() => getAccessSettings());
+  const confirmedAccessSettings = React.useRef(accessSettings);
+  const [accessSaveState, setAccessSaveState] = React.useState<AccessSaveState>("idle");
+  const [previewRole, setPreviewRole] = React.useState<AppRole>("sales");
   const [draftWithWhom, setDraftWithWhom] = React.useState("");
+  const [masterData, setMasterData] = React.useState<BusinessMasterData>({ customers: [], epc_names: [] });
+  const [draftCustomer, setDraftCustomer] = React.useState<CustomerRecord>(blankCustomer);
+  const [draftEpc, setDraftEpc] = React.useState("");
   const canManage = canManageUsers(currentUser.role);
+  const accessSavePending = accessSaveState === "saving";
+  const previewCapabilities = [...pageCapabilities, ...actionCapabilities]
+    .filter((capability) => canRole(previewRole, capability, accessSettings))
+    .map((capability) => capabilityLabels[capability]);
+
+  const confirmAccessSettings = React.useCallback((settings: AccessSettings, notify = false) => {
+    const normalized = normalizeAccessSettings(settings);
+    confirmedAccessSettings.current = normalized;
+    if (notify) saveAccessSettings(normalized);
+    setAccessSettings(normalized);
+    return normalized;
+  }, []);
+
+  const reloadConfirmedAccessSettings = React.useCallback(async (notify = false) => {
+    const settings = await getAccessSettingsRemote();
+    return confirmAccessSettings(settings, notify);
+  }, [confirmAccessSettings]);
 
   React.useEffect(() => {
     getCurrentAppUserRemote()
@@ -54,17 +85,13 @@ export function SettingsClient() {
       .catch(() => {
         setUsers([]);
       });
-    getAccessSettingsRemote()
-      .then((settings) => {
-        const normalized = normalizeAccessSettings(settings);
-        saveAccessSettings(normalized);
-        setAccessSettings(normalized);
-      })
+    reloadConfirmedAccessSettings()
       .catch(() => setAccessSettings(getAccessSettings()));
+    getBusinessMasterData().then(setMasterData).catch(() => setMasterData({ customers: [], epc_names: [] }));
     const refresh = () => {
       listAppUsers().then(setUsers).catch(() => setUsers([]));
       setCurrentUserState(getCurrentAppUser());
-      setAccessSettings(getAccessSettings());
+      reloadConfirmedAccessSettings().catch(() => setAccessSettings(confirmedAccessSettings.current));
     };
     window.addEventListener(USERS_CHANGED_EVENT, refresh);
     window.addEventListener(ACCESS_SETTINGS_CHANGED_EVENT, refresh);
@@ -74,7 +101,33 @@ export function SettingsClient() {
       window.removeEventListener(ACCESS_SETTINGS_CHANGED_EVENT, refresh);
       window.removeEventListener("storage", refresh);
     };
-  }, []);
+  }, [reloadConfirmedAccessSettings]);
+
+  async function persistMasterData(next: BusinessMasterData, message: string) {
+    try {
+      const saved = await putBusinessMasterData(next);
+      setMasterData(saved);
+      toast.success(message);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not save master data");
+    }
+  }
+
+  function addCustomer() {
+    const name = draftCustomer.name.trim();
+    if (!name) return toast.error("Enter the customer name");
+    const id = draftCustomer.id.trim() || name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+    if (masterData.customers.some((row) => row.id === id)) return toast.error("Customer already exists");
+    void persistMasterData({ ...masterData, customers: [...masterData.customers, { ...draftCustomer, id, name }] }, "Customer added");
+    setDraftCustomer(blankCustomer);
+  }
+
+  function addEpc() {
+    const value = draftEpc.trim();
+    if (!value || masterData.epc_names.some((row) => row.toLowerCase() === value.toLowerCase())) return;
+    void persistMasterData({ ...masterData, epc_names: [...masterData.epc_names, value] }, "EPC option added");
+    setDraftEpc("");
+  }
 
   function persistUsers(next: AppUser[]) {
     setUsers(next);
@@ -89,18 +142,31 @@ export function SettingsClient() {
       .catch((error) => toast.error(error instanceof Error ? error.message : "Could not update user"));
   }
 
-  function persistAccess(next: AccessSettings, message = "Access settings saved") {
+  async function persistAccess(next: AccessSettings, message = "Access settings saved") {
+    if (accessSavePending) return;
+    const previous = confirmedAccessSettings.current;
     const normalized = normalizeAccessSettings(next);
-    saveAccessSettings(normalized);
     setAccessSettings(normalized);
-    putAccessSettingsRemote(normalized)
-      .then((saved) => {
-        const serverSettings = normalizeAccessSettings(saved);
-        saveAccessSettings(serverSettings);
-        setAccessSettings(serverSettings);
-        toast.success(message);
-      })
-      .catch((error) => toast.error(error instanceof Error ? error.message : "Could not save access settings"));
+    setAccessSaveState("saving");
+    try {
+      const saved = await putAccessSettingsRemote(normalized);
+      try {
+        await reloadConfirmedAccessSettings(true);
+      } catch {
+        confirmAccessSettings(saved, true);
+      }
+      setAccessSaveState("saved");
+      toast.success(message);
+    } catch (error) {
+      setAccessSettings(previous);
+      try {
+        await reloadConfirmedAccessSettings();
+      } catch {
+        setAccessSettings(previous);
+      }
+      setAccessSaveState("error");
+      toast.error(error instanceof Error ? error.message : "Could not save access settings");
+    }
   }
 
   function addWithWhomOption() {
@@ -110,19 +176,20 @@ export function SettingsClient() {
       toast.error("Option already exists");
       return;
     }
-    persistAccess({ ...accessSettings, with_whom_options: [...accessSettings.with_whom_options, option] }, "With whom option added");
+    void persistAccess({ ...accessSettings, with_whom_options: [...accessSettings.with_whom_options, option] }, "With whom option added");
     setDraftWithWhom("");
   }
 
   function removeWithWhomOption(option: string) {
-    persistAccess({
+    void persistAccess({
       ...accessSettings,
       with_whom_options: accessSettings.with_whom_options.filter((value) => value !== option),
     }, "With whom option removed");
   }
 
   function updateRoleCapability(role: AppRole, capability: AppCapability, enabled: boolean) {
-    persistAccess({
+    setPreviewRole(role);
+    void persistAccess({
       ...accessSettings,
       role_permissions: {
         ...accessSettings.role_permissions,
@@ -208,6 +275,7 @@ export function SettingsClient() {
 
   return (
     <div className="grid gap-3 lg:grid-cols-2">
+      <PageIntro className="lg:col-span-2" title="Manage workspace settings" description="Maintain customer defaults, user accounts, and access rules used throughout the quotation workflow." />
       <Card>
         <CardHeader className="border-b px-4 py-3">
           <CardTitle className="flex items-center gap-2 text-base"><UserCog className="h-4 w-4" />Account</CardTitle>
@@ -245,10 +313,54 @@ export function SettingsClient() {
 
       <Card className="lg:col-span-2">
         <CardHeader className="border-b px-4 py-3">
+          <CardTitle className="flex items-center gap-2 text-base"><Building2 className="h-4 w-4" />Business master data</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4 p-3">
+          <div className="text-xs text-muted-foreground">Maintain repeated business details once. Enquiry and quotation forms use these values as selectable defaults while keeping manual override available.</div>
+          {!canManage ? <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">Only admin users can edit master data.</div> : null}
+          {canManage ? (
+            <div className="grid gap-2 rounded-md border p-3 md:grid-cols-3">
+              <Input placeholder="Customer name *" value={draftCustomer.name} onChange={(event) => setDraftCustomer({ ...draftCustomer, name: event.target.value })} />
+              <Input placeholder="Address line 1" value={draftCustomer.address_line1} onChange={(event) => setDraftCustomer({ ...draftCustomer, address_line1: event.target.value })} />
+              <Input placeholder="City" value={draftCustomer.city} onChange={(event) => setDraftCustomer({ ...draftCustomer, city: event.target.value })} />
+              <Input placeholder="Country" value={draftCustomer.country} onChange={(event) => setDraftCustomer({ ...draftCustomer, country: event.target.value })} />
+              <Input placeholder="Contact person" value={draftCustomer.contact_name} onChange={(event) => setDraftCustomer({ ...draftCustomer, contact_name: event.target.value })} />
+              <Input placeholder="Designation" value={draftCustomer.designation} onChange={(event) => setDraftCustomer({ ...draftCustomer, designation: event.target.value })} />
+              <Input placeholder="Email" value={draftCustomer.email} onChange={(event) => setDraftCustomer({ ...draftCustomer, email: event.target.value })} />
+              <Input placeholder="Phone" value={draftCustomer.phone} onChange={(event) => setDraftCustomer({ ...draftCustomer, phone: event.target.value })} />
+              <Input placeholder="GST number" value={draftCustomer.gst_no} onChange={(event) => setDraftCustomer({ ...draftCustomer, gst_no: event.target.value })} />
+              <Input placeholder="Payment terms default" value={draftCustomer.payment_terms} onChange={(event) => setDraftCustomer({ ...draftCustomer, payment_terms: event.target.value })} />
+              <Input placeholder="Delivery terms default" value={draftCustomer.delivery_terms} onChange={(event) => setDraftCustomer({ ...draftCustomer, delivery_terms: event.target.value })} />
+              <Button size="sm" onClick={addCustomer}><Plus className="h-4 w-4" />Add customer</Button>
+            </div>
+          ) : null}
+          <div className="overflow-auto rounded-md border">
+            <table className="w-full min-w-[820px] text-sm">
+              <thead className="bg-muted/50 text-left"><tr><th className="px-3 py-2">Customer</th><th className="px-3 py-2">Address</th><th className="px-3 py-2">Contact</th><th className="px-3 py-2">Commercial defaults</th><th /></tr></thead>
+              <tbody>{masterData.customers.map((customer) => <tr key={customer.id} className="border-t">
+                <td className="px-3 py-2 font-medium">{customer.name}</td><td className="px-3 py-2">{[customer.address_line1, customer.city, customer.country].filter(Boolean).join(", ") || "-"}</td>
+                <td className="px-3 py-2">{customer.contact_name || customer.email || customer.phone || "-"}</td><td className="px-3 py-2">{customer.payment_terms || customer.delivery_terms || "-"}</td>
+                <td className="px-3 py-2 text-right">{canManage ? <Button variant="ghost" size="sm" onClick={() => void persistMasterData({ ...masterData, customers: masterData.customers.filter((row) => row.id !== customer.id) }, "Customer removed")}><Trash2 className="h-4 w-4" /></Button> : null}</td>
+              </tr>)}</tbody>
+            </table>
+          </div>
+          {canManage ? <div className="flex gap-2"><Input placeholder="Add EPC / project company preset" value={draftEpc} onChange={(event) => setDraftEpc(event.target.value)} /><Button size="sm" onClick={addEpc}><Plus className="h-4 w-4" />Add EPC</Button></div> : null}
+          <div className="flex flex-wrap gap-2">{masterData.epc_names.map((epc) => <Badge key={epc} variant="secondary">{epc}{canManage ? <button className="ml-1" onClick={() => void persistMasterData({ ...masterData, epc_names: masterData.epc_names.filter((row) => row !== epc) }, "EPC option removed")}><X className="h-3 w-3" /></button> : null}</Badge>)}</div>
+        </CardContent>
+      </Card>
+
+      <Card className="lg:col-span-2">
+        <CardHeader className="flex flex-row items-center justify-between gap-3 border-b px-4 py-3">
           <CardTitle className="flex items-center gap-2 text-base">
             <SlidersHorizontal className="h-4 w-4" />
             Admin access controls
           </CardTitle>
+          <div className="text-right" aria-live="polite">
+            {accessSaveState === "idle" && <span className="text-xs text-muted-foreground">Ready to edit</span>}
+            {accessSaveState === "saving" && <span className="flex items-center gap-1 text-xs text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" />Saving...</span>}
+            {accessSaveState === "saved" && <span className="flex items-center gap-1 text-xs text-green-700 dark:text-green-300"><CheckCircle2 className="h-3.5 w-3.5" />Saved</span>}
+            {accessSaveState === "error" && <span className="flex items-center gap-1 text-xs text-red-700 dark:text-red-300"><AlertCircle className="h-3.5 w-3.5" />Could not save. Server settings restored.</span>}
+          </div>
         </CardHeader>
         <CardContent className="space-y-4 p-3">
           {!canManage && (
@@ -264,8 +376,8 @@ export function SettingsClient() {
             </div>
             {canManage && (
               <div className="mb-3 grid gap-2 md:grid-cols-[minmax(0,1fr)_auto]">
-                <Input value={draftWithWhom} onChange={(event) => setDraftWithWhom(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") addWithWhomOption(); }} />
-                <Button size="sm" onClick={addWithWhomOption}>
+                <Input value={draftWithWhom} onChange={(event) => setDraftWithWhom(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") addWithWhomOption(); }} disabled={accessSavePending} />
+                <Button size="sm" onClick={addWithWhomOption} disabled={accessSavePending}>
                   <Plus className="h-4 w-4" />
                   Add option
                 </Button>
@@ -276,7 +388,7 @@ export function SettingsClient() {
                 <Badge key={option} variant="secondary" className="gap-1.5 rounded-md py-1">
                   {option}
                   {canManage && (
-                    <button type="button" className="rounded-sm hover:bg-background/60" onClick={() => removeWithWhomOption(option)} aria-label={`Remove ${option}`}>
+                    <button type="button" className="rounded-sm hover:bg-background/60 disabled:opacity-50" onClick={() => removeWithWhomOption(option)} disabled={accessSavePending} aria-label={`Remove ${option}`}>
                       <X className="h-3 w-3" />
                     </button>
                   )}
@@ -298,12 +410,20 @@ export function SettingsClient() {
               <tbody>
                 {Object.entries(roleLabels).map(([role, label]) => (
                   <tr key={role} className="border-t">
-                    <td className="sticky left-0 bg-background px-3 py-2 font-medium">{label}</td>
+                    <td className="sticky left-0 bg-background px-3 py-2 font-medium">
+                      <div>{label}</div>
+                      {role === "admin" && (
+                        <div className="mt-1 flex items-center gap-1 text-xs font-normal text-muted-foreground">
+                          <Lock className="h-3 w-3" />
+                          Full access (locked)
+                        </div>
+                      )}
+                    </td>
                     {[...pageCapabilities, ...actionCapabilities].map((capability) => (
                       <td key={`${role}-${capability}`} className="px-2 py-2 text-center">
                         <Switch
                           checked={canRole(role as AppRole, capability, accessSettings)}
-                          disabled={!canManage || role === "admin"}
+                          disabled={!canManage || role === "admin" || accessSavePending}
                           onCheckedChange={(checked) => updateRoleCapability(role as AppRole, capability, checked)}
                         />
                       </td>
@@ -312,6 +432,24 @@ export function SettingsClient() {
                 ))}
               </tbody>
             </table>
+          </div>
+
+          <div className="rounded-md border bg-muted/20 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="text-sm font-medium">Permission preview</div>
+                <div className="text-xs text-muted-foreground">Check what a configured role can open or change.</div>
+              </div>
+              <Select value={previewRole} onValueChange={(value) => setPreviewRole(value as AppRole)}>
+                <SelectTrigger className="w-48" aria-label="Preview role permissions"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {Object.entries(roleLabels).map(([role, label]) => <SelectItem key={role} value={role}>{label}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="mt-3 text-sm">
+              Users with this role can access: <span className="text-muted-foreground">{previewCapabilities.join(", ") || "No configured pages or actions"}</span>
+            </div>
           </div>
         </CardContent>
       </Card>

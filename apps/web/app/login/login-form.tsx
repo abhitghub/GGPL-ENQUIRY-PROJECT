@@ -41,11 +41,12 @@ export function LoginForm() {
   return (
     <Card className="w-full">
       <CardHeader>
-        <div className="text-sm font-medium text-primary">Goodrich Gasket Pvt. Ltd.</div>
+        <div className="text-sm font-medium">Goodrich Gasket Pvt. Ltd.</div>
         <CardTitle className="flex items-center gap-2">
           <LockKeyhole className="h-5 w-5" />
           Quote workspace sign in
         </CardTitle>
+        <p className="text-sm text-muted-foreground">Sign in to continue your assigned enquiry and quotation work.</p>
       </CardHeader>
       <CardContent>
         <form onSubmit={handlePasswordAuth} className="space-y-4">

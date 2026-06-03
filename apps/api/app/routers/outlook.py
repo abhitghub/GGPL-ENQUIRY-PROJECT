@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.config import Settings, get_settings
-from app.deps import CurrentUser, get_current_user
+from app.deps import CurrentUser, get_current_user, require_capability
 
 
 router = APIRouter(prefix="/api/v1/outlook", tags=["outlook"])
@@ -101,6 +101,7 @@ async def resolve_message(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ) -> OutlookLinkedMessage:
+    require_capability(user, "edit_sales_details")
     mailbox = _mailbox(payload.mailbox_user, settings)
     message_id = payload.message_id.strip()
     if not message_id:
@@ -123,6 +124,7 @@ async def thread_messages(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ) -> list[OutlookLinkedMessage]:
+    require_capability(user, "edit_sales_details")
     mailbox = _mailbox(payload.mailbox_user, settings)
     conversation_id = payload.conversation_id.strip()
     if not conversation_id:

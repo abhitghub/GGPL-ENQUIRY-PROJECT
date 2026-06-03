@@ -81,6 +81,25 @@ def test_quote_workflow_exports_and_tenant_isolation():
         json={"name": "Estimator", "email": estimator_id, "role": "estimation", "active": True},
     )
     assert estimator_created.status_code == 201
+    hidden_locked = client.get(
+        f"/api/v1/quotes/{locked.json()['id']}",
+        headers={"X-Org-Id": org_id, "X-User-Id": estimator_id},
+    )
+    assert hidden_locked.status_code == 404
+    assigned_locked = client.patch(
+        f"/api/v1/quotes/{locked.json()['id']}",
+        headers=headers,
+        json={
+            "stage_meta": {
+                **locked.json()["stage_meta"],
+                "owner_id": estimator_id,
+                "owner_name": "Estimator",
+                "owner_email": estimator_id,
+                "owner_role": "estimation",
+            },
+        },
+    )
+    assert assigned_locked.status_code == 200
     locked_pdf = client.post(
         f"/api/v1/quotes/{locked.json()['id']}/exports/pdf",
         headers={"X-Org-Id": org_id, "X-User-Id": estimator_id},
@@ -110,6 +129,30 @@ def test_quote_workflow_exports_and_tenant_isolation():
     assert xlsx.status_code == 200
     assert "spreadsheetml" in xlsx.json()["content_type"]
 
+    review = client.post(
+        f"/api/v1/quotes/{quote_id}/stage",
+        headers=headers,
+        json={"stage": "review", "reason": "reviewed"},
+    )
+    assert review.status_code == 200
+    waived = client.patch(
+        f"/api/v1/quotes/{quote_id}",
+        headers=headers,
+        json={"stage_meta": {**review.json()["stage_meta"], "technical_review_waived": True}},
+    )
+    assert waived.status_code == 200
+    prepared = client.post(
+        f"/api/v1/quotes/{quote_id}/stage",
+        headers=headers,
+        json={"stage": "quote_prep", "reason": "prepared"},
+    )
+    assert prepared.status_code == 200
+    sent = client.post(
+        f"/api/v1/quotes/{quote_id}/stage",
+        headers=headers,
+        json={"stage": "sent", "reason": "sent"},
+    )
+    assert sent.status_code == 200
     advanced = client.post(
         f"/api/v1/quotes/{quote_id}/stage",
         headers=headers,

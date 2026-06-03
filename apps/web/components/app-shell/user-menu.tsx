@@ -64,6 +64,10 @@ export function UserMenu() {
           <div className="text-xs font-normal text-muted-foreground">{roleLabels[user.role]}</div>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+          Environment: Local workspace
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => router.push("/settings")}>
           <Settings className="mr-2 h-4 w-4" />
           Settings

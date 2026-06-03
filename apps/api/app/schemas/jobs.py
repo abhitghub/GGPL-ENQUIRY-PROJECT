@@ -25,6 +25,7 @@ class ExtractionAccepted(BaseModel):
 class JobRead(BaseModel):
     id: str
     org_id: str
+    created_by: str = ""
     status: JobStatus
     source_type: str
     quote_id: str | None = None

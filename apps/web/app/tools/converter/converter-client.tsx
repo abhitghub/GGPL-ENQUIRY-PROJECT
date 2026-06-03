@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { convertUnits } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PageIntro } from "@/components/app-shell/page-intro";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -107,12 +108,13 @@ function Panel({ group }: { group: (typeof groups)[keyof typeof groups] }) {
 
 export function ConverterClient() {
   return (
-    <Tabs defaultValue="length" className="space-y-3">
-      <div className="rounded-lg border bg-card p-3 shadow-sm">
-        <TabsList className="flex h-auto flex-wrap justify-start">
+    <div className="space-y-3">
+      <PageIntro title="Quick conversion" description="Convert common engineering units and copy the result." />
+      <Tabs defaultValue="length" className="space-y-3">
+      <div className="overflow-x-auto border-b">
+        <TabsList className="flex h-auto min-w-max justify-start">
         {Object.entries(groups).map(([key, group]) => (
-          <TabsTrigger key={key} value={key} className="gap-2">
-            <Calculator className="h-4 w-4" />
+          <TabsTrigger key={key} value={key}>
             {group.title}
           </TabsTrigger>
         ))}
@@ -123,6 +125,7 @@ export function ConverterClient() {
           <Panel group={group} />
         </TabsContent>
       ))}
-    </Tabs>
+      </Tabs>
+    </div>
   );
 }

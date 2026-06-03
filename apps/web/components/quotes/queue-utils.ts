@@ -4,6 +4,7 @@ import { evaluateQuoteQuality } from "./quality-utils";
 import { getString, hasText, itemHasMaterial, itemHasSize } from "./item-validation";
 
 const HIGH_VALUE_THRESHOLD = 500000;
+const OPEN_CLARIFICATION_STATUSES = new Set(["required", "drafted", "requested"]);
 
 export type DueState = "none" | "future" | "today" | "delayed";
 
@@ -35,6 +36,7 @@ export function quoteDueState(quote: Quote): DueState {
 }
 
 export function quoteEstimatedValue(quote: Quote): number {
+  if (typeof quote.estimated_quote_value === "number") return quote.estimated_quote_value;
   const metaValue = toNumber(quote.stage_meta?.estimated_quote_value, NaN);
   if (Number.isFinite(metaValue) && metaValue > 0) return metaValue;
   const unitPrices = Array.isArray(quote.quote_data?.unit_prices) ? quote.quote_data.unit_prices : [];
@@ -45,24 +47,29 @@ export function quoteEstimatedValue(quote: Quote): number {
 }
 
 export function quoteNextAction(quote: Quote): string {
-  const explicit = getString(quote.stage_meta?.next_action).trim();
+  const explicit = getString(quote.next_action || quote.stage_meta?.next_action).trim();
   if (explicit) return explicit;
   const quality = evaluateQuoteQuality(quote, quote.items, quote.quote_data ?? {});
   const due = quoteDueState(quote);
-  if (quote.stage_meta?.clarification_status === "required") return "Resolve clarification";
-  if (quality.risks.some((risk) => risk.severity === "high")) return "Technical review";
-  if (quote.stage === "initial" || quote.stage === "review") return "";
-  if (quote.stage === "quote_prep" || quote.stage === "repricing") return "Prepare quotation";
-  if (quote.stage === "sent") return "Follow up customer";
-  if (due === "delayed") return "Recover delay";
-  return "Monitor";
+  let action = "Monitor";
+  if (quoteHasClarification(quote)) action = quote.stage_meta?.clarification_status === "requested" ? "Follow up customer clarification" : "Resolve clarification";
+  else if (quality.risks.some((risk) => risk.severity === "high")) action = "Technical review";
+  else if (!quote.items.length && quote.stage === "initial") action = "Add customer enquiry";
+  else if (quote.stage_meta?.material_plan_stale === true) action = "Recalculate material needed";
+  else if (quote.stage_meta?.material_planning_enabled === true && (quote.stage === "initial" || quote.stage === "review")) action = "Plan material";
+  else if (quote.stage === "initial" || quote.stage === "review") action = "Review items";
+  else if (quote.stage === "quote_prep" || quote.stage === "repricing") action = "Prepare quotation";
+  else if (quote.stage === "sent") action = "Follow up customer";
+  return due === "delayed" && action !== "Monitor" ? `Overdue: ${action}` : action;
 }
 
 export function quoteHasClarification(quote: Quote): boolean {
-  return quote.stage_meta?.clarification_status === "required" || quote.items.some((item) => hasText(item.clarification_note));
+  if (typeof quote.has_clarification === "boolean") return quote.has_clarification;
+  return OPEN_CLARIFICATION_STATUSES.has(getString(quote.stage_meta?.clarification_status)) || quote.items.some((item) => hasText(item.clarification_note));
 }
 
 export function quoteIsHighRisk(quote: Quote): boolean {
+  if (typeof quote.high_risk_count === "number") return quote.high_risk_count > 0;
   return evaluateQuoteQuality(quote, quote.items, quote.quote_data ?? {}).risks.some((risk) => risk.severity === "high");
 }
 

@@ -4,7 +4,7 @@ import os
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.deps import CurrentUser, get_current_user
+from app.deps import CurrentUser, get_current_user, require_capability
 from app.schemas.chat import ChatCompletionRequest, ChatCompletionResponse, ChatMessage
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
@@ -21,6 +21,7 @@ def chat_completion(
     payload: ChatCompletionRequest,
     _user: CurrentUser = Depends(get_current_user),
 ) -> ChatCompletionResponse:
+    require_capability(_user, "view_doc_assistant")
     key = (payload.api_key or os.environ.get("OPENAI_API_KEY") or "").strip()
     if not key:
         raise HTTPException(status_code=400, detail="OPENAI_API_KEY is required")
