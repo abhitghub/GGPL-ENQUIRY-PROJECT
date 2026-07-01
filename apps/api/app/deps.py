@@ -25,7 +25,9 @@ def get_current_user(
 ) -> CurrentUser:
     settings = get_settings()
     claims = verify_session_token(request.cookies.get(settings.auth_cookie_name))
-    header_fallback_allowed = settings.environment.lower() not in {"prod", "production"}
+    # Login has been disabled for this deployment: always accept requests
+    # without a valid session cookie by falling back to header/default identity.
+    header_fallback_allowed = True
     if claims:
         org_id = claims.org_id
         user_id = claims.user_id
