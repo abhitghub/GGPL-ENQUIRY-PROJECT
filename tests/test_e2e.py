@@ -1,6 +1,7 @@
 import os
 import sys
 
+import pytest
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -15,7 +16,8 @@ from core.rules import apply_rules
 
 def test_e2e_customer_enquiry_through_smart_parse():
     api_key = os.environ.get('OPENAI_API_KEY', '').strip()
-    assert api_key, 'OPENAI_API_KEY must be present in .env or environment'
+    if not api_key:
+        pytest.skip('OPENAI_API_KEY not set — skipping live OpenAI integration test')
 
     client = OpenAI(api_key=api_key, timeout=180.0)
     enquiry = """

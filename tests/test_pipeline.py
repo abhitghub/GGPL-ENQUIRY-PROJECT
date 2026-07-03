@@ -19,7 +19,8 @@ from core.rules import STATUS_CHECK, STATUS_MISSING, STATUS_READY, apply_rules
 @pytest.fixture(scope='session')
 def openai_client():
     api_key = os.environ.get('OPENAI_API_KEY', '').strip()
-    assert api_key, 'OPENAI_API_KEY must be present in .env or environment'
+    if not api_key:
+        pytest.skip('OPENAI_API_KEY not set — skipping live OpenAI integration test')
     return OpenAI(api_key=api_key, timeout=180.0)
 
 
