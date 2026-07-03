@@ -4,7 +4,7 @@ from io import BytesIO
 
 from openpyxl import Workbook
 
-from packages.core.document_reader import _csv_to_text, _excel_to_text
+from core.document_reader import _csv_to_text, _excel_to_text
 
 
 def _save_workbook(wb: Workbook) -> bytes:
