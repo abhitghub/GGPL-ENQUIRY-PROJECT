@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 
 from app.auth_session import create_session_token, session_cookie_params
@@ -36,9 +38,21 @@ def me(user: CurrentUser = Depends(get_current_user)) -> AppUserRead:
         ),
         None,
     )
-    if not current:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-    return current
+    if current:
+        return current
+    # Login has been disabled: no stored user is required. Return the resolved
+    # default identity so the app can render without a real account.
+    now = datetime.now(timezone.utc)
+    return AppUserRead(
+        id=user.user_id,
+        org_id=user.org_id,
+        name=user.name or user.user_id,
+        email=user.email,
+        role=user.role,  # type: ignore[arg-type]
+        active=True,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 @router.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)

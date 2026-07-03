@@ -33,7 +33,9 @@ def get_current_user(
         user_id = claims.user_id
     elif header_fallback_allowed:
         org_id = (x_org_id or "local-org").strip() or "local-org"
-        user_id = (x_user_id or "local-user").strip() or "local-user"
+        # Login is disabled: default to the seeded admin so the single local
+        # identity has full access (users, access controls, business defaults).
+        user_id = (x_user_id or "shashnam").strip() or "shashnam"
     else:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     role = "sales"
