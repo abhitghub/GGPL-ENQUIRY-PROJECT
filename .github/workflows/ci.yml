@@ -59,9 +59,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute lowercase image ref
+        id: image
+        # GHCR/Docker require the image reference to be lowercase, but
+        # github.repository preserves the repo's original casing
+        # (abhitghub/GGPL-ENQUIRY-PROJECT). Lowercase it so the tag is valid.
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY,,}/gasket-quote-api:latest" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: apps/api/Dockerfile
           push: ${{ github.event_name == 'push' }}
-          tags: ghcr.io/${{ github.repository }}/gasket-quote-api:latest
+          tags: ${{ steps.image.outputs.ref }}
