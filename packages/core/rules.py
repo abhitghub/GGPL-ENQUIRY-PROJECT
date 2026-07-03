@@ -440,12 +440,18 @@ def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
 
     size_val = _size_nps_value(item.get('size_norm'))
 
-    ss_grades = {
-        value for value in (winding_mat, inner_ring, outer_ring)
+    # A specific SS grade is only propagated to generic "SS" components when it
+    # is stated on a *ring*. A grade on the winding alone is NOT pushed onto the
+    # rings: a generic "SS inner/outer ring" is a deliberate (cheaper) customer
+    # spec, not an omission, so e.g. "SS317L winding ... SS inner & outer ring"
+    # keeps the rings as SS. When a ring does carry the grade (e.g. an explicit
+    # "outer ring SS316"), the generic winding and sibling ring adopt it.
+    ring_ss_grades = {
+        value for value in (inner_ring, outer_ring)
         if isinstance(value, str) and re.fullmatch(r'SS\d{3}[A-Z]?', value)
     }
-    if len(ss_grades) == 1:
-        ss_grade = next(iter(ss_grades))
+    if len(ring_ss_grades) == 1:
+        ss_grade = next(iter(ring_ss_grades))
         if winding_mat == 'SS':
             winding_mat = ss_grade
             applied_defaults.append(f'generic SS winding resolved to {ss_grade} from same SPW row')
