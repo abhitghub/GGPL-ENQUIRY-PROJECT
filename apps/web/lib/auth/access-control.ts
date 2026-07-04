@@ -90,7 +90,7 @@ export const defaultAccessSettings: AccessSettings = {
       "create_enquiry", "edit_sales_details", "edit_workflow", "edit_line_items", "edit_quotation", "approve_quotes", "export_quotes",
     ]),
     approver: permissions([
-      "view_dashboard", "view_quotation", "view_purchase_orders", "view_history",
+      "view_dashboard", "view_enquiry", "view_quotation", "view_purchase_orders", "view_history",
       "edit_workflow", "edit_line_items", "edit_quotation", "approve_quotes", "export_quotes",
     ]),
     sales: permissions([

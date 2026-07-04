@@ -25,15 +25,15 @@ def get_current_user(
 ) -> CurrentUser:
     settings = get_settings()
     claims = verify_session_token(request.cookies.get(settings.auth_cookie_name))
-    # Login has been disabled for this deployment: always accept requests
-    # without a valid session cookie by falling back to header/default identity.
-    header_fallback_allowed = True
+    # When login is enabled, a valid session cookie is required; otherwise the
+    # app is open and falls back to header/default identity (LOGIN_ENABLED=false).
+    header_fallback_allowed = not settings.login_enabled
     if claims:
         org_id = claims.org_id
         user_id = claims.user_id
     elif header_fallback_allowed:
         org_id = (x_org_id or "local-org").strip() or "local-org"
-        # Login is disabled: default to the seeded admin so the single local
+        # Login disabled: default to the seeded admin so the single local
         # identity has full access (users, access controls, business defaults).
         user_id = (x_user_id or "shashnam").strip() or "shashnam"
     else:

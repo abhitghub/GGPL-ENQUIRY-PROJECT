@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     outlook_default_mailbox: str | None = Field(default=None, alias="OUTLOOK_DEFAULT_MAILBOX")
     auth_secret: str = Field(default="dev-only-change-me", alias="AUTH_SECRET")
     auth_cookie_name: str = Field(default="ggpl_session", alias="AUTH_COOKIE_NAME")
+    # When True, requests must carry a valid session cookie (real login).
+    # Set LOGIN_ENABLED=false to reopen the app without authentication.
+    login_enabled: bool = Field(default=True, alias="LOGIN_ENABLED")
 
     model_config = SettingsConfigDict(
         env_file=".env",

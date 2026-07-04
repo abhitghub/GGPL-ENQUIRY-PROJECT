@@ -155,6 +155,9 @@ app_settings_table = Table(
 )
 
 
+# Seed one login per team so admins can sign in immediately and then create/
+# rename real users in Settings > Users. Passwords are dev bootstrap defaults
+# (plain:) and should be changed after first login.
 DEFAULT_APP_USERS = [
     {
         "id": "shashnam",
@@ -162,10 +165,48 @@ DEFAULT_APP_USERS = [
         "designation": "Admin",
         "contact": "",
         "email": "shashnam@flosil.com",
-        # Local/dev bootstrap password for the seeded admin account.
-        # Existing local repositories are backfilled from this seed.
         "password_hash": "plain:shashnam",
         "role": "admin",
+        "active": True,
+    },
+    {
+        "id": "sales",
+        "name": "Sales User",
+        "designation": "Sales",
+        "contact": "",
+        "email": "sales@flosil.com",
+        "password_hash": "plain:sales123",
+        "role": "sales",
+        "active": True,
+    },
+    {
+        "id": "estimation",
+        "name": "Estimation User",
+        "designation": "Estimation",
+        "contact": "",
+        "email": "estimation@flosil.com",
+        "password_hash": "plain:estimation123",
+        "role": "estimation",
+        "active": True,
+    },
+    {
+        "id": "verifier",
+        "name": "Estimation Verifier",
+        "designation": "Estimation QA",
+        "contact": "",
+        "email": "verifier@flosil.com",
+        "password_hash": "plain:verify123",
+        "role": "approver",
+        "active": True,
+    },
+    {
+        "id": "technical",
+        "name": "Technical Review",
+        "designation": "Technical",
+        "contact": "",
+        "email": "technical@flosil.com",
+        "password_hash": "plain:technical123",
+        "role": "technical",
         "active": True,
     },
 ]
@@ -205,7 +246,7 @@ DEFAULT_ACCESS_SETTINGS = AccessSettings(
             "create_enquiry", "edit_sales_details", "edit_workflow", "edit_line_items", "edit_quotation", "approve_quotes", "export_quotes",
         ]),
         "approver": _permissions([
-            "view_dashboard", "view_quotation", "view_purchase_orders", "view_history",
+            "view_dashboard", "view_enquiry", "view_quotation", "view_purchase_orders", "view_history",
             "edit_workflow", "edit_line_items", "edit_quotation", "approve_quotes", "export_quotes",
         ]),
         "sales": _permissions([
@@ -421,14 +462,15 @@ class LocalJsonRepository:
             if key not in users:
                 users[key] = {"org_id": org_id, "created_at": now, "updated_at": now, **seed}
             else:
+                # Backfill only empty profile fields; never override an
+                # admin-edited role or active flag on an existing account.
                 users[key].update({
                     "name": users[key].get("name") or seed["name"],
                     "designation": users[key].get("designation") or seed["designation"],
                     "contact": users[key].get("contact") or seed["contact"],
                     "email": users[key].get("email") or seed["email"],
                     "password_hash": users[key].get("password_hash") or seed["password_hash"],
-                    "role": "admin",
-                    "active": True,
+                    "role": users[key].get("role") or seed["role"],
                     "updated_at": now,
                 })
 
@@ -982,6 +1024,8 @@ class PostgresRepository:
                     )
                 else:
                     data = row._mapping
+                    # Backfill only empty profile fields; preserve an
+                    # admin-edited role/active flag on the existing account.
                     conn.execute(
                         update(app_users_table)
                         .where(app_users_table.c.org_id == org_uuid, app_users_table.c.user_id == seed["id"])
@@ -991,8 +1035,7 @@ class PostgresRepository:
                             contact=data["contact"] or seed["contact"],
                             email=data["email"] or seed["email"],
                             password_hash=data["password_hash"] or seed["password_hash"],
-                            role="admin",
-                            active=True,
+                            role=data["role"] or seed["role"],
                             updated_at=now,
                         )
                     )
