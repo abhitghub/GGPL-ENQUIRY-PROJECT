@@ -21,6 +21,10 @@ export function ThemeToggle() {
       size="icon"
       aria-label="Toggle theme"
       onClick={() => setTheme(isDark ? "light" : "dark")}
+      // The rendered markup is deterministic; suppress the benign hydration
+      // warning that browser extensions cause by injecting attributes on
+      // buttons (e.g. Dark Reader, password managers adding fdprocessedid).
+      suppressHydrationWarning
     >
       {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
     </Button>
