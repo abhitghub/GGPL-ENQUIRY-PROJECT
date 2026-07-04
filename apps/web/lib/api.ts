@@ -279,12 +279,44 @@ function headers(extra?: HeadersInit): HeadersInit {
   };
 }
 
+// FastAPI's `detail` is not always a string: 422 validation errors return an
+// array of `{loc, msg, type}`, and some endpoints raise structured objects such
+// as `{message, blockers: [...]}` for blocked workflow transitions. Render any
+// of those into a readable message instead of letting them stringify to
+// "[object Object]".
+function errorDetail(body: unknown, fallback: string): string {
+  const detail = (body && typeof body === "object" ? (body as { detail?: unknown }).detail : undefined);
+  if (detail == null) return fallback;
+  if (typeof detail === "string") return detail || fallback;
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) =>
+        item && typeof item === "object" && "msg" in item
+          ? String((item as { msg: unknown }).msg)
+          : typeof item === "string"
+            ? item
+            : JSON.stringify(item),
+      )
+      .filter(Boolean);
+    return messages.length ? messages.join("; ") : fallback;
+  }
+  if (typeof detail === "object") {
+    const obj = detail as { message?: unknown; blockers?: unknown };
+    const message = typeof obj.message === "string" ? obj.message : "";
+    const blockers = Array.isArray(obj.blockers) ? obj.blockers.map((item) => String(item)) : [];
+    if (message && blockers.length) return `${message}: ${blockers.join("; ")}`;
+    if (message) return message;
+    if (blockers.length) return blockers.join("; ");
+    return JSON.stringify(detail);
+  }
+  return fallback;
+}
+
 async function parse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
     try {
-      const body = (await response.json()) as { detail?: string };
-      detail = body.detail ?? detail;
+      detail = errorDetail(await response.json(), detail);
     } catch {
       // Keep the HTTP status text.
     }
