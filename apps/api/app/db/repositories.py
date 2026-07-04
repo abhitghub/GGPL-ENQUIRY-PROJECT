@@ -251,7 +251,7 @@ DEFAULT_ACCESS_SETTINGS = AccessSettings(
         ]),
         "sales": _permissions([
             "view_dashboard", "view_enquiry", "view_quotation", "view_purchase_orders", "view_doc_assistant", "view_history",
-            "edit_sales_details",
+            "create_enquiry", "edit_sales_details",
         ]),
         "estimation": _permissions([
             "view_dashboard", "view_enquiry", "view_doc_assistant", "view_history",
