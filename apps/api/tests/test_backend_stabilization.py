@@ -127,12 +127,13 @@ def test_summary_patch_authorization_staleness_conflicts_and_search():
         json={"stage_meta": {**created.json()["stage_meta"], "owner_id": sales_id}},
     )
     assert assigned_to_sales.status_code == 200
-    denied_items = client.patch(
+    # Sales may edit enquiry line items (e.g. adding items from a customer email).
+    sales_items = client.patch(
         f"/api/v1/quotes/{quote_id}",
         headers=sales_headers,
-        json={"items": [{**item, "quantity": 4}]},
+        json={"items": [{**item, "quantity": 3}]},
     )
-    assert denied_items.status_code == 403
+    assert sales_items.status_code == 200
     allowed_sales = client.patch(
         f"/api/v1/quotes/{quote_id}",
         headers=sales_headers,

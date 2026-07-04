@@ -128,7 +128,15 @@ def _canonical_owner_metadata(stage_meta: dict, current: QuoteRead | None, user:
                 result.pop(key, None)
         return result
     owner_changed = owner_id != current_owner_id
-    if owner_changed and user.role != "admin":
+    actor_aliases = {
+        normalize_identity(user.user_id),
+        normalize_identity(user.email),
+        normalize_identity(user.name),
+    }
+    assigning_to_self = owner_id in actor_aliases
+    # Anyone may own (or keep owning) their own record; only assigning a record
+    # to a different user is restricted to admins.
+    if owner_changed and not assigning_to_self and user.role != "admin":
         raise HTTPException(status_code=403, detail="Only admin users can assign or reassign records")
     users = repo.list_app_users(user.org_id)
     owner = next(
@@ -161,7 +169,6 @@ def _normalize_create_payload(payload: QuoteCreate, user: CurrentUser) -> QuoteC
             raise HTTPException(status_code=403, detail="Only admin users can assign a new record to another user")
         if user.role != "admin":
             stage_meta["owner_id"] = user.user_id
-            return payload.model_copy(update={"stage_meta": stage_meta})
         stage_meta = _canonical_owner_metadata(stage_meta, None, user)
     return payload.model_copy(update={"stage_meta": stage_meta})
 
@@ -191,12 +198,13 @@ def _require_patch_capabilities(user: CurrentUser, current: QuoteRead, payload: 
             next_meta[key] = (current.stage_meta or {})[key]
         else:
             next_meta.pop(key, None)
+    # _canonical_owner_metadata already enforces owner-assignment permission
+    # (self allowed, cross-user reassignment admin-only) and derives owner_name/
+    # email/role from owner_id, so no extra blanket owner-field block is needed.
     next_meta = _canonical_owner_metadata(next_meta, current, user)
     changed_meta = _changed_keys(current.stage_meta or {}, next_meta)
     if changed_meta & EXTRACTION_SUMMARY_FIELDS:
         require_capability(user, "edit_line_items")
-    if changed_meta & OWNER_STAGE_META_FIELDS and user.role != "admin":
-        raise HTTPException(status_code=403, detail="Only admin users can assign or reassign records")
     if changed_meta & MATERIAL_PHASE1_FIELDS:
         require_capability(user, "edit_workflow")
     if changed_meta & MATERIAL_PHASE2_FIELDS:
