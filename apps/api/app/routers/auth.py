@@ -56,6 +56,18 @@ def me(user: CurrentUser = Depends(get_current_user)) -> AppUserRead:
 
 
 @router.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
-def logout(response: Response) -> Response:
-    response.delete_cookie(get_settings().auth_cookie_name, path="/")
-    return response
+def logout(response: Response) -> None:
+    # Set the cookie-clearing header on the injected response and return None so
+    # FastAPI keeps the 204 status. Returning the injected Response directly
+    # would override the status with its default (None) and crash the response.
+    # Match the attributes used when the cookie was set so browsers reliably
+    # drop it.
+    settings = get_settings()
+    secure = settings.environment.lower() in {"prod", "production"}
+    response.delete_cookie(
+        key=settings.auth_cookie_name,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=secure,
+    )
