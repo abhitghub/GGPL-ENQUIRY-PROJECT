@@ -65,6 +65,11 @@ SALES_STAGE_META_FIELDS = {
     "bid_type",
     "market_type",
     "customer_master_id",
+    # Enquiry triage/scheduling that sales owns during setup.
+    "due_date",
+    "priority",
+    "with_whom",
+    "enquiry_stage",
     "outlook_thread",
     "activity_log",
 }

@@ -267,6 +267,10 @@ function pickSalesDetailQuoteData(data: Record<string, unknown>) {
   );
 }
 
+// Queue metadata a sales user may set during enquiry setup (triage/scheduling).
+// Owner reassignment and material-planning toggles stay workflow-only.
+const SALES_QUEUE_META_KEYS = new Set(["due_date", "priority", "with_whom", "enquiry_stage"]);
+
 type OutlookThreadLink = {
   mailbox_user: string;
   message_id: string;
@@ -2174,8 +2178,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   async function updateQueueMeta(row: Quote, patch: Record<string, unknown>) {
-    if (!canEditWorkflow) {
-      toast.error("Sales users cannot change workflow metadata.");
+    const onlySalesQueueFields = Object.keys(patch).every((key) => SALES_QUEUE_META_KEYS.has(key));
+    if (!canEditWorkflow && !(canAddDetails && onlySalesQueueFields)) {
+      toast.error("You do not have permission to change this.");
       return;
     }
     let nextStageMeta = { ...(row.stage_meta ?? {}), ...patch };
@@ -4377,12 +4382,12 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       updateQuoteDraft({ stage_meta: stageMeta });
                     }}
                     onBlur={(event) => updateQueueMeta(quote, { due_date: event.target.value })}
-                    disabled={!canEditWorkflow}
+                    disabled={!canEditWorkflow && !canAddDetails}
                   />
                 </div>
                 <div className="space-y-1.5">
                   <Label>Enquiry stage</Label>
-                  <Select value={currentEnquiryStage} onValueChange={(value) => updateQueueMeta(quote, { enquiry_stage: value as EnquiryStageId })} disabled={!canEditWorkflow}>
+                  <Select value={currentEnquiryStage} onValueChange={(value) => updateQueueMeta(quote, { enquiry_stage: value as EnquiryStageId })} disabled={!canEditWorkflow && !canAddDetails}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
                       {ENQUIRY_STAGES.map((stage) => (
@@ -4393,7 +4398,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 </div>
                 <div className="space-y-1.5">
                   <Label>Priority</Label>
-                  <Select value={getString(quote.stage_meta?.priority) || "normal"} onValueChange={(value) => updateQueueMeta(quote, { priority: value })} disabled={!canEditWorkflow}>
+                  <Select value={getString(quote.stage_meta?.priority) || "normal"} onValueChange={(value) => updateQueueMeta(quote, { priority: value })} disabled={!canEditWorkflow && !canAddDetails}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="urgent">Urgent</SelectItem>
@@ -4416,7 +4421,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 <Select
                   value={getString(quote.stage_meta?.with_whom) || BLANK_SELECT_VALUE}
                   onValueChange={(value) => updateQueueMeta(quote, { with_whom: value === BLANK_SELECT_VALUE ? "" : value })}
-                  disabled={!canEditWorkflow}
+                  disabled={!canEditWorkflow && !canAddDetails}
                 >
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
