@@ -51,6 +51,11 @@ SALES_QUOTE_DATA_FIELDS = {
     "email",
     "sales_notes",
     "technical_notes",
+    # Commercial defaults filled from the customer master during enquiry setup.
+    "currency",
+    "payment_terms",
+    "delivery",
+    "gst_no",
 }
 SALES_STAGE_META_FIELDS = {
     "sales_notes",
@@ -59,6 +64,7 @@ SALES_STAGE_META_FIELDS = {
     "epc_name",
     "bid_type",
     "market_type",
+    "customer_master_id",
     "outlook_thread",
     "activity_log",
 }
