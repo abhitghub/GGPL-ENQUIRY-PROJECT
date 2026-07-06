@@ -74,6 +74,7 @@ import {
 } from "@/lib/api";
 import { addBackgroundJob, BACKGROUND_JOBS_EVENT, listBackgroundJobs } from "@/lib/background-jobs";
 import { ACCESS_SETTINGS_CHANGED_EVENT, canRole, getAccessSettings, normalizeAccessSettings, saveAccessSettings } from "@/lib/auth/access-control";
+import { COUNTRIES, citiesForCountry } from "@/lib/geo/locations";
 import { getAppUsers, getCurrentAppUser, resolveAppUserName, roleLabels, setCurrentAppUser, USERS_CHANGED_EVENT } from "@/lib/auth/users";
 import {
   buildMaterialBreakdown,
@@ -1189,6 +1190,7 @@ function Field({
   textarea,
   type = "text",
   disabled = false,
+  options,
 }: {
   label: string;
   value: string;
@@ -1196,7 +1198,9 @@ function Field({
   textarea?: boolean;
   type?: string;
   disabled?: boolean;
+  options?: string[];
 }) {
+  const listId = React.useId();
   return (
     <div className="space-y-1.5">
       <Label>{label}</Label>
@@ -1208,7 +1212,20 @@ function Field({
           disabled={disabled}
         />
       ) : (
-        <Input type={type} value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled} />
+        <>
+          <Input
+            type={type}
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            disabled={disabled}
+            list={options && options.length ? listId : undefined}
+          />
+          {options && options.length ? (
+            <datalist id={listId}>
+              {options.map((option) => <option key={option} value={option} />)}
+            </datalist>
+          ) : null}
+        </>
       )}
     </div>
   );
@@ -4305,8 +4322,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               </summary>
               <div className="mt-3 grid gap-3 md:grid-cols-2">
                 <Field label="Project name" value={quote.project_ref} onChange={(value) => updateQuoteDraft({ project_ref: value })} disabled={!canAddDetails} />
-                <Field label="Country" value={getString(quote.stage_meta?.country)} onChange={(value) => updateQuoteDraft({ stage_meta: { ...(quote.stage_meta ?? {}), country: value } })} disabled={!canAddDetails} />
-                <Field label="City" value={getString(quote.stage_meta?.city)} onChange={(value) => updateQuoteDraft({ stage_meta: { ...(quote.stage_meta ?? {}), city: value } })} disabled={!canAddDetails} />
+                <Field label="Country" value={getString(quote.stage_meta?.country)} onChange={(value) => updateQuoteDraft({ stage_meta: { ...(quote.stage_meta ?? {}), country: value } })} disabled={!canAddDetails} options={COUNTRIES} />
+                <Field label="City" value={getString(quote.stage_meta?.city)} onChange={(value) => updateQuoteDraft({ stage_meta: { ...(quote.stage_meta ?? {}), city: value } })} disabled={!canAddDetails} options={citiesForCountry(getString(quote.stage_meta?.country))} />
                 <div className="space-y-1.5">
                   <Label>EPC / project company</Label>
                   <Select value={getString(quote.stage_meta?.epc_name) || BLANK_SELECT_VALUE} onValueChange={(value) => updateQuoteDraft({ stage_meta: { ...(quote.stage_meta ?? {}), epc_name: value === BLANK_SELECT_VALUE ? "" : value } })} disabled={!canAddDetails}>
@@ -5932,9 +5949,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                         <Field label="PIN code" value={getString(qd.buyer_pin_code)} onChange={(value) => updateQd("buyer_pin_code", value)} disabled={!canAddDetails} />
                         <Field label="Address line 1" value={getString(qd.buyer_address_line1)} onChange={(value) => updateQd("buyer_address_line1", value)} disabled={!canAddDetails} />
                         <Field label="Address line 2" value={getString(qd.buyer_address_line2)} onChange={(value) => updateQd("buyer_address_line2", value)} disabled={!canAddDetails} />
-                        <Field label="City" value={getString(qd.buyer_city)} onChange={(value) => updateQd("buyer_city", value)} disabled={!canAddDetails} />
+                        <Field label="City" value={getString(qd.buyer_city)} onChange={(value) => updateQd("buyer_city", value)} disabled={!canAddDetails} options={citiesForCountry(getString(qd.buyer_country))} />
                         <Field label="State" value={getString(qd.buyer_state)} onChange={(value) => updateQd("buyer_state", value)} disabled={!canAddDetails} />
-                        <Field label="Country" value={getString(qd.buyer_country)} onChange={(value) => updateQd("buyer_country", value)} disabled={!canAddDetails} />
+                        <Field label="Country" value={getString(qd.buyer_country)} onChange={(value) => updateQd("buyer_country", value)} disabled={!canAddDetails} options={COUNTRIES} />
                       </div>
                       <div className="grid gap-3 md:grid-cols-2">
                         <Field label="Customer enquiry no" value={getString(qd.customer_enq_no)} onChange={(value) => updateQd("customer_enq_no", value)} disabled={!canAddDetails} />
