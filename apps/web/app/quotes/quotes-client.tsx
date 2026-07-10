@@ -48,10 +48,14 @@ import { toast } from "sonner";
 import {
   API_BASE,
   BusinessMasterData,
+  ContactPerson,
+  CustomerRecord,
   GasketItem,
   ITEM_FIELDS,
+  NewCustomerInput,
   OutlookLinkedMessage,
   Quote,
+  addCustomerRecord,
   advanceQuoteStage,
   bulkRecompute,
   createExtraction,
@@ -99,6 +103,7 @@ import { issueBadgesForItem, TechnicalIssuesPanel } from "@/components/quotes/te
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Combobox, type ComboboxOption } from "@/components/ui/combobox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -1297,6 +1302,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [intakeCollapsed, setIntakeCollapsed] = React.useState(false);
   const [enquirySetupOpen, setEnquirySetupOpen] = React.useState(false);
   const [quotationSetupOpen, setQuotationSetupOpen] = React.useState(false);
+  const [addCustomerOpen, setAddCustomerOpen] = React.useState(false);
+  const [addingCustomer, setAddingCustomer] = React.useState(false);
+  const [newCustomer, setNewCustomer] = React.useState<NewCustomerInput>({ name: "" });
   const [rowEditorOpen, setRowEditorOpen] = React.useState(false);
   const [materialBreakdown, setMaterialBreakdown] = React.useState<MaterialBreakdownRow[] | null>(null);
   const [materialInputs, setMaterialInputs] = React.useState<MaterialInputRow[]>([]);
@@ -1351,6 +1359,22 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const locallyStartedExtractionJobs = React.useRef(new Map<string, string>());
 
   const qd = React.useMemo(() => quoteDataWithDefaults(quote?.quote_data), [quote?.quote_data]);
+  const customerOptions = React.useMemo<ComboboxOption[]>(
+    () => masterData.customers.filter((row) => row.active).map((row) => ({ value: row.id, label: row.name, hint: row.country || undefined })),
+    [masterData.customers],
+  );
+  const selectedCustomerRecord = React.useMemo(
+    () => masterData.customers.find((row) => row.id === getString(quote?.stage_meta?.customer_master_id)),
+    [masterData.customers, quote?.stage_meta?.customer_master_id],
+  );
+  const contactOptions = React.useMemo<ComboboxOption[]>(
+    () => (selectedCustomerRecord?.contacts ?? []).map((contact) => ({
+      value: contact.id,
+      label: contact.name || contact.email || "Unnamed contact",
+      hint: contact.name && contact.email ? contact.email : contact.designation || undefined,
+    })),
+    [selectedCustomerRecord],
+  );
   const items = React.useMemo(() => quote?.items ?? [], [quote?.items]);
   const salesRepUsers = React.useMemo(
     () => appUsers
@@ -2922,32 +2946,95 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     setHasUnsavedLocalEdits(true);
   }
 
+  function contactQuoteData(base: Record<string, unknown>, contact?: ContactPerson) {
+    return {
+      ...base,
+      attention: contact?.name ?? "",
+      designation: contact?.designation ?? "",
+      email: contact?.email ?? "",
+      contact_no: contact?.phone || contact?.mobile || "",
+      mobile_no: contact?.mobile ?? "",
+    };
+  }
+
   function selectCustomer(customerId: string) {
     const customer = masterData.customers.find((row) => row.id === customerId);
-    if (!customer || !quote) return;
-    const nextQuoteData = quoteDataWithDefaults({
-      ...qd,
-      buyer_name: customer.name,
-      buyer_address_line1: customer.address_line1,
-      buyer_address_line2: customer.address_line2,
-      buyer_city: customer.city,
-      buyer_state: customer.state,
-      buyer_pin_code: customer.pin_code,
-      buyer_country: customer.country,
-      attention: customer.contact_name,
-      designation: customer.designation,
-      email: customer.email,
-      contact_no: customer.phone,
-      gst_no: customer.gst_no,
-      currency: customer.default_currency || getString(qd.currency) || "INR",
-      payment_terms: customer.payment_terms || qd.payment_terms,
-      delivery: customer.delivery_terms || qd.delivery,
-    });
+    if (customer) applyCustomer(customer);
+  }
+
+  function applyCustomer(customer: CustomerRecord) {
+    if (!quote) return;
+    const contacts = customer.contacts ?? [];
+    // Auto-apply the contact when there is exactly one; otherwise leave the
+    // contact fields for the Contact person dropdown to fill.
+    const soleContact = contacts.length === 1 ? contacts[0] : undefined;
+    const legacyContact: ContactPerson | undefined =
+      contacts.length === 0 && (customer.contact_name || customer.email)
+        ? { id: "", name: customer.contact_name, designation: customer.designation, department: "", email: customer.email, phone: customer.phone, mobile: "" }
+        : undefined;
+    const appliedContact = soleContact ?? legacyContact;
+    const nextQuoteData = quoteDataWithDefaults(
+      contactQuoteData(
+        {
+          ...qd,
+          buyer_name: customer.name,
+          buyer_address_line1: customer.address_line1,
+          buyer_address_line2: customer.address_line2,
+          buyer_city: customer.city,
+          buyer_state: customer.state,
+          buyer_pin_code: customer.pin_code,
+          buyer_country: customer.country,
+          gst_no: customer.gst_no,
+          currency: customer.default_currency || getString(qd.currency) || "INR",
+          payment_terms: customer.payment_terms || qd.payment_terms,
+          delivery: customer.delivery_terms || qd.delivery,
+        },
+        appliedContact,
+      ),
+    );
     updateQuoteDraft({
       customer: customer.name,
       quote_data: nextQuoteData,
-      stage_meta: { ...(quote.stage_meta ?? {}), customer_master_id: customer.id, country: customer.country || quote.stage_meta?.country, city: customer.city || quote.stage_meta?.city },
+      stage_meta: {
+        ...(quote.stage_meta ?? {}),
+        customer_master_id: customer.id,
+        customer_contact_id: soleContact?.id ?? "",
+        country: customer.country || quote.stage_meta?.country,
+        city: customer.city || quote.stage_meta?.city,
+      },
     });
+  }
+
+  function selectContact(contactId: string) {
+    if (!quote) return;
+    const customer = masterData.customers.find((row) => row.id === getString(quote.stage_meta?.customer_master_id));
+    const contact = customer?.contacts?.find((row) => row.id === contactId);
+    if (!contact) return;
+    updateQuoteDraft({
+      quote_data: quoteDataWithDefaults(contactQuoteData({ ...qd }, contact)),
+      stage_meta: { ...(quote.stage_meta ?? {}), customer_contact_id: contact.id },
+    });
+  }
+
+  async function saveNewCustomer() {
+    const name = (newCustomer.name || "").trim();
+    if (!name) {
+      toast.error("Enter a customer name");
+      return;
+    }
+    setAddingCustomer(true);
+    try {
+      const created = await addCustomerRecord({ ...newCustomer, name });
+      setMasterData((current) => ({ ...current, customers: [...current.customers, created] }));
+      applyCustomer(created);
+      setAddCustomerOpen(false);
+      setNewCustomer({ name: "" });
+      toast.success(`Customer added: ${created.name}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not add customer");
+    } finally {
+      setAddingCustomer(false);
+    }
   }
 
   function salesRepQuoteData(user: (typeof salesRepUsers)[number]) {
@@ -4113,6 +4200,36 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
             </Button>
           </div>
         </div>}
+        <Dialog open={addCustomerOpen} onOpenChange={setAddCustomerOpen}>
+          <DialogContent className="max-w-lg">
+            <DialogHeader>
+              <DialogTitle>Add customer</DialogTitle>
+              <DialogDescription>Create a customer that isn&apos;t in the master list yet. You can add more contacts later.</DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="md:col-span-2">
+                <Field label="Customer / company name *" value={newCustomer.name} onChange={(value) => setNewCustomer((c) => ({ ...c, name: value }))} />
+              </div>
+              <Field label="Country" value={newCustomer.country ?? ""} onChange={(value) => setNewCustomer((c) => ({ ...c, country: value }))} />
+              <Field label="City" value={newCustomer.city ?? ""} onChange={(value) => setNewCustomer((c) => ({ ...c, city: value }))} />
+              <Field label="GST no." value={newCustomer.gst_no ?? ""} onChange={(value) => setNewCustomer((c) => ({ ...c, gst_no: value }))} />
+              <div className="md:col-span-2 mt-1 border-t pt-2 text-xs font-medium text-muted-foreground">Primary contact (optional)</div>
+              <Field label="Contact name" value={newCustomer.contact_name ?? ""} onChange={(value) => setNewCustomer((c) => ({ ...c, contact_name: value }))} />
+              <Field label="Designation" value={newCustomer.designation ?? ""} onChange={(value) => setNewCustomer((c) => ({ ...c, designation: value }))} />
+              <Field label="Email" value={newCustomer.email ?? ""} onChange={(value) => setNewCustomer((c) => ({ ...c, email: value }))} />
+              <Field label="Phone" value={newCustomer.phone ?? ""} onChange={(value) => setNewCustomer((c) => ({ ...c, phone: value }))} />
+              <Field label="Mobile" value={newCustomer.mobile ?? ""} onChange={(value) => setNewCustomer((c) => ({ ...c, mobile: value }))} />
+            </div>
+            <DialogFooter>
+              <Button variant="secondary" onClick={() => setAddCustomerOpen(false)}>Cancel</Button>
+              <Button onClick={saveNewCustomer} disabled={addingCustomer || !newCustomer.name.trim()}>
+                {addingCustomer ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                Add customer
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
         <Dialog open={enquirySetupOpen} onOpenChange={setEnquirySetupOpen}>
           <DialogContent className="flex max-h-[90vh] max-w-6xl flex-col overflow-hidden">
             <DialogHeader>
@@ -4300,14 +4417,44 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 <div className="space-y-1.5">
                   <Label>Customer master</Label>
-                  <Select value={getString(quote.stage_meta?.customer_master_id) || BLANK_SELECT_VALUE} onValueChange={(value) => { if (value !== BLANK_SELECT_VALUE) selectCustomer(value); }} disabled={!canAddDetails}>
-                    <SelectTrigger><SelectValue placeholder="Select customer" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={BLANK_SELECT_VALUE}>Select customer</SelectItem>
-                      {masterData.customers.filter((row) => row.active).map((customer) => <SelectItem key={customer.id} value={customer.id}>{customer.name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                  <div className="text-xs text-muted-foreground">Selecting a customer fills buyer and contact details. Manual override remains available.</div>
+                  <div className="flex gap-2">
+                    <Combobox
+                      className="flex-1"
+                      value={getString(quote.stage_meta?.customer_master_id)}
+                      onChange={selectCustomer}
+                      options={customerOptions}
+                      placeholder="Select customer"
+                      searchPlaceholder="Search customers…"
+                      emptyText="No customer found — use Add"
+                      disabled={!canAddDetails}
+                    />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={!canAddDetails}
+                      onClick={() => {
+                        setNewCustomer({ name: "", country: getString(quote.stage_meta?.country), city: getString(quote.stage_meta?.city) });
+                        setAddCustomerOpen(true);
+                      }}
+                    >
+                      <Plus className="h-4 w-4" /> Add
+                    </Button>
+                  </div>
+                  <div className="text-xs text-muted-foreground">Search to pick a customer, or Add a new one. Buyer details fill in automatically.</div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Contact person</Label>
+                  <Combobox
+                    value={getString(quote.stage_meta?.customer_contact_id)}
+                    onChange={selectContact}
+                    options={contactOptions}
+                    placeholder={selectedCustomerRecord ? (contactOptions.length ? "Select contact" : "No saved contacts") : "Select a customer first"}
+                    searchPlaceholder="Search contacts…"
+                    emptyText="No contacts for this customer"
+                    disabled={!canAddDetails || !selectedCustomerRecord || contactOptions.length === 0}
+                  />
+                  <div className="text-xs text-muted-foreground">Picking a contact fills their name, email, phone and designation.</div>
                 </div>
                 <Field label="Customer name override" value={quote.customer} onChange={(value) => updateQuoteDraft({ customer: value })} disabled={!canAddDetails} />
                 <Field label="Email subject" value={quote.custom_label} onChange={(value) => updateQuoteDraft({ custom_label: value })} disabled={!canAddDetails} />

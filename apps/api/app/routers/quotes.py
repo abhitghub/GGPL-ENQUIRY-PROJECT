@@ -65,6 +65,7 @@ SALES_STAGE_META_FIELDS = {
     "bid_type",
     "market_type",
     "customer_master_id",
+    "customer_contact_id",
     # Enquiry triage/scheduling that sales owns during setup.
     "due_date",
     "priority",

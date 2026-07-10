@@ -166,6 +166,16 @@ export type DashboardMetrics = {
   generated_at?: string;
 };
 
+export type ContactPerson = {
+  id: string;
+  name: string;
+  designation: string;
+  department: string;
+  email: string;
+  phone: string;
+  mobile: string;
+};
+
 export type CustomerRecord = {
   id: string;
   name: string;
@@ -184,6 +194,7 @@ export type CustomerRecord = {
   payment_terms: string;
   delivery_terms: string;
   active: boolean;
+  contacts?: ContactPerson[];
 };
 
 export type BusinessMasterData = {
@@ -574,6 +585,30 @@ export async function putBusinessMasterData(payload: BusinessMasterData): Promis
     await apiFetch(`${API_BASE}/api/v1/customers`, {
       method: "PUT",
       headers: headers(),
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export type NewCustomerInput = {
+  name: string;
+  address_line1?: string;
+  city?: string;
+  state?: string;
+  country?: string;
+  gst_no?: string;
+  contact_name?: string;
+  designation?: string;
+  email?: string;
+  phone?: string;
+  mobile?: string;
+};
+
+export async function addCustomerRecord(payload: NewCustomerInput): Promise<CustomerRecord> {
+  return parse<CustomerRecord>(
+    await apiFetch(`${API_BASE}/api/v1/customers/records`, {
+      method: "POST",
+      headers: headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     }),
   );
