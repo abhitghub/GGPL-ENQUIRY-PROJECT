@@ -1205,7 +1205,6 @@ function Field({
   disabled?: boolean;
   options?: string[];
 }) {
-  const listId = React.useId();
   return (
     <div className="space-y-1.5">
       <Label>{label}</Label>
@@ -1216,21 +1215,24 @@ function Field({
           onChange={(event) => onChange(event.target.value)}
           disabled={disabled}
         />
+      ) : options && options.length ? (
+        <Combobox
+          value={value}
+          onChange={onChange}
+          options={options.map((option) => ({ value: option, label: option }))}
+          placeholder="Select"
+          searchPlaceholder="Search…"
+          emptyText="No matches"
+          disabled={disabled}
+          allowCustom
+        />
       ) : (
-        <>
-          <Input
-            type={type}
-            value={value}
-            onChange={(event) => onChange(event.target.value)}
-            disabled={disabled}
-            list={options && options.length ? listId : undefined}
-          />
-          {options && options.length ? (
-            <datalist id={listId}>
-              {options.map((option) => <option key={option} value={option} />)}
-            </datalist>
-          ) : null}
-        </>
+        <Input
+          type={type}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          disabled={disabled}
+        />
       )}
     </div>
   );

@@ -18,6 +18,7 @@ export function Combobox({
   className,
   onCreate,
   createLabel = "Add new",
+  allowCustom = false,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -29,6 +30,7 @@ export function Combobox({
   className?: string;
   onCreate?: (query: string) => void;
   createLabel?: string;
+  allowCustom?: boolean;
 }) {
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
@@ -79,7 +81,7 @@ export function Combobox({
         onClick={() => setOpen((current) => !current)}
         className="flex h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm focus:border-ring focus:outline-none focus:ring-2 focus:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50"
       >
-        <span className={cn("truncate", !selected && "text-muted-foreground")}>{selected?.label || placeholder}</span>
+        <span className={cn("truncate", !selected && !value && "text-muted-foreground")}>{selected?.label || value || placeholder}</span>
         <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />
       </button>
       {open && (
@@ -104,6 +106,7 @@ export function Combobox({
                 } else if (event.key === "Enter") {
                   event.preventDefault();
                   if (filtered[highlight]) commit(filtered[highlight].value);
+                  else if (allowCustom && query.trim()) commit(query.trim());
                 } else if (event.key === "Escape") {
                   event.preventDefault();
                   setOpen(false);
@@ -112,7 +115,7 @@ export function Combobox({
             />
           </div>
           <div className="max-h-60 overflow-auto p-1">
-            {filtered.length === 0 && !onCreate ? (
+            {filtered.length === 0 && !onCreate && !(allowCustom && query.trim()) ? (
               <div className="px-2 py-1.5 text-sm text-muted-foreground">{emptyText}</div>
             ) : (
               filtered.map((option, index) => (
@@ -137,6 +140,18 @@ export function Combobox({
                 </button>
               ))
             )}
+            {allowCustom && query.trim() && !filtered.some((option) => option.label.toLowerCase() === query.trim().toLowerCase()) ? (
+              <button
+                type="button"
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  commit(query.trim());
+                }}
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-muted"
+              >
+                <span className="truncate">Use “{query.trim()}”</span>
+              </button>
+            ) : null}
             {onCreate ? (
               <button
                 type="button"
