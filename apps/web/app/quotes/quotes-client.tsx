@@ -4446,7 +4446,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   />
                   <div className="text-xs text-muted-foreground">Picking a contact fills their name, email, phone and designation.</div>
                 </div>
-                <Field label="Customer name override" value={quote.customer} onChange={(value) => updateQuoteDraft({ customer: value })} disabled={!canAddDetails} />
+                <Field label="Contact person email" value={getString(qd.email)} onChange={(value) => updateQd("email", value)} disabled={!canAddDetails} />
+                <Field label="Contact no" value={getString(qd.contact_no)} onChange={(value) => updateQd("contact_no", value)} disabled={!canAddDetails} />
                 <Field label="Email subject" value={quote.custom_label} onChange={(value) => updateQuoteDraft({ custom_label: value })} disabled={!canAddDetails} />
                 <Field label="Enq reference" value={quote.quote_no} onChange={(value) => updateQuoteDraft({ quote_no: value })} disabled={!canAddDetails} />
               </div>
