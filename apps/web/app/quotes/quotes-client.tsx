@@ -4417,31 +4417,21 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 <div className="space-y-1.5">
                   <Label>Customer master</Label>
-                  <div className="flex gap-2">
-                    <Combobox
-                      className="flex-1"
-                      value={getString(quote.stage_meta?.customer_master_id)}
-                      onChange={selectCustomer}
-                      options={customerOptions}
-                      placeholder="Select customer"
-                      searchPlaceholder="Search customers…"
-                      emptyText="No customer found — use Add"
-                      disabled={!canAddDetails}
-                    />
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="sm"
-                      disabled={!canAddDetails}
-                      onClick={() => {
-                        setNewCustomer({ name: "", country: getString(quote.stage_meta?.country), city: getString(quote.stage_meta?.city) });
-                        setAddCustomerOpen(true);
-                      }}
-                    >
-                      <Plus className="h-4 w-4" /> Add
-                    </Button>
-                  </div>
-                  <div className="text-xs text-muted-foreground">Search to pick a customer, or Add a new one. Buyer details fill in automatically.</div>
+                  <Combobox
+                    value={getString(quote.stage_meta?.customer_master_id)}
+                    onChange={selectCustomer}
+                    options={customerOptions}
+                    placeholder="Select customer"
+                    searchPlaceholder="Search customers…"
+                    emptyText="No customer found"
+                    disabled={!canAddDetails}
+                    createLabel="Add new customer"
+                    onCreate={canAddDetails ? (query) => {
+                      setNewCustomer({ name: query, country: getString(quote.stage_meta?.country), city: getString(quote.stage_meta?.city) });
+                      setAddCustomerOpen(true);
+                    } : undefined}
+                  />
+                  <div className="text-xs text-muted-foreground">Search to pick a customer, or use “Add new customer” at the bottom of the list. Buyer details fill in automatically.</div>
                 </div>
                 <div className="space-y-1.5">
                   <Label>Contact person</Label>

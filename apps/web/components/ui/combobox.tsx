@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, ChevronsUpDown } from "lucide-react";
+import { Check, ChevronsUpDown, Plus } from "lucide-react";
 import * as React from "react";
 
 import { cn } from "@/lib/utils";
@@ -16,6 +16,8 @@ export function Combobox({
   emptyText = "No matches",
   disabled = false,
   className,
+  onCreate,
+  createLabel = "Add new",
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -25,6 +27,8 @@ export function Combobox({
   emptyText?: string;
   disabled?: boolean;
   className?: string;
+  onCreate?: (query: string) => void;
+  createLabel?: string;
 }) {
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
@@ -56,6 +60,13 @@ export function Combobox({
 
   function commit(next: string) {
     onChange(next);
+    setOpen(false);
+    setQuery("");
+  }
+
+  function create() {
+    if (!onCreate) return;
+    onCreate(query.trim());
     setOpen(false);
     setQuery("");
   }
@@ -101,7 +112,7 @@ export function Combobox({
             />
           </div>
           <div className="max-h-60 overflow-auto p-1">
-            {filtered.length === 0 ? (
+            {filtered.length === 0 && !onCreate ? (
               <div className="px-2 py-1.5 text-sm text-muted-foreground">{emptyText}</div>
             ) : (
               filtered.map((option, index) => (
@@ -126,6 +137,19 @@ export function Combobox({
                 </button>
               ))
             )}
+            {onCreate ? (
+              <button
+                type="button"
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  create();
+                }}
+                className="mt-1 flex w-full items-center gap-2 rounded-sm border-t px-2 py-1.5 text-left text-sm font-medium text-primary hover:bg-muted"
+              >
+                <Plus className="h-4 w-4 shrink-0" />
+                <span className="truncate">{query.trim() ? `Add “${query.trim()}”` : createLabel}</span>
+              </button>
+            ) : null}
           </div>
         </div>
       )}
