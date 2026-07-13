@@ -630,11 +630,14 @@ def advance_workflow(
     stage_meta["workflow_stage"] = transition["to"]
     if transition.get("with_whom"):
         stage_meta["with_whom"] = transition["with_whom"]
+    comment = (payload.comment or "").strip()
+    stage_meta["workflow_comment"] = comment
+    detail = f"{transition['label']} — {comment}" if comment else transition["label"]
     stage_meta = append_activity(
         stage_meta,
         kind="workflow",
         title="Workflow handoff",
-        detail=transition["label"],
+        detail=detail,
         user=user.name or user.user_id,
     )
     try:

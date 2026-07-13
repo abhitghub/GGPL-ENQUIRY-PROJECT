@@ -1307,6 +1307,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [intakeCollapsed, setIntakeCollapsed] = React.useState(false);
   const [enquirySetupOpen, setEnquirySetupOpen] = React.useState(false);
   const [quotationSetupOpen, setQuotationSetupOpen] = React.useState(false);
+  const [workflowComment, setWorkflowComment] = React.useState("");
   const [addCustomerOpen, setAddCustomerOpen] = React.useState(false);
   const [addingCustomer, setAddingCustomer] = React.useState(false);
   const [newCustomer, setNewCustomer] = React.useState<NewCustomerInput>({ name: "" });
@@ -3056,9 +3057,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   async function runWorkflowAction(action: string) {
     if (!quote) return;
     try {
-      const updated = await advanceEnquiryWorkflow(quote.id, action);
+      const updated = await advanceEnquiryWorkflow(quote.id, action, workflowComment.trim());
       setQuote(updated);
       setQuotes((prev) => prev.map((row) => (row.id === updated.id ? quoteSummary(updated) : row)));
+      setWorkflowComment("");
       toast.success("Workflow updated");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not update the workflow");
@@ -3112,6 +3114,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const discount = pricingSummary.discount;
   const gst = pricingSummary.gst;
   const grandTotal = pricingSummary.grandTotal;
+  // International orders show the equivalent USD value using a ₹/$ conversion rate.
+  const isInternationalOrder = enquiryMarketType === "export" || currency !== "INR";
+  const usdRate = toNumber(qd.usd_rate, defaultFx.USD ?? 83);
+  const grandTotalUsd = currency === "USD" ? grandTotal : usdRate > 0 ? grandTotal / usdRate : 0;
   const totalQuantity = pricingSummary.lines.reduce((sum, line) => sum + line.quantity, 0);
   const totalQuantityLabel = Number.isInteger(totalQuantity) ? `${totalQuantity}` : totalQuantity.toFixed(2);
   const readyCount = items.filter((item) => item.status === "ready").length;
@@ -4245,14 +4251,28 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               );
             })}
           </div>
+          {getString(quote.stage_meta?.workflow_comment) && (
+            <div className="mt-2 rounded-md border bg-muted/30 px-2.5 py-1.5 text-xs">
+              <span className="text-muted-foreground">Last note: </span>
+              <span>{getString(quote.stage_meta?.workflow_comment)}</span>
+            </div>
+          )}
           {availableWorkflowActions.length > 0 ? (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {availableWorkflowActions.map((item) => (
-                <Button key={item.action} size="sm" onClick={() => runWorkflowAction(item.action)}>
-                  <ArrowRight className="h-4 w-4" />
-                  {item.label}
-                </Button>
-              ))}
+            <div className="mt-3 space-y-2">
+              <textarea
+                value={workflowComment}
+                onChange={(event) => setWorkflowComment(event.target.value)}
+                placeholder="Add a comment for the receiving team (optional)"
+                className="min-h-[52px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+              />
+              <div className="flex flex-wrap gap-2">
+                {availableWorkflowActions.map((item) => (
+                  <Button key={item.action} size="sm" onClick={() => runWorkflowAction(item.action)}>
+                    <ArrowRight className="h-4 w-4" />
+                    {item.label}
+                  </Button>
+                ))}
+              </div>
             </div>
           ) : (
             <div className="mt-2 text-xs text-muted-foreground">
@@ -6195,6 +6215,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     <div className="rounded-md border bg-background p-3"><div className="text-xs text-muted-foreground">GST</div><div className="text-lg font-semibold">{gst.toFixed(2)}</div></div>
                     <div className="rounded-md border bg-background p-3"><div className="text-xs text-muted-foreground">Grand total</div><div className="text-lg font-semibold">{grandTotal.toFixed(2)}</div></div>
                     <div className="rounded-md border bg-background p-3"><div className="text-xs text-muted-foreground">Cost total</div><div className="text-lg font-semibold">{pricingSummary.costTotal.toFixed(2)}</div></div>
+                    {isInternationalOrder && (
+                      <div className="rounded-md border border-primary/30 bg-primary/5 p-3">
+                        <div className="text-xs text-muted-foreground">Grand total (USD equiv.)</div>
+                        <div className="text-lg font-semibold">${grandTotalUsd.toFixed(2)}</div>
+                        <div className="text-[11px] text-muted-foreground">@ ₹{usdRate}/$</div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="rounded-md border bg-background p-3">
@@ -6208,6 +6235,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                         </Select>
                       </div>
                       <Field label="FX rate" value={getString(qd.fx_rate)} onChange={(value) => updateQd("fx_rate", Number(value))} type="number" disabled={!canEditQuotation} />
+                      {isInternationalOrder && (
+                        <Field label="USD conversion (₹/$)" value={getString(qd.usd_rate) || String(defaultFx.USD ?? 83)} onChange={(value) => updateQd("usd_rate", Number(value))} type="number" disabled={!canEditQuotation} />
+                      )}
                       <Field label="Approved discount %" value={getString(qd.discount_pct)} onChange={(value) => updateQd("discount_pct", Number(value))} type="number" disabled={!canEditQuotation} />
                       <div className="space-y-1.5">
                         <Label>GST type</Label>

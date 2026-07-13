@@ -53,13 +53,28 @@ WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "with_whom": "Ashwin sir",
         "label": "Send for pricing",
     },
-    # After pricing, Ashwin sir (admin) routes it back to Estimation for a final review.
+    # After pricing, Ashwin sir (admin) routes it — to Estimation for final review,
+    # back to Technical for a spec correction, or straight to Sales — with a comment.
     "send_for_final_review": {
         "from": {"pricing"},
         "roles": {"management"},
         "to": "estimation_final_review",
         "with_whom": "Estimation",
         "label": "Send to estimation for final review",
+    },
+    "pricing_to_technical": {
+        "from": {"pricing"},
+        "roles": {"management"},
+        "to": "technical_specs",
+        "with_whom": "Technical review",
+        "label": "Send to technical review",
+    },
+    "pricing_to_sales": {
+        "from": {"pricing"},
+        "roles": {"management"},
+        "to": "sales_final",
+        "with_whom": "Sales",
+        "label": "Send to sales",
     },
     # Estimation signs off the priced specs and hands the final quotation to Sales.
     "send_final_to_sales": {

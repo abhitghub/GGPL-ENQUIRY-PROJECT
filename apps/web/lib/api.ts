@@ -486,15 +486,17 @@ export const ENQUIRY_WORKFLOW_ACTIONS = [
   { action: "return_to_estimation", from: ["technical_specs"], roles: ["technical"], label: "Return specs to estimation" },
   { action: "send_for_pricing", from: ["estimation_review"], roles: ["estimation"], label: "Send for pricing" },
   { action: "send_for_final_review", from: ["pricing"], roles: ["management"], label: "Send to estimation for final review" },
+  { action: "pricing_to_technical", from: ["pricing"], roles: ["management"], label: "Send to technical review" },
+  { action: "pricing_to_sales", from: ["pricing"], roles: ["management"], label: "Send to sales" },
   { action: "send_final_to_sales", from: ["estimation_final_review"], roles: ["estimation"], label: "Send final quotation to sales" },
 ] as const;
 
-export async function advanceEnquiryWorkflow(id: string, action: string): Promise<Quote> {
+export async function advanceEnquiryWorkflow(id: string, action: string, comment = ""): Promise<Quote> {
   return parse<Quote>(
     await apiFetch(`${API_BASE}/api/v1/quotes/${id}/workflow`, {
       method: "POST",
       headers: headers(),
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ action, comment }),
     }),
   );
 }

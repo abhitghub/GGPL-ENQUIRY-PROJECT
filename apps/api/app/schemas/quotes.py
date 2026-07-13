@@ -92,4 +92,5 @@ class StageAdvanceRequest(BaseModel):
 
 class WorkflowActionRequest(BaseModel):
     action: str
+    comment: str = ""
     expected_version: int | None = None
