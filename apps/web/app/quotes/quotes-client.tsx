@@ -1353,6 +1353,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const canEditWorkflow = canRole(currentUser.role, "edit_workflow", accessSettings);
   const canEditQuotation = canRole(currentUser.role, "edit_quotation", accessSettings);
   const canEditQuote = canCreateEnquiry || canEditLineItems || canEditWorkflow || canEditQuotation;
+  // Quotation (pricing) is opened by Ashwin sir / back-office, not the sales or
+  // estimation teams — they move enquiries via the workflow handoffs instead.
+  const canOpenQuotation = currentUser.role !== "sales" && currentUser.role !== "estimation";
   const rawWorkflowStep = getString(quote?.stage_meta?.workflow_stage);
   const currentWorkflowStep = ENQUIRY_WORKFLOW_STEPS.some((step) => step.id === rawWorkflowStep) ? rawWorkflowStep : "enquiry";
   const currentWorkflowStepIndex = ENQUIRY_WORKFLOW_STEPS.findIndex((step) => step.id === currentWorkflowStep);
@@ -4186,17 +4189,19 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <RefreshCw className="h-4 w-4" />
                   Revision
                 </Button>
-                <Button size="sm" onClick={() => {
-                  if (items.length) {
-                    void openQuotationScreen();
-                    return;
-                  }
-                  setIntakeCollapsed(false);
-                  window.requestAnimationFrame(() => document.getElementById("enquiry-intake")?.scrollIntoView({ behavior: "smooth", block: "start" }));
-                }}>
-                  <ArrowRight className="h-4 w-4" />
-                  {items.length ? "Continue to quotation" : "Add enquiry items"}
-                </Button>
+                {(!items.length || canOpenQuotation) && (
+                  <Button size="sm" onClick={() => {
+                    if (items.length) {
+                      void openQuotationScreen();
+                      return;
+                    }
+                    setIntakeCollapsed(false);
+                    window.requestAnimationFrame(() => document.getElementById("enquiry-intake")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+                  }}>
+                    <ArrowRight className="h-4 w-4" />
+                    {items.length ? "Continue to quotation" : "Add enquiry items"}
+                  </Button>
+                )}
               </>
             )}
           </div>
@@ -5032,7 +5037,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       </Button>
                     </>
                   )}
-                  {canEditQuotation && (
+                  {canEditQuotation && canOpenQuotation && (
                     <Button size="sm" className="shrink-0" onClick={openQuotationScreen} disabled={!quote || !items.length}>
                       <ArrowRight className="h-4 w-4" />
                       Quotation

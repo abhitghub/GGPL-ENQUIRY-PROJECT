@@ -476,6 +476,7 @@ export const ENQUIRY_WORKFLOW_STEPS = [
   { id: "estimation_review", label: "Estimation review", team: "Estimation" },
   { id: "technical_specs", label: "Technical specs", team: "Technical review" },
   { id: "pricing", label: "Pricing", team: "Ashwin sir" },
+  { id: "estimation_final_review", label: "Final review", team: "Estimation" },
   { id: "sales_final", label: "Ready for customer", team: "Sales" },
 ] as const;
 
@@ -484,7 +485,8 @@ export const ENQUIRY_WORKFLOW_ACTIONS = [
   { action: "transfer_to_technical", from: ["estimation_review"], roles: ["estimation"], label: "Transfer to technical review" },
   { action: "return_to_estimation", from: ["technical_specs"], roles: ["technical"], label: "Return specs to estimation" },
   { action: "send_for_pricing", from: ["estimation_review"], roles: ["estimation"], label: "Send for pricing" },
-  { action: "return_to_sales", from: ["pricing"], roles: ["approver", "management"], label: "Return to sales with pricing" },
+  { action: "send_for_final_review", from: ["pricing"], roles: ["management"], label: "Send to estimation for final review" },
+  { action: "send_final_to_sales", from: ["estimation_final_review"], roles: ["estimation"], label: "Send final quotation to sales" },
 ] as const;
 
 export async function advanceEnquiryWorkflow(id: string, action: string): Promise<Quote> {

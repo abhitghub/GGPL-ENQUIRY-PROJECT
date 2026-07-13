@@ -16,6 +16,7 @@ WORKFLOW_STEPS: list[dict[str, str]] = [
     {"id": "estimation_review", "label": "Estimation review", "team": "Estimation"},
     {"id": "technical_specs", "label": "Technical specs", "team": "Technical review"},
     {"id": "pricing", "label": "Pricing", "team": "Ashwin sir"},
+    {"id": "estimation_final_review", "label": "Final review", "team": "Estimation"},
     {"id": "sales_final", "label": "Ready for customer", "team": "Sales"},
 ]
 
@@ -52,12 +53,21 @@ WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "with_whom": "Ashwin sir",
         "label": "Send for pricing",
     },
-    "return_to_sales": {
+    # After pricing, Ashwin sir (admin) routes it back to Estimation for a final review.
+    "send_for_final_review": {
         "from": {"pricing"},
-        "roles": {"approver", "management"},
+        "roles": {"management"},
+        "to": "estimation_final_review",
+        "with_whom": "Estimation",
+        "label": "Send to estimation for final review",
+    },
+    # Estimation signs off the priced specs and hands the final quotation to Sales.
+    "send_final_to_sales": {
+        "from": {"estimation_final_review"},
+        "roles": {"estimation"},
         "to": "sales_final",
         "with_whom": "Sales",
-        "label": "Return to sales with pricing",
+        "label": "Send final quotation to sales",
     },
 }
 
@@ -66,9 +76,8 @@ WORKFLOW_TRANSITIONS: dict[str, dict] = {
 # so handed-off enquiries appear in the receiving team's queue. Sales/viewer stay
 # owner-scoped; admin sees everything already.
 ROLE_VISIBLE_STEPS: dict[str, set[str]] = {
-    "estimation": {"estimation_review"},
+    "estimation": {"estimation_review", "estimation_final_review"},
     "technical": {"technical_specs"},
-    "approver": {"pricing"},
     "management": set(WORKFLOW_STEP_IDS),
 }
 
