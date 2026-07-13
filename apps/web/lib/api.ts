@@ -470,6 +470,33 @@ export async function exportQuote(id: string, type: "pdf" | "xlsx"): Promise<Sig
   );
 }
 
+// Enquiry -> priced-specs handoff pipeline (mirrors app/services/enquiry_workflow.py).
+export const ENQUIRY_WORKFLOW_STEPS = [
+  { id: "enquiry", label: "Enquiry", team: "Sales" },
+  { id: "estimation_review", label: "Estimation review", team: "Estimation" },
+  { id: "technical_specs", label: "Technical specs", team: "Technical review" },
+  { id: "pricing", label: "Pricing", team: "Ashwin sir" },
+  { id: "sales_final", label: "Ready for customer", team: "Sales" },
+] as const;
+
+export const ENQUIRY_WORKFLOW_ACTIONS = [
+  { action: "send_to_estimation", from: ["enquiry", "sales_final"], roles: ["sales", "management"], label: "Send to estimation" },
+  { action: "transfer_to_technical", from: ["estimation_review"], roles: ["estimation"], label: "Transfer to technical review" },
+  { action: "return_to_estimation", from: ["technical_specs"], roles: ["technical"], label: "Return specs to estimation" },
+  { action: "send_for_pricing", from: ["estimation_review"], roles: ["estimation"], label: "Send for pricing" },
+  { action: "return_to_sales", from: ["pricing"], roles: ["approver", "management"], label: "Return to sales with pricing" },
+] as const;
+
+export async function advanceEnquiryWorkflow(id: string, action: string): Promise<Quote> {
+  return parse<Quote>(
+    await apiFetch(`${API_BASE}/api/v1/quotes/${id}/workflow`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ action }),
+    }),
+  );
+}
+
 export async function advanceQuoteStage(
   id: string,
   stage: QuoteStage,

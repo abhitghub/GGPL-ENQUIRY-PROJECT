@@ -17,12 +17,15 @@ from app.schemas.quotes import (
     ReprocessTextRequest,
     RfiDraftResponse,
     StageAdvanceRequest,
+    WorkflowActionRequest,
 )
 from app.services.approved_quote_cache import cache_final_approved_quote
+from app.services.enquiry_workflow import WORKFLOW_TRANSITIONS, current_workflow_step, visible_steps_for_role
 from app.services.export_service import build_pdf, build_xlsx
 from app.services.quote_rules import (
     QuoteConflictError,
     QuoteValidationError,
+    append_activity,
     normalize_identity,
     po_snapshot,
     quote_summary,
@@ -97,6 +100,7 @@ def _repo_visibility_kwargs(user: CurrentUser) -> dict:
         "viewer_name": user.name,
         "viewer_email": user.email,
         "is_admin": user.role == "admin",
+        "visible_workflow_steps": visible_steps_for_role(user.role),
     }
 
 
@@ -601,6 +605,51 @@ def advance_stage(
     if quote.stage == "po":
         cache_final_approved_quote(quote)
     return quote
+
+
+@router.post("/quotes/{quote_id}/workflow", response_model=QuoteRead)
+def advance_workflow(
+    quote_id: str,
+    payload: WorkflowActionRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> QuoteRead:
+    """Perform an enquiry->priced-specs handoff (Sales -> Estimation -> Technical
+    -> Estimation -> Pricing -> Sales). Each action is gated to the owning team's
+    role and only valid from the matching current step."""
+    current = _quote_or_404(user, quote_id)
+    transition = WORKFLOW_TRANSITIONS.get(payload.action)
+    if not transition:
+        raise HTTPException(status_code=400, detail=f"Unknown workflow action: {payload.action}")
+    step = current_workflow_step(current.stage_meta)
+    if step not in transition["from"]:
+        raise HTTPException(status_code=409, detail=f"This step is currently at '{step}', so it cannot be {payload.action.replace('_', ' ')}")
+    if user.role != "admin" and user.role not in transition["roles"]:
+        allowed = " or ".join(sorted(transition["roles"]))
+        raise HTTPException(status_code=403, detail=f"Only {allowed} (or admin) can {transition['label'].lower()}")
+    stage_meta = dict(current.stage_meta or {})
+    stage_meta["workflow_stage"] = transition["to"]
+    if transition.get("with_whom"):
+        stage_meta["with_whom"] = transition["with_whom"]
+    stage_meta = append_activity(
+        stage_meta,
+        kind="workflow",
+        title="Workflow handoff",
+        detail=transition["label"],
+        user=user.name or user.user_id,
+    )
+    try:
+        updated = repo.update_quote(
+            user.org_id,
+            quote_id,
+            QuotePatch(stage_meta=stage_meta, expected_version=payload.expected_version),
+            actor_id=user.user_id,
+        )
+    except (QuoteConflictError, QuoteValidationError) as exc:
+        _raise_repo_error(exc)
+        raise
+    if not updated:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    return updated
 
 
 @router.get("/quotes/{quote_id}/history", response_model=list[StageHistoryEntry])

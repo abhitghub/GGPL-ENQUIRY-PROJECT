@@ -88,3 +88,8 @@ class StageAdvanceRequest(BaseModel):
     reason: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
     expected_version: int | None = None
+
+
+class WorkflowActionRequest(BaseModel):
+    action: str
+    expected_version: int | None = None

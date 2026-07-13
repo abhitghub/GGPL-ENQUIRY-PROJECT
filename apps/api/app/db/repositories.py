@@ -404,6 +404,24 @@ def _verify_password(password: str, stored: str | None) -> bool:
     return hmac.compare_digest(value, password)
 
 
+def _quote_visible_to_viewer(
+    quote: QuoteRead,
+    *,
+    viewer_id: str | None,
+    viewer_name: str,
+    viewer_email: str,
+    visible_workflow_steps: set[str] | None,
+) -> bool:
+    """A non-admin viewer sees a quote they own, or one currently parked at a
+    workflow step their role is allowed to handle (team handoffs)."""
+    if quote_owner_matches(quote, user_id=viewer_id, user_name=viewer_name, user_email=viewer_email):
+        return True
+    if visible_workflow_steps:
+        step = str((quote.stage_meta or {}).get("workflow_stage") or "enquiry")
+        return step in visible_workflow_steps
+    return False
+
+
 class LocalJsonRepository:
     """Persistent local fallback used when Postgres is unavailable."""
 
@@ -654,6 +672,7 @@ class LocalJsonRepository:
         viewer_name: str = "",
         viewer_email: str = "",
         is_admin: bool = False,
+        visible_workflow_steps: set[str] | None = None,
     ) -> list[QuoteRead]:
         with self._lock:
             self._ensure_quote_numbers(org_id)
@@ -668,7 +687,13 @@ class LocalJsonRepository:
         return [
             quote
             for quote in rows
-            if quote_owner_matches(quote, user_id=viewer_id, user_name=viewer_name, user_email=viewer_email)
+            if _quote_visible_to_viewer(
+                quote,
+                viewer_id=viewer_id,
+                viewer_name=viewer_name,
+                viewer_email=viewer_email,
+                visible_workflow_steps=visible_workflow_steps,
+            )
         ]
 
     def get_quote(
@@ -680,6 +705,7 @@ class LocalJsonRepository:
         viewer_name: str = "",
         viewer_email: str = "",
         is_admin: bool = False,
+        visible_workflow_steps: set[str] | None = None,
     ) -> QuoteRead | None:
         with self._lock:
             self._ensure_quote_numbers(org_id)
@@ -687,11 +713,12 @@ class LocalJsonRepository:
             if not quote or quote.get("org_id") != org_id:
                 return None
             result = self._quote_from_data(deepcopy(quote))
-            if viewer_id is not None and not is_admin and not quote_owner_matches(
+            if viewer_id is not None and not is_admin and not _quote_visible_to_viewer(
                 result,
-                user_id=viewer_id,
-                user_name=viewer_name,
-                user_email=viewer_email,
+                viewer_id=viewer_id,
+                viewer_name=viewer_name,
+                viewer_email=viewer_email,
+                visible_workflow_steps=visible_workflow_steps,
             ):
                 return None
             return result
@@ -1306,6 +1333,7 @@ class PostgresRepository:
         viewer_name: str = "",
         viewer_email: str = "",
         is_admin: bool = False,
+        visible_workflow_steps: set[str] | None = None,
     ) -> list[QuoteRead]:
         org_uuid = _tenant_uuid(org_id)
         self._ensure_quote_numbers(org_id)
@@ -1317,7 +1345,13 @@ class PostgresRepository:
         return [
             quote
             for quote in rows
-            if quote_owner_matches(quote, user_id=viewer_id, user_name=viewer_name, user_email=viewer_email)
+            if _quote_visible_to_viewer(
+                quote,
+                viewer_id=viewer_id,
+                viewer_name=viewer_name,
+                viewer_email=viewer_email,
+                visible_workflow_steps=visible_workflow_steps,
+            )
         ]
 
     def get_quote(
@@ -1329,6 +1363,7 @@ class PostgresRepository:
         viewer_name: str = "",
         viewer_email: str = "",
         is_admin: bool = False,
+        visible_workflow_steps: set[str] | None = None,
     ) -> QuoteRead | None:
         org_uuid = _tenant_uuid(org_id)
         self._ensure_quote_numbers(org_id)
@@ -1336,11 +1371,12 @@ class PostgresRepository:
         with self._engine.begin() as conn:
             row = conn.execute(stmt).first()
         quote = self._quote_from_row(row) if row else None
-        if quote and viewer_id is not None and not is_admin and not quote_owner_matches(
+        if quote and viewer_id is not None and not is_admin and not _quote_visible_to_viewer(
             quote,
-            user_id=viewer_id,
-            user_name=viewer_name,
-            user_email=viewer_email,
+            viewer_id=viewer_id,
+            viewer_name=viewer_name,
+            viewer_email=viewer_email,
+            visible_workflow_steps=visible_workflow_steps,
         ):
             return None
         return quote

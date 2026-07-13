@@ -50,12 +50,15 @@ import {
   BusinessMasterData,
   ContactPerson,
   CustomerRecord,
+  ENQUIRY_WORKFLOW_ACTIONS,
+  ENQUIRY_WORKFLOW_STEPS,
   GasketItem,
   ITEM_FIELDS,
   NewCustomerInput,
   OutlookLinkedMessage,
   Quote,
   addCustomerRecord,
+  advanceEnquiryWorkflow,
   advanceQuoteStage,
   bulkRecompute,
   createExtraction,
@@ -1350,6 +1353,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const canEditWorkflow = canRole(currentUser.role, "edit_workflow", accessSettings);
   const canEditQuotation = canRole(currentUser.role, "edit_quotation", accessSettings);
   const canEditQuote = canCreateEnquiry || canEditLineItems || canEditWorkflow || canEditQuotation;
+  const rawWorkflowStep = getString(quote?.stage_meta?.workflow_stage);
+  const currentWorkflowStep = ENQUIRY_WORKFLOW_STEPS.some((step) => step.id === rawWorkflowStep) ? rawWorkflowStep : "enquiry";
+  const currentWorkflowStepIndex = ENQUIRY_WORKFLOW_STEPS.findIndex((step) => step.id === currentWorkflowStep);
+  const availableWorkflowActions = ENQUIRY_WORKFLOW_ACTIONS.filter(
+    (item) =>
+      (item.from as readonly string[]).includes(currentWorkflowStep) &&
+      (currentUser.role === "admin" || (item.roles as readonly string[]).includes(currentUser.role)),
+  );
   const canRunMaterialPhase1 = canEditWorkflow;
   const canEditMaterialPhase2 = canRole(currentUser.role, "edit_material_phase2", accessSettings);
   const canSaveProgress = Boolean(quote && (canEditQuote || canAddDetails || canEditMaterialPhase2));
@@ -3039,6 +3050,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     }
   }
 
+  async function runWorkflowAction(action: string) {
+    if (!quote) return;
+    try {
+      const updated = await advanceEnquiryWorkflow(quote.id, action);
+      setQuote(updated);
+      setQuotes((prev) => prev.map((row) => (row.id === updated.id ? quoteSummary(updated) : row)));
+      toast.success("Workflow updated");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not update the workflow");
+    }
+  }
+
   function salesRepQuoteData(user: (typeof salesRepUsers)[number]) {
     return {
       ...qd,
@@ -4179,6 +4202,60 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           </div>
         </div>
       </div>}
+
+      {!isQuotationSection && (
+        <div className="rounded-md border bg-card p-3">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-medium">Enquiry workflow</div>
+            <div className="text-xs text-muted-foreground">
+              Currently with: <span className="font-medium text-foreground">{ENQUIRY_WORKFLOW_STEPS[currentWorkflowStepIndex]?.team ?? "Sales"}</span>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-1">
+            {ENQUIRY_WORKFLOW_STEPS.map((step, index) => {
+              const state = index < currentWorkflowStepIndex ? "done" : index === currentWorkflowStepIndex ? "current" : "todo";
+              return (
+                <React.Fragment key={step.id}>
+                  <span
+                    className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${
+                      state === "current"
+                        ? "bg-primary text-primary-foreground"
+                        : state === "done"
+                          ? "bg-primary/15 text-primary"
+                          : "bg-muted text-muted-foreground"
+                    }`}
+                    title={`${step.label} — ${step.team}`}
+                  >
+                    <span
+                      className={`flex h-4 w-4 items-center justify-center rounded-full text-[10px] font-semibold ${
+                        state === "current" ? "bg-primary-foreground text-primary" : state === "done" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground"
+                      }`}
+                    >
+                      {state === "done" ? <Check className="h-3 w-3" /> : index + 1}
+                    </span>
+                    {step.label}
+                  </span>
+                  {index < ENQUIRY_WORKFLOW_STEPS.length - 1 && <span className="h-px w-3 bg-border sm:w-5" aria-hidden />}
+                </React.Fragment>
+              );
+            })}
+          </div>
+          {availableWorkflowActions.length > 0 ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {availableWorkflowActions.map((item) => (
+                <Button key={item.action} size="sm" onClick={() => runWorkflowAction(item.action)}>
+                  <ArrowRight className="h-4 w-4" />
+                  {item.label}
+                </Button>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-2 text-xs text-muted-foreground">
+              No workflow action for your role at this step — it&apos;s with the {ENQUIRY_WORKFLOW_STEPS[currentWorkflowStepIndex]?.team ?? "team"}.
+            </div>
+          )}
+        </div>
+      )}
 
       <div className={isQuotationSection ? "hidden" : "border bg-card"}>
         {!isQuotationSection && <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
