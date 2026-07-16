@@ -4483,7 +4483,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               </div>
               <div className="space-y-1.5">
                 <Label>Export or domestic *</Label>
-                <Select value={getString(quote.stage_meta?.market_type) || BLANK_SELECT_VALUE} onValueChange={(value) => updateQuoteDraft({ stage_meta: { ...(quote.stage_meta ?? {}), market_type: value === BLANK_SELECT_VALUE ? "" : value } })} disabled={!canAddDetails}>
+                <Select value={getString(quote.stage_meta?.market_type) || BLANK_SELECT_VALUE} onValueChange={(value) => {
+                  const market_type = value === BLANK_SELECT_VALUE ? "" : value;
+                  const nextMeta: Record<string, unknown> = { ...(quote.stage_meta ?? {}), market_type };
+                  // Domestic orders are within India — default the country automatically.
+                  if (market_type === "domestic") nextMeta.country = "India";
+                  updateQuoteDraft({ stage_meta: nextMeta });
+                }} disabled={!canAddDetails}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value={BLANK_SELECT_VALUE}>Select</SelectItem>
