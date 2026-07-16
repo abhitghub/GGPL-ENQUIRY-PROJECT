@@ -12,7 +12,7 @@ import { TableCell, TableRow } from "@/components/ui/table";
 import { evaluateQuoteQuality } from "./quality-utils";
 import { quotationStageBadge } from "./quotation-stage";
 import { formatCurrencyValue, quoteAgeDays, quoteEstimatedValue, quoteNextAction } from "./queue-utils";
-import { enquiryStageLabel, QuoteSection, stageLabel } from "./stage-utils";
+import { enquiryStageLabel, QuoteSection, stageLabel, workflowStageLabel } from "./stage-utils";
 
 export function QuoteSummaryRow({
   quote,
@@ -40,7 +40,12 @@ export function QuoteSummaryRow({
   const reviewCount = quote.n_missing + quote.n_check;
   const nextAction = quoteNextAction(quote);
   const priority = String(quote.stage_meta?.priority || "normal");
-  const workflowLabel = isFinalSection || isPoSection ? stageLabel(quote.stage) : enquiryStageLabel(quote);
+  // In Quotations/Orders show the enquiry->quotation workflow stage (e.g.
+  // "Pricing decision", "Ready for customer"); fall back to the primary pipeline
+  // stage for records that carry no workflow stage.
+  const workflowLabel = isFinalSection || isPoSection
+    ? (workflowStageLabel(quote) || stageLabel(quote.stage))
+    : enquiryStageLabel(quote);
   const quotationStage = quotationStageBadge(quote);
   const ageLabel = isPoSection ? "PO" : isFinalSection ? "quote" : "old";
   const salesRepLabel = resolveAppUserName([

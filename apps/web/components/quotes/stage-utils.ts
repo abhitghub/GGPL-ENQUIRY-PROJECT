@@ -1,4 +1,5 @@
 import type { Quote } from "@/lib/api";
+import { ENQUIRY_WORKFLOW_STEPS, GRANULAR_ENQUIRY_WORKFLOW_STEPS } from "@/lib/api";
 
 import { getString } from "./item-validation";
 
@@ -24,6 +25,17 @@ export function workflowStepOf(quote: Quote): string {
   const meta = (quote.stage_meta ?? {}) as Record<string, unknown>;
   const granular = (meta.granular_workflow ?? {}) as Record<string, unknown>;
   return String(granular.current_stage || meta.workflow_stage || "");
+}
+
+// Human label for a quote's current enquiry->quotation workflow step (granular
+// or legacy). Empty string when the quote carries no workflow stage.
+const WORKFLOW_STEP_LABELS: Record<string, string> = Object.fromEntries([
+  ...ENQUIRY_WORKFLOW_STEPS.map((step) => [step.id, step.label]),
+  ...GRANULAR_ENQUIRY_WORKFLOW_STEPS.map((step) => [step.id, step.label]),
+]);
+
+export function workflowStageLabel(quote: Quote): string {
+  return WORKFLOW_STEP_LABELS[workflowStepOf(quote)] ?? "";
 }
 
 // A quote belongs in the Quotations section once it is at pricing or beyond.
