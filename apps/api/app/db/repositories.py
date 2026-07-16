@@ -472,25 +472,32 @@ class LocalJsonRepository:
         row["updated_at"] = _parse_dt(row["updated_at"])
         return AppUserRead(**row)
 
-    def _ensure_app_users(self, org_id: str) -> None:
+    def _ensure_app_users(self, org_id: str) -> bool:
+        """Seed/backfill default users. Returns True only when state actually
+        changed, so callers can avoid rewriting the store on a pure read."""
         now = _now().isoformat()
         users = self._state.setdefault("app_users", {})
+        changed = False
         for seed in DEFAULT_APP_USERS:
             key = f"{org_id}:{seed['id']}"
-            if key not in users:
+            existing = users.get(key)
+            if existing is None:
                 users[key] = {"org_id": org_id, "created_at": now, "updated_at": now, **seed}
-            else:
-                # Backfill only empty profile fields; never override an
-                # admin-edited role or active flag on an existing account.
-                users[key].update({
-                    "name": users[key].get("name") or seed["name"],
-                    "designation": users[key].get("designation") or seed["designation"],
-                    "contact": users[key].get("contact") or seed["contact"],
-                    "email": users[key].get("email") or seed["email"],
-                    "password_hash": users[key].get("password_hash") or seed["password_hash"],
-                    "role": users[key].get("role") or seed["role"],
-                    "updated_at": now,
-                })
+                changed = True
+                continue
+            # Backfill only empty profile fields; never override an admin-edited
+            # role or active flag. Only touch state (and bump updated_at) when a
+            # field was actually filled, so already-seeded reads stay writes-free.
+            backfill = {
+                field: seed[field]
+                for field in ("name", "designation", "contact", "email", "password_hash", "role")
+                if not existing.get(field) and seed.get(field)
+            }
+            if backfill:
+                existing.update(backfill)
+                existing["updated_at"] = now
+                changed = True
+        return changed
 
     def _ensure_quote_numbers(self, org_id: str) -> None:
         rows = [
@@ -568,13 +575,16 @@ class LocalJsonRepository:
 
     def list_app_users(self, org_id: str) -> list[AppUserRead]:
         with self._lock:
-            self._ensure_app_users(org_id)
+            changed = self._ensure_app_users(org_id)
             rows = [
                 self._app_user_from_data(deepcopy(user))
                 for user in self._state["app_users"].values()
                 if user.get("org_id") == org_id
             ]
-            self._save()
+            # Only persist when seeding/backfill actually changed something;
+            # a plain user listing must not rewrite the whole store.
+            if changed:
+                self._save()
         return sorted(rows, key=lambda user: user.id)
 
     def create_app_user(self, org_id: str, payload: AppUserCreate) -> AppUserRead:
