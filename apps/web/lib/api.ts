@@ -525,9 +525,9 @@ export const GRANULAR_ENQUIRY_WORKFLOW_ACTIONS = [
   { action: "combine_after_tr", from: ["tr_spec_returned"], roles: ["estimation"], label: "Combine specs" },
   { action: "submit_for_pricing", from: ["combined_spec_review"], roles: ["estimation"], label: "Submit for pricing" },
   { action: "open_pricing", from: ["sent_for_pricing"], roles: ["admin", "management"], label: "Open pricing" },
-  { action: "price_domestic", from: ["pricing_decision"], roles: ["admin", "management"], label: "Price (domestic)" },
-  { action: "price_international", from: ["pricing_decision"], roles: ["admin", "management"], label: "Price (international)" },
-  { action: "send_quotation", from: ["quotation_generated"], roles: ["admin", "management"], label: "Send quotation to customer" },
+  { action: "price_domestic", from: ["pricing_decision"], roles: ["admin", "management"], label: "Generate quotation (domestic)" },
+  { action: "price_international", from: ["pricing_decision"], roles: ["admin", "management"], label: "Generate quotation (international)" },
+  { action: "send_quotation", from: ["quotation_generated"], roles: ["admin", "management"], label: "Send quotation & close enquiry" },
 ] as const;
 
 // The workflow constants active for the current flag state.

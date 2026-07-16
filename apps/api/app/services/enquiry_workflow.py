@@ -237,7 +237,7 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "roles": {"admin", "management"},
         "to": "quotation_generated",
         "with_whom": "Admin",
-        "label": "Price (domestic)",
+        "label": "Generate quotation (domestic)",
         "set": {"pricing_route": "domestic"},
     },
     "price_international": {
@@ -245,7 +245,7 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "roles": {"admin", "management"},
         "to": "quotation_generated",
         "with_whom": "Admin",
-        "label": "Price (international)",
+        "label": "Generate quotation (international)",
         "set": {"pricing_route": "international"},
     },
     # Admin owns the generated quotation and releases it to the customer; the
@@ -255,7 +255,7 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "roles": {"admin", "management"},
         "to": "quotation_sent_to_customer",
         "with_whom": "Sales",
-        "label": "Send quotation to customer",
+        "label": "Send quotation & close enquiry",
     },
 }
 

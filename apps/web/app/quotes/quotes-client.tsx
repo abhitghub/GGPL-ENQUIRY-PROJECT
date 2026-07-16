@@ -4197,7 +4197,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         </div>
       </div>}
 
-      {!isQuotationSection && (
+      {/* Shown in every section (including Quotations/Orders) so pricing, quotation
+          generation, and closing the enquiry are all available where the work happens. */}
+      {(
         <div className="rounded-md border bg-card p-3">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm font-medium">Enquiry workflow</div>
