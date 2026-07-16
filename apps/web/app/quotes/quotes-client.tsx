@@ -6419,11 +6419,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                               <ShieldCheck className="h-4 w-4" />
                               Request approval
                             </Button>
-                            <Button onClick={() => decideApproval("approved")} disabled={!canApprove || approval.status !== "pending"}>
+                            <Button onClick={() => decideApproval("approved")} disabled={!canApprove || approval.status === "approved"}>
                               <CheckCircle2 className="h-4 w-4" />
                               Approve
                             </Button>
-                            <Button variant="secondary" onClick={() => decideApproval("rejected")} disabled={!canApprove || approval.status !== "pending"}>
+                            <Button variant="secondary" onClick={() => decideApproval("rejected")} disabled={!canApprove || approval.status === "rejected"}>
                               <Ban className="h-4 w-4" />
                               Reject
                             </Button>
