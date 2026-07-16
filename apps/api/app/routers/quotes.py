@@ -20,13 +20,20 @@ from app.schemas.quotes import (
     WorkflowActionRequest,
 )
 from app.services.approved_quote_cache import cache_final_approved_quote
-from app.services.enquiry_workflow import WORKFLOW_TRANSITIONS, current_workflow_step, visible_steps_for_role
+from app.services.enquiry_workflow import (
+    TR_REQUIRED_GASKET_TYPES,
+    active_transitions,
+    can_act_on_step,
+    current_workflow_step,
+    visible_steps_for_role,
+)
 from app.services.export_service import build_pdf, build_xlsx
 from app.services.quote_rules import (
     QuoteConflictError,
     QuoteValidationError,
     append_activity,
     normalize_identity,
+    now_iso,
     po_snapshot,
     quote_summary,
     workflow_transition_blockers,
@@ -102,6 +109,18 @@ def _repo_visibility_kwargs(user: CurrentUser) -> dict:
         "is_admin": user.role == "admin",
         "visible_workflow_steps": visible_steps_for_role(user.role),
     }
+
+
+def _require_workflow_owner(user: CurrentUser, step: str, transition: dict) -> None:
+    """Single-place RBAC guard for workflow edits. A role must own the CURRENT
+    stage (blocks out-of-stage edits even when a transition's role set is broad)
+    AND be permitted the specific transition. Admin bypasses both. Enforced at
+    the API layer so direct API/URL calls cannot skip stages or edit out of turn."""
+    if not can_act_on_step(user.role, step):
+        raise HTTPException(status_code=403, detail=f"Your role cannot act on enquiries at stage '{step}'")
+    if user.role != "admin" and user.role not in transition["roles"]:
+        allowed = " or ".join(sorted(transition["roles"]))
+        raise HTTPException(status_code=403, detail=f"Only {allowed} (or admin) can {transition['label'].lower()}")
 
 
 def _can_read_quote(user: CurrentUser, quote: QuoteRead) -> bool:
@@ -617,19 +636,33 @@ def advance_workflow(
     -> Estimation -> Pricing -> Sales). Each action is gated to the owning team's
     role and only valid from the matching current step."""
     current = _quote_or_404(user, quote_id)
-    transition = WORKFLOW_TRANSITIONS.get(payload.action)
+    transition = active_transitions().get(payload.action)
     if not transition:
         raise HTTPException(status_code=400, detail=f"Unknown workflow action: {payload.action}")
     step = current_workflow_step(current.stage_meta)
     if step not in transition["from"]:
         raise HTTPException(status_code=409, detail=f"This step is currently at '{step}', so it cannot be {payload.action.replace('_', ' ')}")
-    if user.role != "admin" and user.role not in transition["roles"]:
-        allowed = " or ".join(sorted(transition["roles"]))
-        raise HTTPException(status_code=403, detail=f"Only {allowed} (or admin) can {transition['label'].lower()}")
+    _require_workflow_owner(user, step, transition)
     stage_meta = dict(current.stage_meta or {})
-    stage_meta["workflow_stage"] = transition["to"]
+    # Persist the gasket-type flag (from payload or an existing value) before it
+    # is needed to resolve a conditional branch.
+    gasket_type = (payload.gasket_type or stage_meta.get("gasket_type") or "").strip()
+    if gasket_type:
+        stage_meta["gasket_type"] = gasket_type
+    # Resolve the destination: a conditional transition ("branch") picks its
+    # target at runtime from the gasket-type flag; otherwise the static "to".
+    branch = transition.get("branch")
+    if branch:
+        flag = str(stage_meta.get(branch["field"]) or "").strip().lower()
+        dest = branch["specific"] if flag in TR_REQUIRED_GASKET_TYPES else branch["default"]
+    else:
+        dest = transition["to"]
+    stage_meta["workflow_stage"] = dest
     if transition.get("with_whom"):
         stage_meta["with_whom"] = transition["with_whom"]
+    # Apply any static markers the transition records (e.g. pricing_route).
+    for key, value in (transition.get("set") or {}).items():
+        stage_meta[key] = value
     comment = (payload.comment or "").strip()
     stage_meta["workflow_comment"] = comment
     detail = f"{transition['label']} — {comment}" if comment else transition["label"]
@@ -640,6 +673,26 @@ def advance_workflow(
         detail=detail,
         user=user.name or user.user_id,
     )
+    # Additive namespaced record carrying current_stage, assigned_team,
+    # gasket_type and an append-only history_log (who did what, when).
+    granular = dict(stage_meta.get("granular_workflow") or {})
+    history = list(granular.get("history_log") or [])
+    history.append(
+        {
+            "action": payload.action,
+            "from": step,
+            "to": dest,
+            "by": user.name or user.user_id,
+            "role": user.role,
+            "at": now_iso(),
+            "comment": comment,
+        }
+    )
+    granular["current_stage"] = dest
+    granular["assigned_team"] = transition.get("with_whom") or granular.get("assigned_team")
+    granular["gasket_type"] = stage_meta.get("gasket_type")
+    granular["history_log"] = history[-100:]
+    stage_meta["granular_workflow"] = granular
     try:
         updated = repo.update_quote(
             user.org_id,

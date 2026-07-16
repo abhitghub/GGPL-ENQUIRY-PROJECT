@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     # When True, requests must carry a valid session cookie (real login).
     # Set LOGIN_ENABLED=false to reopen the app without authentication.
     login_enabled: bool = Field(default=True, alias="LOGIN_ENABLED")
+    # Feature flag for the granular 11-stage enquiry workflow. Default False keeps
+    # the original 6-step handoff behaviour; set ENABLE_GRANULAR_WORKFLOW=true to
+    # activate the finer stages (spec-check query loop, gasket-type branch to
+    # technical review, combined-spec review, domestic/international pricing).
+    enable_granular_workflow: bool = Field(default=False, alias="ENABLE_GRANULAR_WORKFLOW")
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -491,12 +491,62 @@ export const ENQUIRY_WORKFLOW_ACTIONS = [
   { action: "send_final_to_sales", from: ["estimation_final_review"], roles: ["estimation"], label: "Send final quotation to sales" },
 ] as const;
 
-export async function advanceEnquiryWorkflow(id: string, action: string, comment = ""): Promise<Quote> {
+// Feature flag mirroring the backend ENABLE_GRANULAR_WORKFLOW. When off, the UI
+// keeps using the legacy 6-step constants above and behaves exactly as before.
+export const GRANULAR_WORKFLOW = process.env.NEXT_PUBLIC_ENABLE_GRANULAR_WORKFLOW === "true";
+
+// Granular 11-stage machine (mirrors app/services/enquiry_workflow.py). Additive:
+// the legacy ENQUIRY_WORKFLOW_STEPS/_ACTIONS above are left untouched.
+export const GRANULAR_ENQUIRY_WORKFLOW_STEPS = [
+  { id: "enquiry_received", label: "Enquiry received", team: "Sales" },
+  { id: "forwarded_to_estimation", label: "Forwarded to estimation", team: "Estimation" },
+  { id: "spec_check", label: "Spec check", team: "Estimation" },
+  { id: "query_raised_to_customer", label: "Query raised to customer", team: "Sales" },
+  { id: "converted_to_ggpl_format", label: "Converted to GGPL format", team: "Estimation" },
+  { id: "gasket_type_check", label: "Gasket type check", team: "Estimation" },
+  { id: "technical_review_pending", label: "Technical review pending", team: "Technical review" },
+  { id: "tr_spec_returned", label: "TR spec returned", team: "Estimation" },
+  { id: "combined_spec_review", label: "Combined spec review", team: "Estimation" },
+  { id: "sent_for_pricing", label: "Sent for pricing", team: "Admin" },
+  { id: "pricing_decision", label: "Pricing decision", team: "Admin" },
+  { id: "quotation_generated", label: "Quotation generated", team: "Admin" },
+  { id: "quotation_sent_to_customer", label: "Quotation sent to customer", team: "Sales" },
+] as const;
+
+export const GRANULAR_ENQUIRY_WORKFLOW_ACTIONS = [
+  { action: "forward_to_estimation", from: ["enquiry_received"], roles: ["sales", "management"], label: "Forward to estimation" },
+  { action: "begin_spec_check", from: ["forwarded_to_estimation"], roles: ["estimation"], label: "Begin spec check" },
+  { action: "raise_customer_query", from: ["spec_check"], roles: ["estimation"], label: "Raise query to customer" },
+  { action: "answer_customer_query", from: ["query_raised_to_customer"], roles: ["sales", "management"], label: "Answer customer query" },
+  { action: "mark_spec_complete", from: ["spec_check"], roles: ["estimation"], label: "Mark spec complete" },
+  { action: "proceed_to_gasket_check", from: ["converted_to_ggpl_format"], roles: ["estimation"], label: "Proceed to gasket type check" },
+  { action: "run_gasket_type_check", from: ["gasket_type_check"], roles: ["estimation"], label: "Run gasket type check" },
+  { action: "return_tr_spec", from: ["technical_review_pending"], roles: ["technical"], label: "Return TR spec to estimation" },
+  { action: "combine_after_tr", from: ["tr_spec_returned"], roles: ["estimation"], label: "Combine specs" },
+  { action: "submit_for_pricing", from: ["combined_spec_review"], roles: ["estimation"], label: "Submit for pricing" },
+  { action: "open_pricing", from: ["sent_for_pricing"], roles: ["admin", "management"], label: "Open pricing" },
+  { action: "price_domestic", from: ["pricing_decision"], roles: ["admin", "management"], label: "Price (domestic)" },
+  { action: "price_international", from: ["pricing_decision"], roles: ["admin", "management"], label: "Price (international)" },
+  { action: "send_quotation", from: ["quotation_generated"], roles: ["admin", "management"], label: "Send quotation to customer" },
+] as const;
+
+// The workflow constants active for the current flag state.
+export const activeWorkflowSteps = () => (GRANULAR_WORKFLOW ? GRANULAR_ENQUIRY_WORKFLOW_STEPS : ENQUIRY_WORKFLOW_STEPS);
+export const activeWorkflowActions = () => (GRANULAR_WORKFLOW ? GRANULAR_ENQUIRY_WORKFLOW_ACTIONS : ENQUIRY_WORKFLOW_ACTIONS);
+
+export async function advanceEnquiryWorkflow(
+  id: string,
+  action: string,
+  comment = "",
+  gasketType?: string,
+): Promise<Quote> {
+  const body: Record<string, unknown> = { action, comment };
+  if (gasketType) body.gasket_type = gasketType;
   return parse<Quote>(
     await apiFetch(`${API_BASE}/api/v1/quotes/${id}/workflow`, {
       method: "POST",
       headers: headers(),
-      body: JSON.stringify({ action, comment }),
+      body: JSON.stringify(body),
     }),
   );
 }
