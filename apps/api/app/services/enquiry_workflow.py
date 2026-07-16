@@ -119,6 +119,7 @@ GRANULAR_WORKFLOW_STEPS: list[dict[str, str]] = [
     {"id": "sent_for_pricing", "label": "Sent for pricing", "team": "Admin"},
     {"id": "pricing_decision", "label": "Pricing decision", "team": "Admin"},
     {"id": "quotation_generated", "label": "Quotation generated", "team": "Admin"},
+    {"id": "ready_for_customer", "label": "Ready to send to customer", "team": "Sales"},
     {"id": "quotation_sent_to_customer", "label": "Quotation sent to customer", "team": "Sales"},
 ]
 
@@ -248,14 +249,22 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "label": "Generate quotation (international)",
         "set": {"pricing_route": "international"},
     },
-    # Admin owns the generated quotation and releases it to the customer; the
-    # resulting stage is terminal (nobody acts further).
+    # Admin prices and generates the quotation, then hands it back to Sales —
+    # Admin never sends to the customer directly.
     "send_quotation": {
         "from": {"quotation_generated"},
         "roles": {"admin", "management"},
-        "to": "quotation_sent_to_customer",
+        "to": "ready_for_customer",
         "with_whom": "Sales",
-        "label": "Send quotation & close enquiry",
+        "label": "Send quotation to sales",
+    },
+    # Sales releases the quotation to the customer (final state).
+    "send_to_customer": {
+        "from": {"ready_for_customer"},
+        "roles": {"sales", "management"},
+        "to": "quotation_sent_to_customer",
+        "with_whom": "Customer",
+        "label": "Send quotation to customer",
     },
 }
 
@@ -294,6 +303,7 @@ GRANULAR_STAGE_OWNER_ROLES: dict[str, set[str]] = {
     "sent_for_pricing": {"admin", "management"},
     "pricing_decision": {"admin", "management"},
     "quotation_generated": {"admin", "management"},
+    "ready_for_customer": {"sales", "management"},
     "quotation_sent_to_customer": {"sales", "management"},
 }
 

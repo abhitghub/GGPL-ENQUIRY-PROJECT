@@ -48,6 +48,7 @@ const WORKFLOW_TO_QUOTATION_STAGE: Record<string, QuotationStageId> = {
   pricing: "costing", // legacy
   estimation_final_review: "commercial_review", // legacy post-pricing review
   quotation_generated: "ready_to_send",
+  ready_for_customer: "ready_to_send", // priced, returned to sales
   sales_final: "ready_to_send", // legacy ready-for-customer
   quotation_sent_to_customer: "sent_to_customer",
 };

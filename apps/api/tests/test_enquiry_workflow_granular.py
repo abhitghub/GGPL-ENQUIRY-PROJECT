@@ -125,12 +125,15 @@ def test_granular_happy_path(granular):
     priced = _act(client, org, "shashnam", qid, "price_domestic")
     assert _stage(priced) == "quotation_generated"
     assert priced.json()["stage_meta"]["pricing_route"] == "domestic"
-    final = _act(client, org, "shashnam", qid, "send_quotation")
+    # Admin hands the priced quotation back to Sales; only Sales sends to customer.
+    assert _stage(_act(client, org, "shashnam", qid, "send_quotation")) == "ready_for_customer"
+    _act_blocked(client, org, "estimation", qid, "send_to_customer")
+    final = _act(client, org, "sales", qid, "send_to_customer")
     assert _stage(final) == "quotation_sent_to_customer"
 
     granular_meta = final.json()["stage_meta"]["granular_workflow"]
     assert granular_meta["current_stage"] == "quotation_sent_to_customer"
-    assert len(granular_meta["history_log"]) == 9
+    assert len(granular_meta["history_log"]) == 10
     assert granular_meta["history_log"][0]["action"] == "forward_to_estimation"
     assert granular_meta["history_log"][-1]["by"]  # actor recorded for audit
 

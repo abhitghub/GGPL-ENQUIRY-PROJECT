@@ -37,6 +37,7 @@ const STEP_OWNER_ROLES: Record<string, string[]> = {
   sent_for_pricing: ["admin"],
   pricing_decision: ["admin"],
   quotation_generated: ["admin"],
+  ready_for_customer: ["sales"],
   quotation_sent_to_customer: ["sales"],
 };
 

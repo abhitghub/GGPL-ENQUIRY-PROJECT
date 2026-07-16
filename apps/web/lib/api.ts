@@ -510,6 +510,7 @@ export const GRANULAR_ENQUIRY_WORKFLOW_STEPS = [
   { id: "sent_for_pricing", label: "Sent for pricing", team: "Admin" },
   { id: "pricing_decision", label: "Pricing decision", team: "Admin" },
   { id: "quotation_generated", label: "Quotation generated", team: "Admin" },
+  { id: "ready_for_customer", label: "Ready to send to customer", team: "Sales" },
   { id: "quotation_sent_to_customer", label: "Quotation sent to customer", team: "Sales" },
 ] as const;
 
@@ -527,7 +528,8 @@ export const GRANULAR_ENQUIRY_WORKFLOW_ACTIONS = [
   { action: "open_pricing", from: ["sent_for_pricing"], roles: ["admin", "management"], label: "Open pricing" },
   { action: "price_domestic", from: ["pricing_decision"], roles: ["admin", "management"], label: "Generate quotation (domestic)" },
   { action: "price_international", from: ["pricing_decision"], roles: ["admin", "management"], label: "Generate quotation (international)" },
-  { action: "send_quotation", from: ["quotation_generated"], roles: ["admin", "management"], label: "Send quotation & close enquiry" },
+  { action: "send_quotation", from: ["quotation_generated"], roles: ["admin", "management"], label: "Send quotation to sales" },
+  { action: "send_to_customer", from: ["ready_for_customer"], roles: ["sales", "management"], label: "Send quotation to customer" },
 ] as const;
 
 // The workflow constants active for the current flag state.
