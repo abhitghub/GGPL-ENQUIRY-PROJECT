@@ -309,6 +309,26 @@ _LEGACY_STAGE_OWNER_ROLES: dict[str, set[str]] = {
 }
 
 
+def _merge_role_steps(*maps: dict[str, set[str]]) -> dict[str, set[str]]:
+    merged: dict[str, set[str]] = {}
+    for mapping in maps:
+        for role, steps in mapping.items():
+            merged.setdefault(role, set()).update(steps)
+    return merged
+
+
+# When the flag is on, the granular machine is a SUPERSET of the legacy one:
+# legacy actions/stages/ownership stay valid so the existing (unmodified) screens
+# and any in-flight legacy records keep working, while the finer granular stages
+# are added. Step ids and action names never collide between the two machines, so
+# a plain dict merge is safe; role keys do collide, so those are unioned per role.
+_ALL_TRANSITIONS = {**WORKFLOW_TRANSITIONS, **GRANULAR_WORKFLOW_TRANSITIONS}
+_ALL_STEP_IDS = WORKFLOW_STEP_IDS | GRANULAR_WORKFLOW_STEP_IDS
+_ALL_STEPS = [*WORKFLOW_STEPS, *GRANULAR_WORKFLOW_STEPS]
+_ALL_STAGE_OWNER_ROLES = {**_LEGACY_STAGE_OWNER_ROLES, **GRANULAR_STAGE_OWNER_ROLES}
+_ALL_VISIBLE_STEPS = _merge_role_steps(ROLE_VISIBLE_STEPS, GRANULAR_ROLE_VISIBLE_STEPS)
+
+
 def granular_enabled() -> bool:
     # Lazy import avoids a config<->service import cycle and keeps the flag
     # re-readable after get_settings.cache_clear() in tests.
@@ -318,27 +338,28 @@ def granular_enabled() -> bool:
 
 
 def active_steps() -> list[dict[str, str]]:
-    return GRANULAR_WORKFLOW_STEPS if granular_enabled() else WORKFLOW_STEPS
+    return _ALL_STEPS if granular_enabled() else WORKFLOW_STEPS
 
 
 def active_step_ids() -> set[str]:
-    return GRANULAR_WORKFLOW_STEP_IDS if granular_enabled() else WORKFLOW_STEP_IDS
+    return _ALL_STEP_IDS if granular_enabled() else WORKFLOW_STEP_IDS
 
 
 def active_transitions() -> dict[str, dict]:
-    return GRANULAR_WORKFLOW_TRANSITIONS if granular_enabled() else WORKFLOW_TRANSITIONS
+    return _ALL_TRANSITIONS if granular_enabled() else WORKFLOW_TRANSITIONS
 
 
 def active_default_step() -> str:
+    # New enquiries created while the flag is on start in the granular machine.
     return DEFAULT_GRANULAR_STEP if granular_enabled() else DEFAULT_WORKFLOW_STEP
 
 
 def _active_visible_steps() -> dict[str, set[str]]:
-    return GRANULAR_ROLE_VISIBLE_STEPS if granular_enabled() else ROLE_VISIBLE_STEPS
+    return _ALL_VISIBLE_STEPS if granular_enabled() else ROLE_VISIBLE_STEPS
 
 
 def stage_owner_roles(step_id: str) -> set[str]:
-    table = GRANULAR_STAGE_OWNER_ROLES if granular_enabled() else _LEGACY_STAGE_OWNER_ROLES
+    table = _ALL_STAGE_OWNER_ROLES if granular_enabled() else _LEGACY_STAGE_OWNER_ROLES
     return table.get(step_id, set())
 
 

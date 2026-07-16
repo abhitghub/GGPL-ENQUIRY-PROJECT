@@ -23,7 +23,7 @@ sys.modules.pop("app", None)
 
 from app.config import get_settings  # noqa: E402
 from app.main import app  # noqa: E402
-from app.services.enquiry_workflow import can_act_on_step  # noqa: E402
+from app.services.enquiry_workflow import active_step_ids, active_transitions, can_act_on_step  # noqa: E402
 
 
 @pytest.fixture
@@ -169,6 +169,20 @@ def test_granular_gasket_specific_branch(granular):
     _act_blocked(client, org, "estimation", qid, "return_tr_spec")
     assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "tr_spec_returned"
     assert _stage(_act(client, org, "estimation", qid, "combine_after_tr")) == "combined_spec_review"
+
+
+def test_granular_is_superset_of_legacy(granular):
+    """With the flag on, legacy actions/stages/ownership remain valid alongside
+    the granular ones, so the existing (unmodified) screens and any in-flight
+    legacy records keep working — enabling the flag only ADDS behaviour."""
+    tx = active_transitions()
+    assert "send_for_pricing" in tx and "submit_for_pricing" in tx  # legacy + granular
+    assert "send_to_estimation" in tx and "forward_to_estimation" in tx
+    ids = active_step_ids()
+    assert "estimation_review" in ids and "spec_check" in ids
+    # Legacy-stage ownership is still enforced under the flag.
+    assert can_act_on_step("estimation", "estimation_review") is True
+    assert can_act_on_step("sales", "estimation_review") is False
 
 
 # (legacy_step, granular_step, owning_role) equivalence checkpoints.
