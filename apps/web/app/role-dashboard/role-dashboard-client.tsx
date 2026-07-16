@@ -53,6 +53,12 @@ function currentStep(quote: Quote): string {
   return String(granular.current_stage || meta.workflow_stage || DEFAULT_STEP);
 }
 
+// The one-line note estimation left when sending an enquiry back to sales.
+function workflowNote(quote: Quote): string {
+  const meta = (quote.stage_meta ?? {}) as Record<string, unknown>;
+  return typeof meta.workflow_comment === "string" ? meta.workflow_comment : "";
+}
+
 function ownedSteps(role: string): Set<string> {
   return new Set(
     Object.entries(STEP_OWNER_ROLES)
@@ -173,6 +179,11 @@ export function RoleDashboardClient() {
                         <div className="max-w-56 truncate text-xs text-muted-foreground">
                           {quote.project_ref || quote.quote_no || "No reference added"}
                         </div>
+                        {step === "query_raised_to_customer" && workflowNote(quote) ? (
+                          <div className="mt-1 max-w-72 text-xs text-amber-700 dark:text-amber-300" title={workflowNote(quote)}>
+                            ⚠ Missing: {workflowNote(quote)}
+                          </div>
+                        ) : null}
                       </TableCell>
                       <TableCell>
                         <Badge variant="outline">{STEP_LABELS[step] ?? step.replaceAll("_", " ")}</Badge>

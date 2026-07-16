@@ -3066,8 +3066,15 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
 
   async function runWorkflowAction(action: string) {
     if (!quote) return;
+    const comment = workflowComment.trim();
+    // When estimation sends the enquiry back to sales for missing info, require a
+    // one-line note so sales knows what is missing.
+    if (action === "raise_customer_query" && !comment) {
+      toast.error("Add a one-line note on what is missing before sending back to sales.");
+      return;
+    }
     try {
-      const updated = await advanceEnquiryWorkflow(quote.id, action, workflowComment.trim());
+      const updated = await advanceEnquiryWorkflow(quote.id, action, comment);
       setQuote(updated);
       setQuotes((prev) => prev.map((row) => (row.id === updated.id ? quoteSummary(updated) : row)));
       setWorkflowComment("");
@@ -4320,12 +4327,17 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               );
             })}
           </div>
-          {getString(quote.stage_meta?.workflow_comment) && (
+          {currentWorkflowStep === "query_raised_to_customer" && getString(quote.stage_meta?.workflow_comment) ? (
+            <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-950/30 dark:text-amber-200">
+              <span className="font-medium">Missing / needs clarification: </span>
+              <span>{getString(quote.stage_meta?.workflow_comment)}</span>
+            </div>
+          ) : getString(quote.stage_meta?.workflow_comment) ? (
             <div className="mt-2 rounded-md border bg-muted/30 px-2.5 py-1.5 text-xs">
               <span className="text-muted-foreground">Last note: </span>
               <span>{getString(quote.stage_meta?.workflow_comment)}</span>
             </div>
-          )}
+          ) : null}
           {availableWorkflowActions.length > 0 ? (
             <div className="mt-3 space-y-2">
               <textarea
