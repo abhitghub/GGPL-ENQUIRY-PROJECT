@@ -1769,6 +1769,19 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params]);
 
+  // After the initial load, a soft navigation to the section root (e.g. clicking
+  // the sidebar "Enquiries"/"Quotations" link while a record is open) drops the
+  // ?quote= param without remounting. Return to the list so the section re-opens
+  // instead of appearing to do nothing. Keyed only on params so it never races
+  // with the internal open/create flows, which keep state and URL in sync.
+  React.useEffect(() => {
+    if (!initialRouteLoaded.current) return;
+    if (params.get("new") === "1") return;
+    if (params.get("quote")) return;
+    setQuote((current) => (current ? null : current));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params]);
+
   React.useEffect(() => {
     if (quote?.id === loadedQuoteId.current) return;
     loadedQuoteId.current = quote?.id ?? null;
