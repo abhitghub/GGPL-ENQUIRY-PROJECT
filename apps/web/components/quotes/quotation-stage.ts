@@ -39,9 +39,34 @@ export const QUOTATION_STAGES: Array<{
 
 export const QUOTATION_STAGE_INDEX = new Map(QUOTATION_STAGES.map((stage, index) => [stage.id, index]));
 
+// When a quotation stage hasn't been set explicitly, derive a sensible one from
+// the enquiry->quotation workflow position, so records that have reached pricing
+// don't show as "Draft preparation". Covers both the granular and legacy steps.
+const WORKFLOW_TO_QUOTATION_STAGE: Record<string, QuotationStageId> = {
+  sent_for_pricing: "costing",
+  pricing_decision: "costing",
+  pricing: "costing", // legacy
+  estimation_final_review: "commercial_review", // legacy post-pricing review
+  quotation_generated: "ready_to_send",
+  sales_final: "ready_to_send", // legacy ready-for-customer
+  quotation_sent_to_customer: "sent_to_customer",
+};
+
+function workflowStageOf(quote: Quote | null): string {
+  const meta = (quote?.stage_meta ?? {}) as Record<string, unknown>;
+  const granular = (meta.granular_workflow ?? {}) as Record<string, unknown>;
+  return String(granular.current_stage || meta.workflow_stage || "");
+}
+
 export function quotationStageFromData(qd: Record<string, unknown>, quote: Quote | null): QuotationStageId {
   const explicit = (typeof qd.quotation_stage === "string" ? qd.quotation_stage : "") as QuotationStageId;
-  if (QUOTATION_STAGE_INDEX.has(explicit)) return explicit;
+  // A real, non-default explicit stage wins outright. "draft_preparation" is the
+  // value stamped on every new quote, so treat it as "unset" and let the
+  // enquiry->quotation workflow position decide — otherwise a record that has
+  // reached pricing still reads as a draft in the Quotations section.
+  if (QUOTATION_STAGE_INDEX.has(explicit) && explicit !== "draft_preparation") return explicit;
+  const derived = WORKFLOW_TO_QUOTATION_STAGE[workflowStageOf(quote)];
+  if (derived) return derived;
   if (quote?.stage === "po") return "po_received";
   if (quote?.stage === "sent") return "sent_to_customer";
   return "draft_preparation";
