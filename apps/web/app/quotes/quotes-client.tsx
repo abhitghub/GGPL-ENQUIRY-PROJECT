@@ -105,7 +105,7 @@ import { QUOTATION_STAGES, QUOTATION_STAGE_INDEX, QuotationStageId, quotationSta
 import { appendActivity } from "@/components/quotes/activity-utils";
 import { ClipboardTableDetection, detectClipboardTable, rowsToTsv, structuredRowsToItemFields } from "@/components/quotes/clipboard-table";
 import { QuoteTimeline } from "@/components/quotes/quote-timeline";
-import { DRAFT_STAGES, ENQUIRY_STAGES, EnquiryStageId, FINAL_STAGES, PO_STAGES, QuoteSection, enquiryStageFromQuote, enquiryStageLabel, isPricingOnward, revisionLabel, stageLabel } from "@/components/quotes/stage-utils";
+import { DRAFT_STAGES, ENQUIRY_STAGES, EnquiryStageId, PO_STAGES, QuoteSection, enquiryStageFromQuote, enquiryStageLabel, isPricingOnward, revisionLabel, stageLabel } from "@/components/quotes/stage-utils";
 import { issueBadgesForItem, TechnicalIssuesPanel } from "@/components/quotes/technical-issues-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1350,6 +1350,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     () => masterData.customers.find((row) => row.id === getString(quote?.stage_meta?.customer_master_id)),
     [masterData.customers, quote?.stage_meta?.customer_master_id],
   );
+  // A customer counts as selected when the top-level field, the chosen master
+  // record, or the buyer name resolves — records created via import/API may have
+  // only the master id set, so keying off quote.customer alone wrongly reads as
+  // "Customer not selected / Setup incomplete".
+  const customerMasterId = getString(quote?.stage_meta?.customer_master_id);
+  const enquiryCustomerName = getString(quote?.customer) || selectedCustomerRecord?.name || getString(quote?.quote_data?.buyer_name);
+  const hasCustomerSelected = Boolean(enquiryCustomerName || customerMasterId);
   const contactOptions = React.useMemo<ComboboxOption[]>(
     () => (selectedCustomerRecord?.contacts ?? []).map((contact) => ({
       value: contact.id,
@@ -4271,8 +4278,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         {!isQuotationSection && <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2 text-sm">
-              <span className="font-medium">{quote.customer || "Customer not selected"}</span>
-              {!quote.customer || !enquiryMarketType || !selectedEnquiryOwnerId ? <Badge variant="warning">Setup incomplete</Badge> : <Badge variant="secondary">Context ready</Badge>}
+              <span className="font-medium">{enquiryCustomerName || "Customer not selected"}</span>
+              {!hasCustomerSelected || !enquiryMarketType || !selectedEnquiryOwnerId ? <Badge variant="warning">Setup incomplete</Badge> : <Badge variant="secondary">Context ready</Badge>}
             </div>
             <div className="mt-0.5 truncate text-xs text-muted-foreground">
               {[enquiryMarketType || "Quote type needed", selectedEnquiryOwnerLabel, getString(quote.project_ref) || "No project reference"].join(" / ")}
@@ -4507,7 +4514,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
             <details className="rounded-md border bg-background p-2.5" open={!quote.customer || !quote.quote_no}>
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2"><FileText className="h-4 w-4" />Enquiry details</span>
-                <Badge variant={quote.customer && quote.quote_no ? "secondary" : "outline"}>{quote.customer && quote.quote_no ? "Saved context" : "Needs context"}</Badge>
+                <Badge variant={hasCustomerSelected && quote.quote_no ? "secondary" : "outline"}>{hasCustomerSelected && quote.quote_no ? "Saved context" : "Needs context"}</Badge>
               </summary>
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 <div className="space-y-1.5">
