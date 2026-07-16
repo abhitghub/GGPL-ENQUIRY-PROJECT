@@ -52,6 +52,9 @@ import {
   CustomerRecord,
   ENQUIRY_WORKFLOW_ACTIONS,
   ENQUIRY_WORKFLOW_STEPS,
+  GRANULAR_ENQUIRY_WORKFLOW_ACTIONS,
+  GRANULAR_ENQUIRY_WORKFLOW_STEPS,
+  GRANULAR_WORKFLOW,
   GasketItem,
   ITEM_FIELDS,
   NewCustomerInput,
@@ -1309,10 +1312,21 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   // Quotation (pricing) is opened by Ashwin sir / back-office, not the sales or
   // estimation teams — they move enquiries via the workflow handoffs instead.
   const canOpenQuotation = currentUser.role !== "sales" && currentUser.role !== "estimation";
-  const rawWorkflowStep = getString(quote?.stage_meta?.workflow_stage);
-  const currentWorkflowStep = ENQUIRY_WORKFLOW_STEPS.some((step) => step.id === rawWorkflowStep) ? rawWorkflowStep : "enquiry";
-  const currentWorkflowStepIndex = ENQUIRY_WORKFLOW_STEPS.findIndex((step) => step.id === currentWorkflowStep);
-  const availableWorkflowActions = ENQUIRY_WORKFLOW_ACTIONS.filter(
+  // Resolve the workflow machine per-quote so mixed legacy/granular data both
+  // render correctly. Prefer the granular namespace, then the legacy stage key.
+  // A granular stage id => granular steps/actions; a legacy id => legacy; an
+  // unknown/empty stage falls back to whichever machine the flag has active.
+  const granularWorkflowMeta = (quote?.stage_meta?.granular_workflow ?? {}) as Record<string, unknown>;
+  const rawWorkflowStep = getString(granularWorkflowMeta.current_stage) || getString(quote?.stage_meta?.workflow_stage);
+  const isGranularStep = GRANULAR_ENQUIRY_WORKFLOW_STEPS.some((step) => step.id === rawWorkflowStep);
+  const isLegacyStep = ENQUIRY_WORKFLOW_STEPS.some((step) => step.id === rawWorkflowStep);
+  const useGranularWorkflow = isGranularStep || (!isLegacyStep && GRANULAR_WORKFLOW);
+  const workflowSteps = useGranularWorkflow ? GRANULAR_ENQUIRY_WORKFLOW_STEPS : ENQUIRY_WORKFLOW_STEPS;
+  const workflowActions = useGranularWorkflow ? GRANULAR_ENQUIRY_WORKFLOW_ACTIONS : ENQUIRY_WORKFLOW_ACTIONS;
+  const defaultWorkflowStep = useGranularWorkflow ? "enquiry_received" : "enquiry";
+  const currentWorkflowStep = workflowSteps.some((step) => step.id === rawWorkflowStep) ? rawWorkflowStep : defaultWorkflowStep;
+  const currentWorkflowStepIndex = workflowSteps.findIndex((step) => step.id === currentWorkflowStep);
+  const availableWorkflowActions = workflowActions.filter(
     (item) =>
       (item.from as readonly string[]).includes(currentWorkflowStep) &&
       (currentUser.role === "admin" || (item.roles as readonly string[]).includes(currentUser.role)),
@@ -4188,11 +4202,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm font-medium">Enquiry workflow</div>
             <div className="text-xs text-muted-foreground">
-              Currently with: <span className="font-medium text-foreground">{ENQUIRY_WORKFLOW_STEPS[currentWorkflowStepIndex]?.team ?? "Sales"}</span>
+              Currently with: <span className="font-medium text-foreground">{workflowSteps[currentWorkflowStepIndex]?.team ?? "Sales"}</span>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-1">
-            {ENQUIRY_WORKFLOW_STEPS.map((step, index) => {
+            {workflowSteps.map((step, index) => {
               const state = index < currentWorkflowStepIndex ? "done" : index === currentWorkflowStepIndex ? "current" : "todo";
               return (
                 <React.Fragment key={step.id}>
@@ -4215,7 +4229,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     </span>
                     {step.label}
                   </span>
-                  {index < ENQUIRY_WORKFLOW_STEPS.length - 1 && <span className="h-px w-3 bg-border sm:w-5" aria-hidden />}
+                  {index < workflowSteps.length - 1 && <span className="h-px w-3 bg-border sm:w-5" aria-hidden />}
                 </React.Fragment>
               );
             })}
@@ -4245,7 +4259,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
             </div>
           ) : (
             <div className="mt-2 text-xs text-muted-foreground">
-              No workflow action for your role at this step — it&apos;s with the {ENQUIRY_WORKFLOW_STEPS[currentWorkflowStepIndex]?.team ?? "team"}.
+              No workflow action for your role at this step — it&apos;s with the {workflowSteps[currentWorkflowStepIndex]?.team ?? "team"}.
             </div>
           )}
         </div>
