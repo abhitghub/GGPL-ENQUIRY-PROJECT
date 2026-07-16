@@ -10,6 +10,31 @@ export const MATERIAL_STAGES = new Set(["initial", "review", "quote_prep", "repr
 export const FINAL_STAGES = new Set(["quote_prep", "repricing", "sent", "po"]);
 export const PO_STAGES = new Set(["po"]);
 
+// Enquiry->quotation workflow steps (legacy + granular) that mean the record has
+// reached pricing and is a real quotation: being priced, or priced and ready to
+// deliver. Used to scope the Quotations section to pricing-stage-onward records.
+export const PRICING_ONWARD_WORKFLOW_STEPS = new Set([
+  // legacy enquiry_workflow
+  "pricing", "estimation_final_review", "sales_final",
+  // granular workflow
+  "sent_for_pricing", "pricing_decision", "quotation_generated", "quotation_sent_to_customer",
+]);
+
+export function workflowStepOf(quote: Quote): string {
+  const meta = (quote.stage_meta ?? {}) as Record<string, unknown>;
+  const granular = (meta.granular_workflow ?? {}) as Record<string, unknown>;
+  return String(granular.current_stage || meta.workflow_stage || "");
+}
+
+// A quote belongs in the Quotations section once it is at pricing or beyond.
+// Records that predate the workflow (no workflow stage) fall back to their
+// primary stage, treating repricing/sent/po as priced-and-beyond (not prep).
+export function isPricingOnward(quote: Quote): boolean {
+  const step = workflowStepOf(quote);
+  if (step) return PRICING_ONWARD_WORKFLOW_STEPS.has(step);
+  return new Set(["repricing", "sent", "po"]).has(quote.stage);
+}
+
 export const ENQUIRY_STAGES: Array<{ id: EnquiryStageId; label: string }> = [
   { id: "draft", label: "Draft" },
   { id: "technical_clarification", label: "Technical clarification" },

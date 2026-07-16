@@ -102,7 +102,7 @@ import { QUOTATION_STAGES, QUOTATION_STAGE_INDEX, QuotationStageId, quotationSta
 import { appendActivity } from "@/components/quotes/activity-utils";
 import { ClipboardTableDetection, detectClipboardTable, rowsToTsv, structuredRowsToItemFields } from "@/components/quotes/clipboard-table";
 import { QuoteTimeline } from "@/components/quotes/quote-timeline";
-import { DRAFT_STAGES, ENQUIRY_STAGES, EnquiryStageId, FINAL_STAGES, PO_STAGES, QuoteSection, enquiryStageFromQuote, enquiryStageLabel, revisionLabel, stageLabel } from "@/components/quotes/stage-utils";
+import { DRAFT_STAGES, ENQUIRY_STAGES, EnquiryStageId, FINAL_STAGES, PO_STAGES, QuoteSection, enquiryStageFromQuote, enquiryStageLabel, isPricingOnward, revisionLabel, stageLabel } from "@/components/quotes/stage-utils";
 import { issueBadgesForItem, TechnicalIssuesPanel } from "@/components/quotes/technical-issues-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -3108,7 +3108,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     if (isPoSection) {
       if (!PO_STAGES.has(row.stage)) return false;
     } else if (isFinalSection) {
-      if (!FINAL_STAGES.has(row.stage)) return false;
+      // Quotations = records that have reached pricing and beyond (in pricing,
+      // priced, or ready to deliver) per the enquiry->quotation workflow.
+      if (!isPricingOnward(row)) return false;
     } else if (isMaterialSection) {
       if (row.stage_meta?.material_planning_enabled !== true) return false;
     } else if (!DRAFT_STAGES.has(row.stage)) {

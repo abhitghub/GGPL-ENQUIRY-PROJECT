@@ -243,7 +243,7 @@ DEFAULT_ACCESS_SETTINGS = AccessSettings(
         "admin": _permissions(ALL_CAPABILITIES),
         "management": _permissions([
             "view_dashboard", "view_enquiry", "view_material_planning", "view_quotation", "view_purchase_orders", "view_doc_assistant", "view_history",
-            "create_enquiry", "edit_sales_details", "edit_workflow", "edit_line_items", "edit_quotation", "approve_quotes", "export_quotes",
+            "edit_sales_details", "edit_workflow", "edit_line_items", "edit_quotation", "approve_quotes", "export_quotes",
         ]),
         "approver": _permissions([
             "view_dashboard", "view_enquiry", "view_quotation", "view_purchase_orders", "view_history",
@@ -255,25 +255,25 @@ DEFAULT_ACCESS_SETTINGS = AccessSettings(
         ]),
         "estimation": _permissions([
             "view_dashboard", "view_enquiry", "view_doc_assistant", "view_history",
-            "create_enquiry", "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
+            "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
         ]),
         "technical": _permissions([
             "view_dashboard", "view_enquiry", "view_doc_assistant", "view_history",
-            "create_enquiry", "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
+            "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
         ]),
         "planning": _permissions([
-            "view_dashboard", "view_material_planning", "view_purchase_orders", "view_history",
-            "create_enquiry", "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
+            "view_dashboard", "view_enquiry", "view_material_planning", "view_purchase_orders", "view_history",
+            "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
         ]),
         "material_planner": _permissions([
-            "view_dashboard", "view_material_planning", "view_purchase_orders", "view_history",
-            "create_enquiry", "edit_workflow", "edit_line_items", "edit_quotation", "edit_material_phase2", "export_quotes",
+            "view_dashboard", "view_enquiry", "view_material_planning", "view_purchase_orders", "view_history",
+            "edit_workflow", "edit_line_items", "edit_quotation", "edit_material_phase2", "export_quotes",
         ]),
         "purchase": _permissions([
-            "view_dashboard", "view_material_planning", "view_purchase_orders", "view_history",
-            "create_enquiry", "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
+            "view_dashboard", "view_enquiry", "view_material_planning", "view_purchase_orders", "view_history",
+            "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
         ]),
-        "viewer": _permissions(["view_history"]),
+        "viewer": _permissions(["view_enquiry", "view_history"]),
     },
 )
 
