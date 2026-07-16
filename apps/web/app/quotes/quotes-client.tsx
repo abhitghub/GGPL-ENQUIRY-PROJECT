@@ -182,6 +182,7 @@ const quoteDefaults: Record<string, unknown> = {
   unit_prices: [],
   cost_prices: [],
   target_margins_pct: [],
+  line_discounts_pct: [],
   discount_approval_pct: 0,
   discount_pct: 0,
   gst_type: "IGST",
@@ -3055,6 +3056,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const unitPrices = React.useMemo(() => Array.isArray(qd.unit_prices) ? qd.unit_prices.map((value) => toNumber(value)) : [], [qd.unit_prices]);
   const costPrices = React.useMemo(() => Array.isArray(qd.cost_prices) ? qd.cost_prices.map((value) => toNumber(value)) : [], [qd.cost_prices]);
   const targetMargins = React.useMemo(() => Array.isArray(qd.target_margins_pct) ? qd.target_margins_pct.map((value) => toNumber(value, 0)) : [], [qd.target_margins_pct]);
+  const lineDiscounts = React.useMemo(() => Array.isArray(qd.line_discounts_pct) ? qd.line_discounts_pct.map((value) => toNumber(value, 0)) : [], [qd.line_discounts_pct]);
   const currency = getString(qd.currency) || "INR";
   const fxRate = toNumber(qd.fx_rate, defaultFx[currency] ?? 1);
   const discountPct = toNumber(qd.discount_pct);
@@ -3066,13 +3068,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       unitPrices,
       costPrices,
       targetMargins,
+      lineDiscountsPct: lineDiscounts,
       discountPct,
       gstPct,
       riskCount: qualityReport.risks.filter((risk) => risk.severity === "high").length,
       fxRate,
       isForeignCurrency: currency !== "INR",
     }),
-    [costPrices, currency, discountPct, fxRate, gstPct, items, qualityReport.risks, targetMargins, unitPrices],
+    [costPrices, currency, discountPct, fxRate, gstPct, items, lineDiscounts, qualityReport.risks, targetMargins, unitPrices],
   );
   const subtotal = pricingSummary.subtotal;
   const discount = pricingSummary.discount;
@@ -6248,13 +6251,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                           <TableHead>Description</TableHead>
                           <TableHead>Qty</TableHead>
                           <TableHead>UOM</TableHead>
-                          <TableHead>Cost/unit</TableHead>
-                          <TableHead>Target margin %</TableHead>
-                          <TableHead>Base INR unit price</TableHead>
-                          <TableHead>{currency} unit price</TableHead>
-                          <TableHead>Margin %</TableHead>
-                          <TableHead>Discount impact</TableHead>
-                          <TableHead>Total {currency}</TableHead>
+                          <TableHead>Unit price</TableHead>
+                          <TableHead>Discount %</TableHead>
+                          <TableHead>Final price</TableHead>
+                          <TableHead>Total price</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -6262,8 +6262,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                           const index = finalPageStartIndex + pageIndex;
                           const price = unitPrices[index] ?? 0;
                           const converted = currency === "INR" ? price : price / (fxRate || 1);
-                          const total = item.status === "regret" ? 0 : converted * toNumber(item.quantity);
                           const pricingLine = pricingSummary.lines[index];
+                          const discountPctLine = lineDiscounts[index] ?? 0;
+                          const finalUnitPrice = pricingLine?.finalUnitPrice ?? converted;
+                          const total = item.status === "regret" ? 0 : finalUnitPrice * toNumber(item.quantity);
                           return (
                             <TableRow key={index}>
                               <TableCell>{index + 1}</TableCell>
@@ -6282,31 +6284,20 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                               <TableCell><Input className="w-24" type="number" value={getString(item.quantity)} onChange={(event) => updateItem(index, "quantity", event.target.value)} disabled={!canEditLineItems} /></TableCell>
                               <TableCell>{getString(item.uom || "NOS")}</TableCell>
                               <TableCell>
-                                <Input className="w-28" type="number" value={getString(costPrices[index] ?? 0)} disabled={!canEditQuotation} onChange={(event) => {
-                                  const next = [...costPrices];
-                                  next[index] = Number(event.target.value);
-                                  updateQd("cost_prices", next);
-                                }} />
-                              </TableCell>
-                              <TableCell>
-                                <Input className="w-28" type="number" value={getString(targetMargins[index] ?? 0)} disabled={!canEditQuotation} onChange={(event) => {
-                                  const next = [...targetMargins];
-                                  next[index] = Number(event.target.value);
-                                  updateQd("target_margins_pct", next);
-                                }} />
-                              </TableCell>
-                              <TableCell>
                                 <Input className="w-32" type="number" value={getString(price)} disabled={!canEditQuotation} onChange={(event) => {
                                   const next = [...unitPrices];
                                   next[index] = Number(event.target.value);
                                   updateQd("unit_prices", next);
                                 }} />
                               </TableCell>
-                              <TableCell>{converted.toFixed(2)}</TableCell>
-                              <TableCell className={pricingLine?.marginPct !== null && pricingLine?.marginPct !== undefined && pricingLine.marginPct < 0 ? "text-red-600" : ""}>
-                                {pricingLine?.marginPct === null || pricingLine?.marginPct === undefined ? "-" : pricingLine.marginPct.toFixed(1)}
+                              <TableCell>
+                                <Input className="w-24" type="number" value={getString(discountPctLine)} disabled={!canEditQuotation} onChange={(event) => {
+                                  const next = [...lineDiscounts];
+                                  next[index] = Number(event.target.value);
+                                  updateQd("line_discounts_pct", next);
+                                }} />
                               </TableCell>
-                              <TableCell>{(pricingLine?.discountImpact ?? 0).toFixed(2)}</TableCell>
+                              <TableCell>{finalUnitPrice.toFixed(2)}</TableCell>
                               <TableCell>{total.toFixed(2)}</TableCell>
                             </TableRow>
                           );

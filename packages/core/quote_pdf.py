@@ -742,12 +742,25 @@ def _make_totals_table(items: list[dict], quote_data: dict) -> Table:
     return table
 
 
+def _effective_unit_prices(quote_data: dict) -> list[float]:
+    """Unit prices with the per-line discount % applied, so the document shows
+    the net (final) unit price and the amounts/totals match. A missing or zero
+    line discount leaves the unit price unchanged."""
+    unit_prices = quote_data.get("unit_prices", []) or []
+    discounts = quote_data.get("line_discounts_pct", []) or []
+    result: list[float] = []
+    for i, unit in enumerate(unit_prices):
+        disc = _num(discounts[i]) if i < len(discounts) else 0
+        result.append(_num(unit) * (1 - max(disc, 0) / 100))
+    return result
+
+
 def _draw_items_page(c: canvas.Canvas, items: list[dict], quote_data: dict, start: int):
     first_items_page = start == 0
     if first_items_page:
         _draw_buyer_block(c, quote_data)
 
-    unit_prices = quote_data.get("unit_prices", [])
+    unit_prices = _effective_unit_prices(quote_data)
     currency    = quote_data.get("currency", "INR")
     TABLE_X = ITEM_COLS[0]
     TABLE_W = ITEM_COLS[-1] - ITEM_COLS[0]
@@ -810,7 +823,7 @@ def _draw_items_page(c: canvas.Canvas, items: list[dict], quote_data: dict, star
 
 
 def _totals(items: list[dict], quote_data: dict):
-    unit_prices = quote_data.get("unit_prices", [])
+    unit_prices = _effective_unit_prices(quote_data)
     currency = quote_data.get("currency", "INR")
     total_qty = Decimal("0")
     subtotal = Decimal("0")

@@ -7,6 +7,8 @@ export type QuotePricingLine = {
   costPrice: number;
   sellingPrice: number;
   targetMarginPct: number;
+  lineDiscountPct: number;
+  finalUnitPrice: number;
   lineTotal: number;
   costTotal: number;
   marginPct: number | null;
@@ -35,6 +37,7 @@ export function buildQuotePricingSummary({
   unitPrices,
   costPrices,
   targetMargins,
+  lineDiscountsPct = [],
   discountPct,
   gstPct,
   riskCount,
@@ -45,6 +48,7 @@ export function buildQuotePricingSummary({
   unitPrices: number[];
   costPrices: number[];
   targetMargins: number[];
+  lineDiscountsPct?: number[];
   discountPct: number;
   gstPct: number;
   riskCount: number;
@@ -56,19 +60,25 @@ export function buildQuotePricingSummary({
     const quantity = item.status === "regret" ? 0 : toNumber(item.quantity, 0);
     const sellingPrice = (unitPrices[index] ?? 0) / divisor;
     const costPrice = costPrices[index] ?? 0;
-    const lineTotal = quantity * sellingPrice;
+    // Per-line discount % applied to the unit price. Zero (the default) keeps
+    // finalUnitPrice === sellingPrice, so totals match the pre-discount behaviour.
+    const lineDiscountPct = Math.max(lineDiscountsPct[index] ?? 0, 0);
+    const finalUnitPrice = sellingPrice * (1 - lineDiscountPct / 100);
+    const lineTotal = quantity * finalUnitPrice;
     const costTotal = quantity * costPrice;
-    const marginPct = sellingPrice > 0 ? ((sellingPrice - costPrice) / sellingPrice) * 100 : null;
+    const marginPct = finalUnitPrice > 0 ? ((finalUnitPrice - costPrice) / finalUnitPrice) * 100 : null;
     return {
       index,
       quantity,
       costPrice,
       sellingPrice,
       targetMarginPct: targetMargins[index] ?? 0,
+      lineDiscountPct,
+      finalUnitPrice,
       lineTotal,
       costTotal,
       marginPct,
-      discountImpact: lineTotal * (Math.max(discountPct, 0) / 100),
+      discountImpact: quantity * sellingPrice * (lineDiscountPct / 100),
     };
   });
 
