@@ -1294,6 +1294,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [selectionAnchor, setSelectionAnchor] = React.useState<GridCell | null>(null);
   const [selectionFocus, setSelectionFocus] = React.useState<GridCell | null>(null);
   const [isSelectingCells, setIsSelectingCells] = React.useState(false);
+  // Excel-style fill handle: the source block being dragged from, and the cell
+  // the pointer is currently over while dragging.
+  const [fillSource, setFillSource] = React.useState<{ minPosition: number; maxPosition: number; minCol: number; maxCol: number } | null>(null);
+  const [fillFocus, setFillFocus] = React.useState<{ position: number; colIndex: number } | null>(null);
   const [columnFilters, setColumnFilters] = React.useState<Record<string, string>>({});
   const [gridSort, setGridSort] = React.useState<GridSort>(null);
   const isDraftSection = section === "drafts";
@@ -1456,6 +1460,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       }
     : null;
   const selectedCellCount = selectedRange ? (selectedRange.maxPosition - selectedRange.minPosition + 1) * (selectedRange.maxCol - selectedRange.minCol + 1) : 0;
+  // The rectangle the fill handle would fill, extended from the source block
+  // along the dominant drag axis (down or right, like Excel).
+  const fillRange = fillSource && fillFocus
+    ? (() => {
+        const downDelta = fillFocus.position - fillSource.maxPosition;
+        const rightDelta = fillFocus.colIndex - fillSource.maxCol;
+        if (downDelta <= 0 && rightDelta <= 0) return null;
+        return downDelta >= rightDelta
+          ? { ...fillSource, maxPosition: Math.max(fillSource.maxPosition, fillFocus.position) }
+          : { ...fillSource, maxCol: Math.max(fillSource.maxCol, fillFocus.colIndex) };
+      })()
+    : null;
   const filterCount = activeColumnFilters.length + (gridSort ? 1 : 0);
   const pageCount = Math.max(1, Math.ceil(displayIndices.length / DRAFT_PAGE_SIZE));
   const safeDraftPage = Math.min(draftPage, pageCount - 1);
@@ -1875,6 +1891,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     window.addEventListener("mouseup", stopSelecting);
     return () => window.removeEventListener("mouseup", stopSelecting);
   }, [isSelectingCells]);
+
+  React.useEffect(() => {
+    if (!fillSource) return undefined;
+    const releaseFill = () => applyFillHandle();
+    window.addEventListener("mouseup", releaseFill);
+    return () => window.removeEventListener("mouseup", releaseFill);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fillSource, fillFocus]);
 
   React.useEffect(() => {
     const refresh = () => {
@@ -3392,6 +3416,59 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     setHasUnsavedLocalEdits(true);
     toast.success(`Filled ${changed} cell${changed === 1 ? "" : "s"} down`);
     return true;
+  }
+
+  function isInFillPreview(rowIndex: number, colIndex: number) {
+    if (!fillRange) return false;
+    const position = displayIndexPositions.get(rowIndex) ?? -1;
+    return position >= fillRange.minPosition && position <= fillRange.maxPosition && colIndex >= fillRange.minCol && colIndex <= fillRange.maxCol;
+  }
+
+  // Apply the fill handle drag: tile the source block's values across the
+  // extended rectangle (so a single cell repeats the same value, and a multi-cell
+  // block repeats as a pattern — like Excel's copy-fill).
+  function applyFillHandle() {
+    if (!fillSource || !fillRange) {
+      setFillSource(null);
+      setFillFocus(null);
+      return;
+    }
+    const srcRows = fillSource.maxPosition - fillSource.minPosition + 1;
+    const srcCols = fillSource.maxCol - fillSource.minCol + 1;
+    const next = [...items];
+    let changed = 0;
+    for (let position = fillRange.minPosition; position <= fillRange.maxPosition; position += 1) {
+      for (let colIndex = fillRange.minCol; colIndex <= fillRange.maxCol; colIndex += 1) {
+        const inSource = position >= fillSource.minPosition && position <= fillSource.maxPosition && colIndex >= fillSource.minCol && colIndex <= fillSource.maxCol;
+        if (inSource) continue;
+        const rowIndex = displayIndices[position];
+        if (rowIndex === undefined || !next[rowIndex]) continue;
+        const column = activeTableColumns[colIndex];
+        if (!column || !isEditableGridColumn(column)) continue;
+        const srcPosition = fillSource.minPosition + ((position - fillSource.minPosition) % srcRows);
+        const srcCol = fillSource.minCol + ((colIndex - fillSource.minCol) % srcCols);
+        const srcItem = items[displayIndices[srcPosition]];
+        const srcColumn = activeTableColumns[srcCol];
+        if (!srcItem || !srcColumn) continue;
+        next[rowIndex] = setItemValue(next[rowIndex], column.field, columnValue(srcItem, srcColumn));
+        changed += 1;
+      }
+    }
+    if (changed) {
+      setUndoItems({ label: "Undo fill", items, local: true });
+      invalidateMaterialPlan();
+      setQuote((current) => (current ? { ...current, items: next } : current));
+      setHasUnsavedLocalEdits(true);
+      const anchorRow = displayIndices[fillRange.minPosition];
+      const focusRow = displayIndices[fillRange.maxPosition];
+      if (anchorRow !== undefined && focusRow !== undefined) {
+        setSelectionAnchor({ rowIndex: anchorRow, colIndex: fillRange.minCol });
+        setSelectionFocus({ rowIndex: focusRow, colIndex: fillRange.maxCol });
+      }
+      toast.success(`Filled ${changed} cell${changed === 1 ? "" : "s"}`);
+    }
+    setFillSource(null);
+    setFillFocus(null);
   }
 
   function copyGridSelection(event: React.ClipboardEvent<HTMLDivElement>) {
@@ -5319,13 +5396,21 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                           {activeTableColumns.map((column, colIndex) => {
                             const selectedCell = tableMode === "spreadsheet" && isGridCellSelected(index, colIndex);
                             const activeGridCell = tableMode === "spreadsheet" && isActiveGridCell(index, colIndex);
+                            const cellPosition = tableMode === "spreadsheet" ? (displayIndexPositions.get(index) ?? -1) : -1;
+                            // The fill handle sits on the bottom-right corner of the selection (or the active cell).
+                            const isFillCorner = tableMode === "spreadsheet" && !editingCell && (
+                              selectedRange
+                                ? (cellPosition === selectedRange.maxPosition && colIndex === selectedRange.maxCol)
+                                : activeGridCell
+                            );
+                            const inFillPreview = tableMode === "spreadsheet" && isInFillPreview(index, colIndex);
                             return (
                             <TableCell
                               key={column.label}
                               data-grid-row={index}
                               data-grid-col={colIndex}
                               tabIndex={tableMode === "spreadsheet" ? 0 : undefined}
-                              className={`border-r p-0 align-top outline-none ${selectedCell ? "bg-emerald-50 ring-1 ring-inset ring-emerald-400/60 dark:bg-emerald-950/20" : ""} ${activeGridCell ? "ring-2 ring-inset ring-emerald-600" : ""}`}
+                              className={`relative border-r p-0 align-top outline-none ${selectedCell ? "bg-emerald-50 ring-1 ring-inset ring-emerald-400/60 dark:bg-emerald-950/20" : ""} ${activeGridCell ? "ring-2 ring-inset ring-emerald-600" : ""} ${inFillPreview ? "ring-1 ring-inset ring-emerald-500/70" : ""}`}
                               onMouseDown={(event) => {
                                 if (tableMode !== "spreadsheet") return;
                                 if ((event.target as HTMLElement).closest("button,input,textarea,[role='combobox']")) return;
@@ -5344,7 +5429,12 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                                 startEditingGridCell(index, colIndex);
                               }}
                               onMouseEnter={() => {
-                                if (tableMode !== "spreadsheet" || !isSelectingCells) return;
+                                if (tableMode !== "spreadsheet") return;
+                                if (fillSource) {
+                                  setFillFocus({ position: displayIndexPositions.get(index) ?? -1, colIndex });
+                                  return;
+                                }
+                                if (!isSelectingCells) return;
                                 selectGridCell(index, colIndex, true);
                               }}
                               onFocus={() => {
@@ -5354,6 +5444,19 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                               }}
                             >
                               {renderGridCell(index, item, column, colIndex)}
+                              {isFillCorner && (
+                                <span
+                                  className="absolute bottom-0 right-0 z-30 h-2 w-2 translate-x-1/2 translate-y-1/2 cursor-crosshair rounded-[1px] border border-white bg-emerald-600 shadow-sm"
+                                  title="Drag to fill"
+                                  onMouseDown={(event) => {
+                                    event.stopPropagation();
+                                    event.preventDefault();
+                                    const pos = displayIndexPositions.get(index) ?? -1;
+                                    setFillSource(selectedRange ?? { minPosition: pos, maxPosition: pos, minCol: colIndex, maxCol: colIndex });
+                                    setFillFocus(null);
+                                  }}
+                                />
+                              )}
                             </TableCell>
                           );
                           })}
