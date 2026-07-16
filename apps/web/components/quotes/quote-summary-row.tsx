@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { TableCell, TableRow } from "@/components/ui/table";
 
 import { evaluateQuoteQuality } from "./quality-utils";
+import { quotationStageBadge } from "./quotation-stage";
 import { formatCurrencyValue, quoteAgeDays, quoteEstimatedValue, quoteNextAction } from "./queue-utils";
 import { enquiryStageLabel, QuoteSection, stageLabel } from "./stage-utils";
 
@@ -40,6 +41,7 @@ export function QuoteSummaryRow({
   const nextAction = quoteNextAction(quote);
   const priority = String(quote.stage_meta?.priority || "normal");
   const workflowLabel = isFinalSection || isPoSection ? stageLabel(quote.stage) : enquiryStageLabel(quote);
+  const quotationStage = quotationStageBadge(quote);
   const ageLabel = isPoSection ? "PO" : isFinalSection ? "quote" : "old";
   const salesRepLabel = resolveAppUserName([
     quote.stage_meta?.owner_name,
@@ -60,6 +62,9 @@ export function QuoteSummaryRow({
           </div>
           <div className="truncate text-sm font-medium">{quote.customer || quote.custom_label || "No customer"}</div>
           <div className="truncate text-xs text-muted-foreground">{[quote.project_ref, salesRepLabel].filter(Boolean).join(" / ")}</div>
+          <div className="mt-1">
+            <Badge variant={quotationStage.variant}>{quotationStage.index + 1}. {quotationStage.label}</Badge>
+          </div>
         </div>
       </TableCell>
       <TableCell className="py-1.5">

@@ -98,6 +98,7 @@ import { buildQuotePricingSummary } from "@/components/quotes/pricing-utils";
 import { evaluateQuoteQuality } from "@/components/quotes/quality-utils";
 import { itemMatchesSmartFilter, quoteDueState, quoteHasClarification, quoteIsHighRisk, quoteIsHighValue } from "@/components/quotes/queue-utils";
 import { QuoteSummaryRow } from "@/components/quotes/quote-summary-row";
+import { QUOTATION_STAGES, QUOTATION_STAGE_INDEX, QuotationStageId, quotationStageBadgeVariant, quotationStageFromData } from "@/components/quotes/quotation-stage";
 import { appendActivity } from "@/components/quotes/activity-utils";
 import { ClipboardTableDetection, detectClipboardTable, rowsToTsv, structuredRowsToItemFields } from "@/components/quotes/clipboard-table";
 import { QuoteTimeline } from "@/components/quotes/quote-timeline";
@@ -377,40 +378,6 @@ function nextQuotationNumber(rows: Quote[], marketType: string) {
   });
   return `${prefix}${String(highest + 1).padStart(3, "0")}`;
 }
-
-type QuotationStageId =
-  | "draft_preparation"
-  | "technical_review"
-  | "costing"
-  | "commercial_review"
-  | "approval"
-  | "ready_to_send"
-  | "sent_to_customer"
-  | "negotiation"
-  | "revision"
-  | "po_received"
-  | "lost";
-
-const QUOTATION_STAGES: Array<{
-  id: QuotationStageId;
-  label: string;
-  owner: string;
-  description: string;
-}> = [
-  { id: "draft_preparation", label: "Draft preparation", owner: "Sales", description: "Customer details, enquiry references, line descriptions, and quote header are prepared." },
-  { id: "technical_review", label: "Technical review", owner: "Engineering", description: "Specs, materials, risk items, drawings, deviations, and regret rows are checked." },
-  { id: "costing", label: "Costing", owner: "Planning / costing", description: "Material, bought-out, machining, packing, freight, and overhead cost inputs are entered." },
-  { id: "commercial_review", label: "Commercial review", owner: "Sales / commercial", description: "Margins, discount, currency, taxes, delivery, validity, and payment terms are reviewed." },
-  { id: "approval", label: "Internal approval", owner: "Approver", description: "Approval is requested when margins, discount, risk, or value require sign-off." },
-  { id: "ready_to_send", label: "Ready to send", owner: "Sales", description: "Quotation PDF is approved and ready for customer release." },
-  { id: "sent_to_customer", label: "Sent to customer", owner: "Sales", description: "Approved quotation has been shared with the customer." },
-  { id: "negotiation", label: "Negotiation", owner: "Sales", description: "Customer feedback, commercial negotiation, alternates, and clarifications are being handled." },
-  { id: "revision", label: "Revision", owner: "Sales / engineering", description: "A revised quotation is being prepared after customer or internal changes." },
-  { id: "po_received", label: "PO received", owner: "Sales", description: "Customer PO is received and the quotation is ready for handover." },
-  { id: "lost", label: "Lost / closed", owner: "Sales", description: "Opportunity is closed without order, with loss reason captured in notes." },
-];
-
-const QUOTATION_STAGE_INDEX = new Map(QUOTATION_STAGES.map((stage, index) => [stage.id, index]));
 
 type TableColumn = {
   label: string;
@@ -934,22 +901,6 @@ function approvalBadgeVariant(status: ApprovalState["status"]) {
   if (status === "approved") return "secondary";
   if (status === "rejected") return "warning";
   return "outline";
-}
-
-function quotationStageFromData(qd: Record<string, unknown>, quote: Quote | null): QuotationStageId {
-  const explicit = getString(qd.quotation_stage) as QuotationStageId;
-  if (QUOTATION_STAGE_INDEX.has(explicit)) return explicit;
-  if (quote?.stage === "po") return "po_received";
-  if (quote?.stage === "sent") return "sent_to_customer";
-  return "draft_preparation";
-}
-
-function quotationStageBadgeVariant(stage: QuotationStageId) {
-  if (stage === "po_received") return "secondary";
-  if (stage === "lost") return "warning";
-  if (stage === "approval" || stage === "negotiation" || stage === "revision") return "warning";
-  if (stage === "sent_to_customer" || stage === "ready_to_send") return "outline";
-  return "muted";
 }
 
 function quotationStageChecklist(

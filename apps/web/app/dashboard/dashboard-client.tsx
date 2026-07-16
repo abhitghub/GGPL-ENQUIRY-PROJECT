@@ -7,6 +7,7 @@ import { toast } from "sonner";
 
 import { EmptyState } from "@/components/app-shell/empty-state";
 import { MetricCard } from "@/components/app-shell/metric-card";
+import { quotationStageBadge } from "@/components/quotes/quotation-stage";
 import { formatCurrencyValue, quoteDueState, quoteEstimatedValue, quoteIsHighRisk } from "@/components/quotes/queue-utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -183,7 +184,12 @@ export function DashboardClient() {
                       {showTeamOverview ? (
                         <TableCell>{resolveAppUserName([quote.stage_meta?.owner_name, quote.stage_meta?.owner_email, quote.stage_meta?.owner_id], appUsers, "Needs assignment")}</TableCell>
                       ) : null}
-                      <TableCell><Badge variant="outline">{workStepLabel(quote.stage)}</Badge></TableCell>
+                      <TableCell>
+                        <div className="flex flex-col items-start gap-1">
+                          <Badge variant="outline">{workStepLabel(quote.stage)}</Badge>
+                          {(() => { const qs = quotationStageBadge(quote); return <Badge variant={qs.variant}>{qs.index + 1}. {qs.label}</Badge>; })()}
+                        </div>
+                      </TableCell>
                       <TableCell>
                         <Badge variant={quoteDueState(quote) === "delayed" ? "warning" : quoteDueState(quote) === "today" ? "secondary" : "outline"}>{dueLabel(quote)}</Badge>
                       </TableCell>
