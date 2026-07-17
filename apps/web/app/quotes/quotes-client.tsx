@@ -1411,6 +1411,12 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     : createdByNameFromMeta || "Not recorded";
   const currentEnquiryStage = quote ? enquiryStageFromQuote(quote) : "draft";
   const enquiryMarketType = getString(quote?.stage_meta?.market_type);
+  // Which required setup pieces are still missing, so the badge can name them.
+  const setupMissing = [
+    !hasCustomerSelected ? "customer" : null,
+    !enquiryMarketType ? "quote type" : null,
+    !selectedEnquiryOwnerId ? "sales rep" : null,
+  ].filter((item): item is string => Boolean(item));
   const effectiveQuoteNo = getString(quote?.quote_no);
   const isLargeDraft = items.length > LARGE_DRAFT_THRESHOLD;
   const activeTableColumns = React.useMemo(
@@ -4369,7 +4375,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2 text-sm">
               <span className="font-medium">{enquiryCustomerName || "Customer not selected"}</span>
-              {!hasCustomerSelected || !enquiryMarketType || !selectedEnquiryOwnerId ? <Badge variant="warning">Setup incomplete</Badge> : <Badge variant="secondary">Context ready</Badge>}
+              {setupMissing.length ? <Badge variant="warning">Setup incomplete: {setupMissing.join(", ")}</Badge> : <Badge variant="secondary">Context ready</Badge>}
             </div>
             <div className="mt-0.5 truncate text-xs text-muted-foreground">
               {[enquiryMarketType || "Quote type needed", selectedEnquiryOwnerLabel, getString(quote.project_ref) || "No project reference"].join(" / ")}
