@@ -18,7 +18,7 @@ export const PRICING_ONWARD_WORKFLOW_STEPS = new Set([
   // legacy enquiry_workflow
   "pricing", "estimation_final_review", "sales_final",
   // granular workflow
-  "sent_for_pricing", "pricing_decision", "quotation_generated", "ready_for_customer", "quotation_sent_to_customer",
+  "sent_for_pricing", "pricing_decision", "pricing_submitted", "quotation_generated", "quotation_sent_to_customer",
 ]);
 
 export function workflowStepOf(quote: Quote): string {

@@ -117,9 +117,9 @@ GRANULAR_WORKFLOW_STEPS: list[dict[str, str]] = [
     {"id": "tr_spec_returned", "label": "TR spec returned", "team": "Estimation"},
     {"id": "combined_spec_review", "label": "Combined spec review", "team": "Estimation"},
     {"id": "sent_for_pricing", "label": "Sent for pricing", "team": "Admin"},
-    {"id": "pricing_decision", "label": "Pricing decision", "team": "Estimation"},
-    {"id": "quotation_generated", "label": "Quotation generated", "team": "Estimation"},
-    {"id": "ready_for_customer", "label": "Ready to send to customer", "team": "Sales"},
+    {"id": "pricing_decision", "label": "Pricing (estimation)", "team": "Estimation"},
+    {"id": "pricing_submitted", "label": "Ready to generate", "team": "Sales / Admin"},
+    {"id": "quotation_generated", "label": "Quotation generated", "team": "Sales"},
     {"id": "quotation_sent_to_customer", "label": "Quotation sent to customer", "team": "Sales"},
 ]
 
@@ -233,36 +233,36 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "with_whom": "Estimation",
         "label": "Set pricing formula & send to estimation",
     },
-    # stage 9 domestic/international split -> estimation prices per the formula;
-    # two sibling actions converging on quotation_generated, each recording route.
-    "price_domestic": {
+    # Estimation fills the pricing per the formula (and can preview the quotation),
+    # then submits it for generation. Estimation does NOT generate the quotation.
+    "submit_priced_quotation": {
         "from": {"pricing_decision"},
         "roles": {"estimation", "management"},
+        "to": "pricing_submitted",
+        "with_whom": "Sales / Admin",
+        "label": "Submit priced quotation",
+    },
+    # stage 9 domestic/international split -> sales OR admin generates the priced
+    # quotation; two sibling actions converging on quotation_generated.
+    "price_domestic": {
+        "from": {"pricing_submitted"},
+        "roles": {"sales", "admin", "management"},
         "to": "quotation_generated",
-        "with_whom": "Estimation",
+        "with_whom": "Sales",
         "label": "Generate quotation (domestic)",
         "set": {"pricing_route": "domestic"},
     },
     "price_international": {
-        "from": {"pricing_decision"},
-        "roles": {"estimation", "management"},
+        "from": {"pricing_submitted"},
+        "roles": {"sales", "admin", "management"},
         "to": "quotation_generated",
-        "with_whom": "Estimation",
+        "with_whom": "Sales",
         "label": "Generate quotation (international)",
         "set": {"pricing_route": "international"},
     },
-    # Estimation finalises the priced quotation and hands it to Sales, who
-    # downloads it and sends it to the customer.
-    "send_quotation": {
-        "from": {"quotation_generated"},
-        "roles": {"estimation", "management"},
-        "to": "ready_for_customer",
-        "with_whom": "Sales",
-        "label": "Send quotation to sales",
-    },
-    # Sales releases the quotation to the customer (final state).
+    # Sales downloads the generated quotation and releases it to the customer.
     "send_to_customer": {
-        "from": {"ready_for_customer"},
+        "from": {"quotation_generated"},
         "roles": {"sales", "management"},
         "to": "quotation_sent_to_customer",
         "with_whom": "Customer",
@@ -282,12 +282,12 @@ GRANULAR_ROLE_VISIBLE_STEPS: dict[str, set[str]] = {
         "gasket_type_check",
         "tr_spec_returned",
         "combined_spec_review",
-        # estimation now prices and generates the quotation
+        # estimation prices the enquiry (admin sets the formula); it does not
+        # generate the quotation — sales/admin do.
         "pricing_decision",
-        "quotation_generated",
     },
     "technical": {"technical_review_pending"},
-    "admin": {"sent_for_pricing"},
+    "admin": {"sent_for_pricing", "pricing_submitted"},
     "management": set(GRANULAR_WORKFLOW_STEP_IDS),
 }
 
@@ -307,8 +307,8 @@ GRANULAR_STAGE_OWNER_ROLES: dict[str, set[str]] = {
     "combined_spec_review": {"estimation", "management"},
     "sent_for_pricing": {"admin", "management"},
     "pricing_decision": {"estimation", "management"},
-    "quotation_generated": {"estimation", "management"},
-    "ready_for_customer": {"sales", "management"},
+    "pricing_submitted": {"sales", "admin", "management"},
+    "quotation_generated": {"sales", "management"},
     "quotation_sent_to_customer": {"sales", "management"},
 }
 

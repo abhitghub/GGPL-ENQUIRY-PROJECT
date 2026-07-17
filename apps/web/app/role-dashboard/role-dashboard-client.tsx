@@ -36,8 +36,8 @@ const STEP_OWNER_ROLES: Record<string, string[]> = {
   combined_spec_review: ["estimation"],
   sent_for_pricing: ["admin"],
   pricing_decision: ["estimation"],
-  quotation_generated: ["estimation"],
-  ready_for_customer: ["sales"],
+  pricing_submitted: ["sales", "admin"],
+  quotation_generated: ["sales"],
   quotation_sent_to_customer: ["sales"],
 };
 

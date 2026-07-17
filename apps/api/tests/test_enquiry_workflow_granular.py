@@ -123,13 +123,15 @@ def test_granular_happy_path(granular):
     assert _stage(_act(client, org, "estimation", qid, "submit_for_pricing")) == "sent_for_pricing"
     # Admin sets the pricing formula and hands it back to estimation to price.
     assert _stage(_act(client, org, "shashnam", qid, "open_pricing")) == "pricing_decision"
-    # Estimation now prices per the formula; admin must not (out-of-role for pricing).
-    priced = _act(client, org, "estimation", qid, "price_domestic")
+    # Estimation prices and submits the quotation for generation.
+    assert _stage(_act(client, org, "estimation", qid, "submit_priced_quotation")) == "pricing_submitted"
+    # Estimation cannot generate the quotation — only sales or admin.
+    _act_blocked(client, org, "estimation", qid, "price_domestic")
+    # Sales (or admin) generates the priced quotation.
+    priced = _act(client, org, "sales", qid, "price_domestic")
     assert _stage(priced) == "quotation_generated"
     assert priced.json()["stage_meta"]["pricing_route"] == "domestic"
-    # Estimation finalises and hands to sales; only sales sends to customer.
-    assert _stage(_act(client, org, "estimation", qid, "send_quotation")) == "ready_for_customer"
-    _act_blocked(client, org, "estimation", qid, "send_to_customer")
+    # Sales downloads and sends to the customer.
     final = _act(client, org, "sales", qid, "send_to_customer")
     assert _stage(final) == "quotation_sent_to_customer"
 
