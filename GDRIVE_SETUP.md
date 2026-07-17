@@ -1,63 +1,66 @@
 # Save quotations to Google Drive (Excel, named by customer + date)
 
-The portal can automatically write each enquiry/quotation to your Google Drive
-folder as an **Excel file** named **`<customer> - <YYYY-MM-DD>.xlsx`** (the same
-Excel the portal generates). It writes:
-- **on quotation generation** (each generated quotation), and
-- **nightly** — a full export of every enquiry/quotation (a background `exporter`
-  service).
+The portal writes each enquiry/quotation to Google Drive as an **Excel file**
+named **`<customer> - <YYYY-MM-DD>.xlsx`** (the portal's Excel format):
+- **on quotation generation**, and
+- **nightly** — a full export of every enquiry/quotation (the `exporter` service).
 
-Target folder (yours):
-`https://drive.google.com/drive/folders/1zo_0EMTFkbHemTxq-R1eaYaADuDjFfCM`
-(folder id `1zo_0EMTFkbHemTxq-R1eaYaADuDjFfCM`)
+Your Google organization **blocks service-account keys**, so we use the simplest
+method that avoids Google Cloud entirely: **Google Drive for Desktop**. The app
+writes the Excel files into a normal folder on this PC, and Drive for Desktop
+syncs that folder to your Google Drive.
 
-Because the server is headless (Docker), it authenticates with a **Google service
-account**. One-time setup (~5–10 min):
+## 1. Install Google Drive for Desktop (on this server PC)
+1. Download & install from https://www.google.com/drive/download/ .
+2. Sign in with the Google account that owns your target Drive folder.
+3. Open Drive for Desktop → Settings (gear) → **Google Drive** → choose
+   **“Mirror files”** (this keeps real files on disk, which the app can write to).
+   Note the local location it uses for **“My Drive”**, e.g.
+   `G:\My Drive` or `C:\Users\<you>\My Drive`.
 
-## 1. Create a service account + key
-1. Go to https://console.cloud.google.com/ → create/select a project.
-2. **APIs & Services → Library** → search **Google Drive API** → **Enable**.
-3. **APIs & Services → Credentials → Create credentials → Service account**.
-   Give it a name (e.g. `ggpl-quote-export`), Create → Done.
-4. Open that service account → **Keys → Add key → Create new key → JSON** →
-   download the file. Note the service account **email**
-   (looks like `ggpl-quote-export@<project>.iam.gserviceaccount.com`).
+## 2. Pick the folder the files should land in
+Use the Drive folder you shared earlier
+(`https://drive.google.com/drive/folders/1zo_0EMTFkbHemTxq-R1eaYaADuDjFfCM`).
+Find its **local mirrored path**, e.g.
+`G:\My Drive\GGPL Enquiries` (whatever you named that folder).
 
-## 2. Share the Drive folder with the service account
-1. Open the Drive folder (link above).
-2. **Share** → paste the service account **email** → give it **Editor** → Send.
-   (This is what lets the server write files into *your* folder.)
-
-## 3. Put the key on the server
-1. Copy the downloaded JSON to this project's `secrets` folder as:
-   `secrets/gdrive-sa.json`
-   (full path: `...\goodrich\secrets\gdrive-sa.json`). This folder is gitignored.
-
-## 4. Turn it on
-In your `.env` add:
+## 3. Point the app at that folder — set it in `.env`
 ```
 GDRIVE_EXPORT_ENABLED=true
-GDRIVE_FOLDER_ID=1zo_0EMTFkbHemTxq-R1eaYaADuDjFfCM
+GDRIVE_HOST_DIR=G:\My Drive\GGPL Enquiries
 ```
+(Use *your* actual mirrored path from step 2. If the path has spaces, keep it
+unquoted in `.env` — Docker handles it.)
+
 Then apply:
 ```
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-## 5. Test it now (optional)
-Run the full export immediately instead of waiting for the nightly job:
+## 4. Test it now
 ```
-docker compose -f docker-compose.prod.yml exec exporter python -m app.scripts.export_all_to_drive
+docker compose -f docker-compose.prod.yml exec -e GDRIVE_EXPORT_ENABLED=true exporter python -m app.scripts.export_all_to_drive
 ```
-You should see `Exported N/N records to Drive`, and the `.xlsx` files appear in
-the Drive folder within seconds. Generating a quotation in the app also drops its
-file there automatically.
+You should see `Exported N/N records`, `.xlsx` files appear in the folder, and
+Drive for Desktop syncs them to Drive within seconds. Generating a quotation in
+the app also drops its file there automatically.
+
+## If you don't set GDRIVE_HOST_DIR
+The files are written to `./gdrive-out` inside the project folder (default). You
+can then add that folder to Drive for Desktop (**Settings → My Computer → Add
+folder**) — the files appear in Drive under **Computers**, not your My Drive
+folder. Setting `GDRIVE_HOST_DIR` to the mirrored My Drive path (step 3) is the
+way to land them in your exact folder.
 
 ## Notes
-- Files are **upserted by name** — re-exporting the same customer on the same day
-  overwrites that file (no duplicates per day).
-- Until the key is present and `GDRIVE_EXPORT_ENABLED=true`, the feature is a safe
-  no-op — the app runs normally and nothing is written.
-- The service account only gets access to **this one shared folder**, nothing else
-  in your Drive.
-- Keep `secrets/gdrive-sa.json` private — it's a credential (already gitignored).
+- Until `GDRIVE_EXPORT_ENABLED=true`, this is a safe no-op — the app runs normally.
+- Files overwrite per customer per day (no duplicates).
+- No Google Cloud / API keys needed with this method.
+
+---
+
+### Alternative (only if your org later allows service-account keys)
+Set instead in `.env`: `GDRIVE_EXPORT_ENABLED=true`,
+`GDRIVE_FOLDER_ID=<folder id>`, place the key at `secrets/gdrive-sa.json`, and
+leave `GDRIVE_LOCAL_DIR` empty (folder mode takes precedence when set). The app
+then uploads via the Drive API.

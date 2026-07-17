@@ -40,13 +40,16 @@ services:
       APPROVED_QUOTE_REDIS_ENABLED: "false"
       SMART_PARSE_REDIS_CACHE_ENABLED: "false"
       GGPL_LOGO_PATH: /app/apps/streamlit/logo.png
-      # Auto-export quotations as Excel to Google Drive (safe no-op until a
-      # service-account key is placed at ./secrets/gdrive-sa.json AND enabled).
+      # Auto-export quotations as Excel. Folder mode (Google Drive for Desktop):
+      # files are written to GDRIVE_LOCAL_DIR, which Drive for Desktop syncs.
+      # Safe no-op until GDRIVE_EXPORT_ENABLED=true.
       GDRIVE_EXPORT_ENABLED: ${GDRIVE_EXPORT_ENABLED:-false}
+      GDRIVE_LOCAL_DIR: /gdrive
       GDRIVE_FOLDER_ID: ${GDRIVE_FOLDER_ID:-1zo_0EMTFkbHemTxq-R1eaYaADuDjFfCM}
       GOOGLE_SERVICE_ACCOUNT_FILE: /run/secrets/gdrive-sa.json
     volumes:
-      - ./secrets:/run/secrets:ro   # holds gdrive-sa.json (gitignored)
+      - ${GDRIVE_HOST_DIR:-./gdrive-out}:/gdrive   # Drive-for-Desktop synced folder
+      - ./secrets:/run/secrets:ro                  # gdrive-sa.json (API mode, gitignored)
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,9 +85,11 @@ services:
       REDIS_ENABLED: "false"
       GGPL_LOGO_PATH: /app/apps/streamlit/logo.png
       GDRIVE_EXPORT_ENABLED: ${GDRIVE_EXPORT_ENABLED:-false}
+      GDRIVE_LOCAL_DIR: /gdrive
       GDRIVE_FOLDER_ID: ${GDRIVE_FOLDER_ID:-1zo_0EMTFkbHemTxq-R1eaYaADuDjFfCM}
       GOOGLE_SERVICE_ACCOUNT_FILE: /run/secrets/gdrive-sa.json
     volumes:
+      - ${GDRIVE_HOST_DIR:-./gdrive-out}:/gdrive
       - ./secrets:/run/secrets:ro
     depends_on:
       postgres:

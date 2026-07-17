@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     # Auto-export quotations as Excel to a Google Drive folder (service account).
     # All three must be set for exports to run; otherwise it is a safe no-op.
     gdrive_export_enabled: bool = Field(default=False, alias="GDRIVE_EXPORT_ENABLED")
+    # Simplest mode (Google Drive for Desktop): write the Excel files into this
+    # folder, which Drive for Desktop syncs to Drive. Takes precedence over the
+    # service-account API mode below when set.
+    gdrive_local_dir: str | None = Field(default=None, alias="GDRIVE_LOCAL_DIR")
+    # Service-account API mode (blocked by some org policies).
     gdrive_folder_id: str | None = Field(default=None, alias="GDRIVE_FOLDER_ID")
     google_service_account_file: str | None = Field(default=None, alias="GOOGLE_SERVICE_ACCOUNT_FILE")
 

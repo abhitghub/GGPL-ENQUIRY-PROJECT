@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import re
 from datetime import date
 from typing import Any
@@ -25,7 +26,10 @@ _SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 def is_configured() -> bool:
     s = get_settings()
-    return bool(s.gdrive_export_enabled and s.gdrive_folder_id and s.google_service_account_file)
+    if not s.gdrive_export_enabled:
+        return False
+    # Folder mode (Google Drive for Desktop) or service-account API mode.
+    return bool(s.gdrive_local_dir or (s.gdrive_folder_id and s.google_service_account_file))
 
 
 def _drive():
@@ -58,8 +62,26 @@ def _filename(quote: Any) -> str:
 
 
 def export_quote(quote: Any) -> str | None:
-    """Build the quotation Excel and upsert it (by name) into the Drive folder.
-    Returns the filename on success, else None. Never raises."""
+    """Build the quotation Excel and save it. Returns the filename on success,
+    else None. Never raises.
+
+    Folder mode (Google Drive for Desktop): writes the file into GDRIVE_LOCAL_DIR,
+    which Drive for Desktop syncs to Drive. Otherwise uses the Drive API."""
+    if not is_configured():
+        return None
+    local_dir = get_settings().gdrive_local_dir
+    if local_dir:
+        try:
+            content = build_xlsx(quote.items, quote.quote_data)
+            name = _filename(quote)
+            os.makedirs(local_dir, exist_ok=True)
+            with open(os.path.join(local_dir, name), "wb") as fh:
+                fh.write(content)
+            logger.info("Exported quotation to %s", os.path.join(local_dir, name))
+            return name
+        except Exception as exc:
+            logger.warning("Local Drive export failed for quote %s: %s", getattr(quote, "id", "?"), exc)
+            return None
     service = _drive()
     if service is None:
         return None

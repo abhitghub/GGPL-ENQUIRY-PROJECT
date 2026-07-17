@@ -27,3 +27,7 @@ AGENTS.md
 # Service-account keys (never commit)
 /secrets/*
 !/secrets/.gitkeep
+
+# Local Excel exports (Drive-for-Desktop synced)
+/gdrive-out/*
+!/gdrive-out/.gitkeep
