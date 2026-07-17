@@ -114,7 +114,6 @@ GRANULAR_WORKFLOW_STEPS: list[dict[str, str]] = [
     {"id": "converted_to_ggpl_format", "label": "Converted to GGPL format", "team": "Estimation"},
     {"id": "gasket_type_check", "label": "Gasket type check", "team": "Estimation"},
     {"id": "technical_review_pending", "label": "Technical review pending", "team": "Technical review"},
-    {"id": "tr_spec_returned", "label": "TR spec returned", "team": "Estimation"},
     {"id": "combined_spec_review", "label": "Combined spec review", "team": "Estimation"},
     {"id": "sent_for_pricing", "label": "Sent for pricing", "team": "Admin"},
     {"id": "pricing_decision", "label": "Pricing (estimation)", "team": "Estimation"},
@@ -188,34 +187,31 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "with_whom": "Estimation",
         "label": "Proceed to gasket type check",
     },
-    # stage 5 conditional auto-branch: specific gasket types route to technical
-    # review, everything else skips straight to combined spec review. The "to"
-    # key holds the safe default for any branch-unaware reader.
+    # Estimation records the gasket type and moves to the combined spec review.
+    # Technical review is no longer forced here — it is an optional check below.
     "run_gasket_type_check": {
         "from": {"gasket_type_check"},
         "roles": {"estimation"},
-        "branch": {
-            "field": "gasket_type",
-            "specific": "technical_review_pending",
-            "default": "combined_spec_review",
-        },
         "to": "combined_spec_review",
         "with_whom": "Estimation",
         "label": "Run gasket type check",
     },
+    # OPTIONAL: estimation may send the enquiry to technical for a check. It is
+    # not an approval gate — the enquiry can go to pricing without it.
+    "send_to_technical_review": {
+        "from": {"combined_spec_review"},
+        "roles": {"estimation"},
+        "to": "technical_review_pending",
+        "with_whom": "Technical review",
+        "label": "Send for technical check (optional)",
+    },
+    # Technical just checks and returns it — no approval required.
     "return_tr_spec": {
         "from": {"technical_review_pending"},
         "roles": {"technical"},
-        "to": "tr_spec_returned",
-        "with_whom": "Estimation",
-        "label": "Return TR spec to estimation",
-    },
-    "combine_after_tr": {
-        "from": {"tr_spec_returned"},
-        "roles": {"estimation"},
         "to": "combined_spec_review",
         "with_whom": "Estimation",
-        "label": "Combine specs",
+        "label": "Technical check done",
     },
     "submit_for_pricing": {
         "from": {"combined_spec_review"},
@@ -280,7 +276,6 @@ GRANULAR_ROLE_VISIBLE_STEPS: dict[str, set[str]] = {
         "spec_check",
         "converted_to_ggpl_format",
         "gasket_type_check",
-        "tr_spec_returned",
         "combined_spec_review",
         # estimation prices the enquiry (admin sets the formula); it does not
         # generate the quotation — sales/admin do.
@@ -303,7 +298,6 @@ GRANULAR_STAGE_OWNER_ROLES: dict[str, set[str]] = {
     "converted_to_ggpl_format": {"estimation", "management"},
     "gasket_type_check": {"estimation", "management"},
     "technical_review_pending": {"technical", "management"},
-    "tr_spec_returned": {"estimation", "management"},
     "combined_spec_review": {"estimation", "management"},
     "sent_for_pricing": {"admin", "management"},
     "pricing_decision": {"estimation", "management"},

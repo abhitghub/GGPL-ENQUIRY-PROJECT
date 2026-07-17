@@ -159,23 +159,28 @@ def test_granular_query_loop(granular):
     assert _stage(_act(client, org, "estimation", qid, "mark_spec_complete")) == "converted_to_ggpl_format"
 
 
-def test_granular_gasket_specific_branch(granular):
-    """A specific gasket type routes to technical review; only Technical may
-    return the spec, after which Estimation combines it."""
+def test_granular_optional_technical_review(granular):
+    """Technical review is optional and non-blocking: the spec check goes straight
+    to combined review (and on to pricing), and estimation may optionally send it
+    to technical for a check, which only technical performs, returning it to
+    combined review — no approval gate before pricing."""
     client = TestClient(app)
-    org = f"org-gw-gasket-{uuid.uuid4().hex}"
+    org = f"org-gw-tr-{uuid.uuid4().hex}"
     qid = _create_enquiry(client, org)
 
     _act(client, org, "sales", qid, "forward_to_estimation")
     _act(client, org, "estimation", qid, "begin_spec_check")
     _act(client, org, "estimation", qid, "mark_spec_complete")
     _act(client, org, "estimation", qid, "proceed_to_gasket_check")
-    branched = _act(client, org, "estimation", qid, "run_gasket_type_check", gasket_type="ring_joint")
-    assert _stage(branched) == "technical_review_pending"
-    # Estimation cannot return a TR spec; only Technical can.
+    # Gasket check no longer forces technical review — it goes to combined review.
+    assert _stage(_act(client, org, "estimation", qid, "run_gasket_type_check", gasket_type="ring_joint")) == "combined_spec_review"
+    # Optional: estimation sends for a technical check.
+    assert _stage(_act(client, org, "estimation", qid, "send_to_technical_review")) == "technical_review_pending"
+    # Only technical performs the check; it returns to combined review (no approval).
     _act_blocked(client, org, "estimation", qid, "return_tr_spec")
-    assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "tr_spec_returned"
-    assert _stage(_act(client, org, "estimation", qid, "combine_after_tr")) == "combined_spec_review"
+    assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "combined_spec_review"
+    # And it can proceed to pricing without any technical-review approval.
+    assert _stage(_act(client, org, "estimation", qid, "submit_for_pricing")) == "sent_for_pricing"
 
 
 def test_granular_is_superset_of_legacy(granular):

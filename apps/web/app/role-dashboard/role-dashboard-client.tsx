@@ -32,7 +32,6 @@ const STEP_OWNER_ROLES: Record<string, string[]> = {
   converted_to_ggpl_format: ["estimation"],
   gasket_type_check: ["estimation"],
   technical_review_pending: ["technical"],
-  tr_spec_returned: ["estimation"],
   combined_spec_review: ["estimation"],
   sent_for_pricing: ["admin"],
   pricing_decision: ["estimation"],
