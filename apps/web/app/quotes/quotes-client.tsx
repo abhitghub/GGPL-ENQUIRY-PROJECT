@@ -12,6 +12,7 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  ChevronsDown,
   Circle,
   Copy,
   Download,
@@ -6430,18 +6431,50 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                               <TableCell><Input className="w-24" type="number" value={getString(item.quantity)} onChange={(event) => updateItem(index, "quantity", event.target.value)} disabled={!canEditLineItems} /></TableCell>
                               <TableCell>{getString(item.uom || "NOS")}</TableCell>
                               <TableCell>
-                                <Input className="w-32" type="number" value={getString(price)} disabled={!canEditQuotation} onChange={(event) => {
-                                  const next = [...unitPrices];
-                                  next[index] = Number(event.target.value);
-                                  updateQd("unit_prices", next);
-                                }} />
+                                <div className="flex items-center gap-1">
+                                  <Input className="w-32" type="number" value={getString(price)} disabled={!canEditQuotation} onChange={(event) => {
+                                    const next = [...unitPrices];
+                                    next[index] = Number(event.target.value);
+                                    updateQd("unit_prices", next);
+                                  }} />
+                                  {canEditQuotation && (
+                                    <button
+                                      type="button"
+                                      title="Fill this unit price down to all rows below"
+                                      className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                                      onClick={() => {
+                                        const next = [...unitPrices];
+                                        for (let i = index; i < items.length; i += 1) next[i] = Number(price) || 0;
+                                        updateQd("unit_prices", next);
+                                      }}
+                                    >
+                                      <ChevronsDown className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
+                                </div>
                               </TableCell>
                               <TableCell>
-                                <Input className="w-24" type="number" value={getString(discountPctLine)} disabled={!canEditQuotation} onChange={(event) => {
-                                  const next = [...lineDiscounts];
-                                  next[index] = Number(event.target.value);
-                                  updateQd("line_discounts_pct", next);
-                                }} />
+                                <div className="flex items-center gap-1">
+                                  <Input className="w-24" type="number" value={getString(discountPctLine)} disabled={!canEditQuotation} onChange={(event) => {
+                                    const next = [...lineDiscounts];
+                                    next[index] = Number(event.target.value);
+                                    updateQd("line_discounts_pct", next);
+                                  }} />
+                                  {canEditQuotation && (
+                                    <button
+                                      type="button"
+                                      title="Fill this discount down to all rows below"
+                                      className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                                      onClick={() => {
+                                        const next = [...lineDiscounts];
+                                        for (let i = index; i < items.length; i += 1) next[i] = Number(discountPctLine) || 0;
+                                        updateQd("line_discounts_pct", next);
+                                      }}
+                                    >
+                                      <ChevronsDown className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
+                                </div>
                               </TableCell>
                               <TableCell>{finalUnitPrice.toFixed(2)}</TableCell>
                               <TableCell>{total.toFixed(2)}</TableCell>
