@@ -32,6 +32,9 @@ services:
       DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gasket_quote
       ENABLE_GRANULAR_WORKFLOW: "true"
       LOGIN_ENABLED: "true"
+      # Served over plain HTTP on the office LAN, so the session cookie must not
+      # be Secure (HTTPS-only) or logins won't stick.
+      SESSION_COOKIE_SECURE: "false"
       AUTH_SECRET: ${AUTH_SECRET:?set a long random AUTH_SECRET in .env}
       REDIS_ENABLED: "false"
       APPROVED_QUOTE_REDIS_ENABLED: "false"

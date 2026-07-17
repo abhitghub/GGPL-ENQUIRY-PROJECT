@@ -63,7 +63,7 @@ def logout(response: Response) -> None:
     # Match the attributes used when the cookie was set so browsers reliably
     # drop it.
     settings = get_settings()
-    secure = settings.environment.lower() in {"prod", "production"}
+    secure = settings.session_cookie_secure if settings.session_cookie_secure is not None else (settings.environment.lower() in {"prod", "production"})
     response.delete_cookie(
         key=settings.auth_cookie_name,
         path="/",

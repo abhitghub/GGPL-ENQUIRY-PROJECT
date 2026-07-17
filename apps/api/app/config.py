@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     outlook_default_mailbox: str | None = Field(default=None, alias="OUTLOOK_DEFAULT_MAILBOX")
     auth_secret: str = Field(default="dev-only-change-me", alias="AUTH_SECRET")
     auth_cookie_name: str = Field(default="ggpl_session", alias="AUTH_COOKIE_NAME")
+    # Whether the session cookie is marked Secure (HTTPS-only). Leave unset to
+    # derive from the environment; set SESSION_COOKIE_SECURE=false for on-prem
+    # HTTP (LAN) deployments so the cookie works without HTTPS.
+    session_cookie_secure: bool | None = Field(default=None, alias="SESSION_COOKIE_SECURE")
     # When True, requests must carry a valid session cookie (real login).
     # Set LOGIN_ENABLED=false to reopen the app without authentication.
     login_enabled: bool = Field(default=True, alias="LOGIN_ENABLED")
