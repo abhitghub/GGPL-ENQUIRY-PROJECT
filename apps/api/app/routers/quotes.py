@@ -191,12 +191,32 @@ def _canonical_owner_metadata(stage_meta: dict, current: QuoteRead | None, user:
     return result
 
 
+def _denormalize_customer(org_id: str, customer: str, stage_meta: dict, quote_data: dict) -> tuple[str, dict]:
+    """When a record has a customer master selected but no denormalised customer
+    name (e.g. imported/API-created enquiries), fill it from the master so lists,
+    dashboards, and the PDF show the customer instead of 'Customer not added'."""
+    master_id = str(stage_meta.get("customer_master_id") or "").strip()
+    if customer.strip() or not master_id:
+        return customer, quote_data
+    try:
+        record = next((row for row in repo.get_customer_settings(org_id).customers if row.id == master_id), None)
+    except Exception:
+        record = None
+    if not record or not record.name:
+        return customer, quote_data
+    next_quote_data = dict(quote_data or {})
+    if not str(next_quote_data.get("buyer_name") or "").strip():
+        next_quote_data["buyer_name"] = record.name
+    return record.name, next_quote_data
+
+
 def _normalize_create_payload(payload: QuoteCreate, user: CurrentUser) -> QuoteCreate:
     stage_meta = dict(payload.stage_meta or {})
+    customer, quote_data = _denormalize_customer(user.org_id, payload.customer or "", stage_meta, payload.quote_data or {})
     source_id = str(stage_meta.get("source_enquiry_id") or "").strip()
     if source_id:
         _quote_or_404(user, source_id)
-        return payload.model_copy(update={"stage_meta": stage_meta})
+        return payload.model_copy(update={"stage_meta": stage_meta, "customer": customer, "quote_data": quote_data})
     if stage_meta.get("owner_id"):
         requested_owner = normalize_identity(stage_meta.get("owner_id"))
         current_aliases = {normalize_identity(user.user_id), normalize_identity(user.email), normalize_identity(user.name)}
@@ -205,7 +225,7 @@ def _normalize_create_payload(payload: QuoteCreate, user: CurrentUser) -> QuoteC
         if user.role != "admin":
             stage_meta["owner_id"] = user.user_id
         stage_meta = _canonical_owner_metadata(stage_meta, None, user)
-    return payload.model_copy(update={"stage_meta": stage_meta})
+    return payload.model_copy(update={"stage_meta": stage_meta, "customer": customer, "quote_data": quote_data})
 
 
 def _require_patch_capabilities(user: CurrentUser, current: QuoteRead, payload: QuotePatch) -> QuotePatch:
