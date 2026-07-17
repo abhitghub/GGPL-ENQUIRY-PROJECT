@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     # activate the finer stages (spec-check query loop, gasket-type branch to
     # technical review, combined-spec review, domestic/international pricing).
     enable_granular_workflow: bool = Field(default=False, alias="ENABLE_GRANULAR_WORKFLOW")
+    # Auto-export quotations as Excel to a Google Drive folder (service account).
+    # All three must be set for exports to run; otherwise it is a safe no-op.
+    gdrive_export_enabled: bool = Field(default=False, alias="GDRIVE_EXPORT_ENABLED")
+    gdrive_folder_id: str | None = Field(default=None, alias="GDRIVE_FOLDER_ID")
+    google_service_account_file: str | None = Field(default=None, alias="GOOGLE_SERVICE_ACCOUNT_FILE")
 
     model_config = SettingsConfigDict(
         env_file=".env",

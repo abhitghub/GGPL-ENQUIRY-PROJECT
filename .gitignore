@@ -23,3 +23,7 @@ htmlcov/
 .mypy_cache/
 *.log
 AGENTS.md
+
+# Service-account keys (never commit)
+/secrets/*
+!/secrets/.gitkeep

@@ -747,6 +747,15 @@ def advance_workflow(
         raise
     if not updated:
         raise HTTPException(status_code=404, detail="Quote not found")
+    # When a quotation is generated, mirror its Excel to Google Drive (no-op unless
+    # Drive export is configured; never fails the request).
+    if dest == "quotation_generated":
+        try:
+            from app.services.gdrive_export import export_quote
+
+            export_quote(updated)
+        except Exception:
+            pass
     return updated
 
 

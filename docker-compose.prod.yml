@@ -40,6 +40,13 @@ services:
       APPROVED_QUOTE_REDIS_ENABLED: "false"
       SMART_PARSE_REDIS_CACHE_ENABLED: "false"
       GGPL_LOGO_PATH: /app/apps/streamlit/logo.png
+      # Auto-export quotations as Excel to Google Drive (safe no-op until a
+      # service-account key is placed at ./secrets/gdrive-sa.json AND enabled).
+      GDRIVE_EXPORT_ENABLED: ${GDRIVE_EXPORT_ENABLED:-false}
+      GDRIVE_FOLDER_ID: ${GDRIVE_FOLDER_ID:-1zo_0EMTFkbHemTxq-R1eaYaADuDjFfCM}
+      GOOGLE_SERVICE_ACCOUNT_FILE: /run/secrets/gdrive-sa.json
+    volumes:
+      - ./secrets:/run/secrets:ro   # holds gdrive-sa.json (gitignored)
     depends_on:
       postgres:
         condition: service_healthy
@@ -61,6 +68,27 @@ services:
       - "3000:3000"       # the only port exposed to the office LAN
     depends_on:
       - api
+
+  # Nightly job: export every enquiry/quotation as Excel to the Drive folder.
+  exporter:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    command: sh -c "while true; do python -m app.scripts.export_all_to_drive || true; sleep 86400; done"
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gasket_quote
+      REDIS_ENABLED: "false"
+      GGPL_LOGO_PATH: /app/apps/streamlit/logo.png
+      GDRIVE_EXPORT_ENABLED: ${GDRIVE_EXPORT_ENABLED:-false}
+      GDRIVE_FOLDER_ID: ${GDRIVE_FOLDER_ID:-1zo_0EMTFkbHemTxq-R1eaYaADuDjFfCM}
+      GOOGLE_SERVICE_ACCOUNT_FILE: /run/secrets/gdrive-sa.json
+    volumes:
+      - ./secrets:/run/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres-data:
