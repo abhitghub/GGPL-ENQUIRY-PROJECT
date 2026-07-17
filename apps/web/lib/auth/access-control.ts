@@ -95,7 +95,7 @@ export const defaultAccessSettings: AccessSettings = {
     ]),
     sales: permissions([
       "view_dashboard", "view_enquiry", "view_quotation", "view_purchase_orders", "view_doc_assistant", "view_history",
-      "create_enquiry", "edit_sales_details", "edit_line_items",
+      "create_enquiry", "edit_sales_details", "edit_line_items", "export_quotes",
     ]),
     estimation: permissions([
       "view_dashboard", "view_enquiry", "view_doc_assistant", "view_history",

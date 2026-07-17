@@ -508,8 +508,8 @@ export const GRANULAR_ENQUIRY_WORKFLOW_STEPS = [
   { id: "tr_spec_returned", label: "TR spec returned", team: "Estimation" },
   { id: "combined_spec_review", label: "Combined spec review", team: "Estimation" },
   { id: "sent_for_pricing", label: "Sent for pricing", team: "Admin" },
-  { id: "pricing_decision", label: "Pricing decision", team: "Admin" },
-  { id: "quotation_generated", label: "Quotation generated", team: "Admin" },
+  { id: "pricing_decision", label: "Pricing decision", team: "Estimation" },
+  { id: "quotation_generated", label: "Quotation generated", team: "Estimation" },
   { id: "ready_for_customer", label: "Ready to send to customer", team: "Sales" },
   { id: "quotation_sent_to_customer", label: "Quotation sent to customer", team: "Sales" },
 ] as const;
@@ -525,10 +525,10 @@ export const GRANULAR_ENQUIRY_WORKFLOW_ACTIONS = [
   { action: "return_tr_spec", from: ["technical_review_pending"], roles: ["technical"], label: "Return TR spec to estimation" },
   { action: "combine_after_tr", from: ["tr_spec_returned"], roles: ["estimation"], label: "Combine specs" },
   { action: "submit_for_pricing", from: ["combined_spec_review"], roles: ["estimation"], label: "Submit for pricing" },
-  { action: "open_pricing", from: ["sent_for_pricing"], roles: ["admin", "management"], label: "Open pricing" },
-  { action: "price_domestic", from: ["pricing_decision"], roles: ["admin", "management"], label: "Generate quotation (domestic)" },
-  { action: "price_international", from: ["pricing_decision"], roles: ["admin", "management"], label: "Generate quotation (international)" },
-  { action: "send_quotation", from: ["quotation_generated"], roles: ["admin", "management"], label: "Send quotation to sales" },
+  { action: "open_pricing", from: ["sent_for_pricing"], roles: ["admin", "management"], label: "Set pricing formula & send to estimation" },
+  { action: "price_domestic", from: ["pricing_decision"], roles: ["estimation", "management"], label: "Generate quotation (domestic)" },
+  { action: "price_international", from: ["pricing_decision"], roles: ["estimation", "management"], label: "Generate quotation (international)" },
+  { action: "send_quotation", from: ["quotation_generated"], roles: ["estimation", "management"], label: "Send quotation to sales" },
   { action: "send_to_customer", from: ["ready_for_customer"], roles: ["sales", "management"], label: "Send quotation to customer" },
 ] as const;
 

@@ -117,8 +117,8 @@ GRANULAR_WORKFLOW_STEPS: list[dict[str, str]] = [
     {"id": "tr_spec_returned", "label": "TR spec returned", "team": "Estimation"},
     {"id": "combined_spec_review", "label": "Combined spec review", "team": "Estimation"},
     {"id": "sent_for_pricing", "label": "Sent for pricing", "team": "Admin"},
-    {"id": "pricing_decision", "label": "Pricing decision", "team": "Admin"},
-    {"id": "quotation_generated", "label": "Quotation generated", "team": "Admin"},
+    {"id": "pricing_decision", "label": "Pricing decision", "team": "Estimation"},
+    {"id": "quotation_generated", "label": "Quotation generated", "team": "Estimation"},
     {"id": "ready_for_customer", "label": "Ready to send to customer", "team": "Sales"},
     {"id": "quotation_sent_to_customer", "label": "Quotation sent to customer", "team": "Sales"},
 ]
@@ -224,36 +224,38 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "with_whom": "Admin",
         "label": "Submit for pricing",
     },
+    # Admin sets the pricing formula (in the enquiry notes) and hands the enquiry
+    # back to estimation to price against it — admin does not price directly.
     "open_pricing": {
         "from": {"sent_for_pricing"},
         "roles": {"admin", "management"},
         "to": "pricing_decision",
-        "with_whom": "Admin",
-        "label": "Open pricing",
+        "with_whom": "Estimation",
+        "label": "Set pricing formula & send to estimation",
     },
-    # stage 9 domestic/international split -> two sibling actions converging on
-    # quotation_generated, each recording the chosen route.
+    # stage 9 domestic/international split -> estimation prices per the formula;
+    # two sibling actions converging on quotation_generated, each recording route.
     "price_domestic": {
         "from": {"pricing_decision"},
-        "roles": {"admin", "management"},
+        "roles": {"estimation", "management"},
         "to": "quotation_generated",
-        "with_whom": "Admin",
+        "with_whom": "Estimation",
         "label": "Generate quotation (domestic)",
         "set": {"pricing_route": "domestic"},
     },
     "price_international": {
         "from": {"pricing_decision"},
-        "roles": {"admin", "management"},
+        "roles": {"estimation", "management"},
         "to": "quotation_generated",
-        "with_whom": "Admin",
+        "with_whom": "Estimation",
         "label": "Generate quotation (international)",
         "set": {"pricing_route": "international"},
     },
-    # Admin prices and generates the quotation, then hands it back to Sales —
-    # Admin never sends to the customer directly.
+    # Estimation finalises the priced quotation and hands it to Sales, who
+    # downloads it and sends it to the customer.
     "send_quotation": {
         "from": {"quotation_generated"},
-        "roles": {"admin", "management"},
+        "roles": {"estimation", "management"},
         "to": "ready_for_customer",
         "with_whom": "Sales",
         "label": "Send quotation to sales",
@@ -280,9 +282,12 @@ GRANULAR_ROLE_VISIBLE_STEPS: dict[str, set[str]] = {
         "gasket_type_check",
         "tr_spec_returned",
         "combined_spec_review",
+        # estimation now prices and generates the quotation
+        "pricing_decision",
+        "quotation_generated",
     },
     "technical": {"technical_review_pending"},
-    "admin": {"sent_for_pricing", "pricing_decision", "quotation_generated"},
+    "admin": {"sent_for_pricing"},
     "management": set(GRANULAR_WORKFLOW_STEP_IDS),
 }
 
@@ -301,8 +306,8 @@ GRANULAR_STAGE_OWNER_ROLES: dict[str, set[str]] = {
     "tr_spec_returned": {"estimation", "management"},
     "combined_spec_review": {"estimation", "management"},
     "sent_for_pricing": {"admin", "management"},
-    "pricing_decision": {"admin", "management"},
-    "quotation_generated": {"admin", "management"},
+    "pricing_decision": {"estimation", "management"},
+    "quotation_generated": {"estimation", "management"},
     "ready_for_customer": {"sales", "management"},
     "quotation_sent_to_customer": {"sales", "management"},
 }

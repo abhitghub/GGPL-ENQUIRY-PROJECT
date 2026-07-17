@@ -121,12 +121,14 @@ def test_granular_happy_path(granular):
     skip = _act(client, org, "estimation", qid, "run_gasket_type_check", gasket_type="soft_cut")
     assert _stage(skip) == "combined_spec_review"
     assert _stage(_act(client, org, "estimation", qid, "submit_for_pricing")) == "sent_for_pricing"
+    # Admin sets the pricing formula and hands it back to estimation to price.
     assert _stage(_act(client, org, "shashnam", qid, "open_pricing")) == "pricing_decision"
-    priced = _act(client, org, "shashnam", qid, "price_domestic")
+    # Estimation now prices per the formula; admin must not (out-of-role for pricing).
+    priced = _act(client, org, "estimation", qid, "price_domestic")
     assert _stage(priced) == "quotation_generated"
     assert priced.json()["stage_meta"]["pricing_route"] == "domestic"
-    # Admin hands the priced quotation back to Sales; only Sales sends to customer.
-    assert _stage(_act(client, org, "shashnam", qid, "send_quotation")) == "ready_for_customer"
+    # Estimation finalises and hands to sales; only sales sends to customer.
+    assert _stage(_act(client, org, "estimation", qid, "send_quotation")) == "ready_for_customer"
     _act_blocked(client, org, "estimation", qid, "send_to_customer")
     final = _act(client, org, "sales", qid, "send_to_customer")
     assert _stage(final) == "quotation_sent_to_customer"

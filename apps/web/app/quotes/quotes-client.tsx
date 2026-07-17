@@ -1314,9 +1314,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const canEditWorkflow = canRole(currentUser.role, "edit_workflow", accessSettings);
   const canEditQuotation = canRole(currentUser.role, "edit_quotation", accessSettings);
   const canEditQuote = canCreateEnquiry || canEditLineItems || canEditWorkflow || canEditQuotation;
-  // Quotation (pricing) is opened by Ashwin sir / back-office, not the sales or
-  // estimation teams — they move enquiries via the workflow handoffs instead.
-  const canOpenQuotation = currentUser.role !== "sales" && currentUser.role !== "estimation";
+  // Estimation now does the pricing (admin only sets the formula), so estimation
+  // may open the quotation to price. Sales cannot edit pricing — they view and
+  // download the finished quotation to send to the customer.
+  const canOpenQuotation = currentUser.role !== "sales";
   // Resolve the workflow machine per-quote so mixed legacy/granular data both
   // render correctly. Prefer the granular namespace, then the legacy stage key.
   // A granular stage id => granular steps/actions; a legacy id => legacy; an
@@ -6180,7 +6181,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <RotateCcw className="h-4 w-4" />
                   Back to enquiry
                 </Button>
-                {canEditQuotation && (
+                {(canEditQuotation || canExportQuotes) && (
                   <>
                     <Button size="sm" onClick={() => exportCurrent("pdf")} disabled={!canExportFinal}>
                       {exporting === "pdf" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
