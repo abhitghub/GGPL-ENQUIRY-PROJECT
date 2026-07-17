@@ -131,13 +131,35 @@ def _can_read_quote(user: CurrentUser, quote: QuoteRead) -> bool:
     return any(can_role(user, capability) for capability in {"view_enquiry", "view_material_planning", "view_history"})
 
 
+def _enrich_customer_names(org_id: str, quotes: list[QuoteRead]) -> list[QuoteRead]:
+    """Fill the display customer name from the selected master for records that
+    have a customer_master_id but no denormalised customer field, so lists and
+    dashboards never show 'Customer not added' for a chosen customer. Only fetches
+    the customer master when at least one quote needs it."""
+    needs = [q for q in quotes if not (q.customer or "").strip() and str((q.stage_meta or {}).get("customer_master_id") or "").strip()]
+    if not needs:
+        return quotes
+    try:
+        name_by_id = {row.id: row.name for row in repo.get_customer_settings(org_id).customers if row.id}
+    except Exception:
+        return quotes
+    result: list[QuoteRead] = []
+    for quote in quotes:
+        master_id = str((quote.stage_meta or {}).get("customer_master_id") or "").strip()
+        if not (quote.customer or "").strip() and name_by_id.get(master_id):
+            quote = quote.model_copy(update={"customer": name_by_id[master_id]})
+        result.append(quote)
+    return result
+
+
 def _visible_quotes(user: CurrentUser) -> list[QuoteRead]:
     _require_any_capability(user, READ_CAPABILITIES)
-    return [
+    quotes = [
         quote
         for quote in repo.list_quotes(user.org_id, **_repo_visibility_kwargs(user))
         if _can_read_quote(user, quote)
     ]
+    return _enrich_customer_names(user.org_id, quotes)
 
 
 def _quote_or_404(user: CurrentUser, quote_id: str, *, require_read: bool = True) -> QuoteRead:
@@ -396,7 +418,7 @@ def create_quote(payload: QuoteCreate, user: CurrentUser = Depends(get_current_u
 
 @router.get("/quotes/{quote_id}", response_model=QuoteRead)
 def get_quote(quote_id: str, user: CurrentUser = Depends(get_current_user)) -> QuoteRead:
-    return _quote_or_404(user, quote_id)
+    return _enrich_customer_names(user.org_id, [_quote_or_404(user, quote_id)])[0]
 
 
 @router.patch("/quotes/{quote_id}", response_model=QuoteRead)
