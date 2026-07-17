@@ -54,6 +54,9 @@ services:
     restart: unless-stopped
     environment:
       API_BASE_URL: http://api:8000
+      # The middleware verifies the session cookie signature — it must use the
+      # SAME secret the API signed it with, or every logged-in user is bounced.
+      AUTH_SECRET: ${AUTH_SECRET:?set a long random AUTH_SECRET in .env}
     ports:
       - "3000:3000"       # the only port exposed to the office LAN
     depends_on:
