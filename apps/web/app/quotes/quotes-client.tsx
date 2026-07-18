@@ -12,7 +12,6 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
-  ChevronsDown,
   Circle,
   Copy,
   Download,
@@ -101,6 +100,7 @@ import { getString, notesFor, validateItemField } from "@/components/quotes/item
 import { buildQuotePricingSummary } from "@/components/quotes/pricing-utils";
 import { evaluateQuoteQuality } from "@/components/quotes/quality-utils";
 import { itemMatchesSmartFilter, quoteDueState, quoteHasClarification, quoteIsHighRisk, quoteIsHighValue } from "@/components/quotes/queue-utils";
+import { PricingGrid } from "@/components/quotes/pricing-grid";
 import { QuoteSummaryRow } from "@/components/quotes/quote-summary-row";
 import { QUOTATION_STAGES, QUOTATION_STAGE_INDEX, QuotationStageId, quotationStageBadgeVariant, quotationStageFromData } from "@/components/quotes/quotation-stage";
 import { appendActivity } from "@/components/quotes/activity-utils";
@@ -1502,11 +1502,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const virtualPaddingBottom = Math.max(0, (pagedDisplayIndices.length - virtualEnd) * activeVirtualRowHeight);
   const pageStart = displayIndices.length ? safeDraftPage * DRAFT_PAGE_SIZE + 1 : 0;
   const pageEnd = Math.min(displayIndices.length, (safeDraftPage + 1) * DRAFT_PAGE_SIZE);
-  const finalPageCount = Math.max(1, Math.ceil(items.length / FINAL_PAGE_SIZE));
-  const safeFinalPage = Math.min(finalPage, finalPageCount - 1);
-  const finalPageStartIndex = safeFinalPage * FINAL_PAGE_SIZE;
-  const finalPageEndIndex = Math.min(items.length, finalPageStartIndex + FINAL_PAGE_SIZE);
-  const finalPageItems = items.slice(finalPageStartIndex, finalPageEndIndex);
+  // (Quotation pricing pagination removed — the pricing sheet is one continuous
+  // Excel-style grid; finalPage state is kept only because effects reset it.)
+  void finalPage;
+  void FINAL_PAGE_SIZE;
   const selectedIndices = selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : [];
   const selectedOrVisibleIndices = selectedIndices.length ? selectedIndices : displayIndices;
   const selectedOrVisibleRows = selectedOrVisibleIndices.map((index) => items[index]).filter(Boolean);
@@ -2980,6 +2979,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       next.discount_approval_pct = Number(value) || 0;
     }
     setQuote((current) => (current ? { ...current, quote_data: next, quote_no: effectiveQuoteNo } : current));
+    setHasUnsavedLocalEdits(true);
+  }
+
+  // Apply several quote_data keys in one update (updateQd merges one key off the
+  // current closure, so sequential calls would drop earlier ones).
+  function updateQdMany(patch: Record<string, unknown>) {
+    if (!canEditQuotation) return;
+    setQuote((current) => (current ? { ...current, quote_data: { ...current.quote_data, ...patch }, quote_no: effectiveQuoteNo } : current));
     setHasUnsavedLocalEdits(true);
   }
 
@@ -6403,110 +6410,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
 
                 <TabsContent value="items" className="space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/30 px-3 py-2 text-sm">
-                    <div className="text-muted-foreground">Showing {items.length ? finalPageStartIndex + 1 : 0}-{finalPageEndIndex} of {items.length} quotation row(s).</div>
-                    <div className="flex items-center gap-2">
-                      <Button variant="secondary" size="sm" onClick={() => setFinalPage((page) => Math.max(0, page - 1))} disabled={safeFinalPage <= 0}>Previous</Button>
-                      <span className="text-xs text-muted-foreground">Page {safeFinalPage + 1} of {finalPageCount}</span>
-                      <Button variant="secondary" size="sm" onClick={() => setFinalPage((page) => Math.min(finalPageCount - 1, page + 1))} disabled={safeFinalPage >= finalPageCount - 1}>Next</Button>
+                    <div className="text-muted-foreground">{items.length} quotation row(s) — Excel-style pricing sheet.</div>
+                    <div className="text-xs text-muted-foreground">
+                      Click a cell and type · drag the corner handle to fill · paste from Excel · Ctrl+D fills down
                     </div>
                   </div>
-
-                  <div className="max-h-[620px] overflow-auto rounded-md border">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>#</TableHead>
-                          <TableHead>Cust Sl.No</TableHead>
-                          <TableHead>Customer item code</TableHead>
-                          <TableHead>Description</TableHead>
-                          <TableHead>Qty</TableHead>
-                          <TableHead>UOM</TableHead>
-                          <TableHead>Unit price</TableHead>
-                          <TableHead>Discount %</TableHead>
-                          <TableHead>Final price</TableHead>
-                          <TableHead>Total price</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {finalPageItems.map((item, pageIndex) => {
-                          const index = finalPageStartIndex + pageIndex;
-                          const price = unitPrices[index] ?? 0;
-                          const converted = currency === "INR" ? price : price / (fxRate || 1);
-                          const pricingLine = pricingSummary.lines[index];
-                          const discountPctLine = lineDiscounts[index] ?? 0;
-                          const finalUnitPrice = pricingLine?.finalUnitPrice ?? converted;
-                          const total = item.status === "regret" ? 0 : finalUnitPrice * toNumber(item.quantity);
-                          return (
-                            <TableRow key={index}>
-                              <TableCell>{index + 1}</TableCell>
-                              <TableCell><Input className="w-24" value={getString(item.customer_sl_no)} onChange={(event) => updateItem(index, "customer_sl_no", event.target.value)} disabled={!canEditLineItems} /></TableCell>
-                              <TableCell><Input className="w-36" value={getString(item.customer_item_code)} onChange={(event) => updateItem(index, "customer_item_code", event.target.value)} disabled={!canEditLineItems} /></TableCell>
-                              <TableCell className="min-w-96 text-xs">
-                                {item.status === "regret" ? (
-                                  "REGRET - CANNOT PRODUCE"
-                                ) : (
-                                  <div className="space-y-1">
-                                    <div>{getString(item.raw_description || item.ggpl_description)}</div>
-                                    {item.ggpl_description && item.ggpl_description !== item.raw_description && <div className="text-muted-foreground">GGPL: {getString(item.ggpl_description)}</div>}
-                                  </div>
-                                )}
-                              </TableCell>
-                              <TableCell><Input className="w-24" type="number" value={getString(item.quantity)} onChange={(event) => updateItem(index, "quantity", event.target.value)} disabled={!canEditLineItems} /></TableCell>
-                              <TableCell>{getString(item.uom || "NOS")}</TableCell>
-                              <TableCell>
-                                <div className="flex items-center gap-1">
-                                  <Input className="w-32" type="number" value={getString(price)} disabled={!canEditQuotation} onChange={(event) => {
-                                    const next = [...unitPrices];
-                                    next[index] = Number(event.target.value);
-                                    updateQd("unit_prices", next);
-                                  }} />
-                                  {canEditQuotation && (
-                                    <button
-                                      type="button"
-                                      title="Fill this unit price down to all rows below"
-                                      className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-                                      onClick={() => {
-                                        const next = [...unitPrices];
-                                        for (let i = index; i < items.length; i += 1) next[i] = Number(price) || 0;
-                                        updateQd("unit_prices", next);
-                                      }}
-                                    >
-                                      <ChevronsDown className="h-3.5 w-3.5" />
-                                    </button>
-                                  )}
-                                </div>
-                              </TableCell>
-                              <TableCell>
-                                <div className="flex items-center gap-1">
-                                  <Input className="w-24" type="number" value={getString(discountPctLine)} disabled={!canEditQuotation} onChange={(event) => {
-                                    const next = [...lineDiscounts];
-                                    next[index] = Number(event.target.value);
-                                    updateQd("line_discounts_pct", next);
-                                  }} />
-                                  {canEditQuotation && (
-                                    <button
-                                      type="button"
-                                      title="Fill this discount down to all rows below"
-                                      className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-                                      onClick={() => {
-                                        const next = [...lineDiscounts];
-                                        for (let i = index; i < items.length; i += 1) next[i] = Number(discountPctLine) || 0;
-                                        updateQd("line_discounts_pct", next);
-                                      }}
-                                    >
-                                      <ChevronsDown className="h-3.5 w-3.5" />
-                                    </button>
-                                  )}
-                                </div>
-                              </TableCell>
-                              <TableCell>{finalUnitPrice.toFixed(2)}</TableCell>
-                              <TableCell>{total.toFixed(2)}</TableCell>
-                            </TableRow>
-                          );
-                        })}
-                      </TableBody>
-                    </Table>
-                  </div>
+                  <PricingGrid
+                    items={items}
+                    unitPrices={unitPrices}
+                    lineDiscounts={lineDiscounts}
+                    canEdit={canEditQuotation}
+                    onApply={(next) => updateQdMany(next)}
+                  />
                 </TabsContent>
 
                 <TabsContent value="terms" className="space-y-3">
