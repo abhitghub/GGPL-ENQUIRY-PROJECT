@@ -705,6 +705,16 @@ def advance_workflow(
     # Apply any static markers the transition records (e.g. pricing_route).
     for key, value in (transition.get("set") or {}).items():
         stage_meta[key] = value
+    # Generate-quotation derives domestic/international from the quote type the
+    # sales person chose in the enquiry setup — it is not asked again here.
+    if transition.get("route_from_market_type"):
+        market = str(stage_meta.get("market_type") or "").strip().lower()
+        if not market:
+            raise HTTPException(
+                status_code=409,
+                detail="Select Export or Domestic in the enquiry setup before generating the quotation",
+            )
+        stage_meta["pricing_route"] = "international" if market == "export" else "domestic"
     comment = (payload.comment or "").strip()
     stage_meta["workflow_comment"] = comment
     detail = f"{transition['label']} — {comment}" if comment else transition["label"]

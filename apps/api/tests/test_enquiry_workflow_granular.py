@@ -41,9 +41,10 @@ def _headers(org: str, user_id: str) -> dict:
     return {"X-Org-Id": org, "X-User-Id": user_id}
 
 
-def _create_enquiry(client: TestClient, org: str, owner: str = "sales") -> str:
+def _create_enquiry(client: TestClient, org: str, owner: str = "sales", market_type: str = "domestic") -> str:
     """Create an enquiry owned by `owner` (self-assigned) so Sales keeps
-    read visibility after the record is handed off to other teams."""
+    read visibility after the record is handed off to other teams. The quote
+    type (market_type) is set up front, as in the enquiry setup form."""
     created = client.post(
         "/api/v1/quotes",
         headers=_headers(org, owner),
@@ -51,7 +52,7 @@ def _create_enquiry(client: TestClient, org: str, owner: str = "sales") -> str:
             "customer": "ACME",
             "project_ref": "P-GW",
             "items": [],
-            "stage_meta": {"owner_id": owner},
+            "stage_meta": {"owner_id": owner, "market_type": market_type},
         },
     )
     assert created.status_code == 201, created.text
@@ -128,9 +129,10 @@ def test_granular_happy_path(granular):
     # Estimation prices and submits the quotation for generation.
     assert _stage(_act(client, org, "estimation", qid, "submit_priced_quotation")) == "pricing_submitted"
     # Estimation cannot generate the quotation — only sales or admin.
-    _act_blocked(client, org, "estimation", qid, "price_domestic")
-    # Sales (or admin) generates the priced quotation.
-    priced = _act(client, org, "sales", qid, "price_domestic")
+    _act_blocked(client, org, "estimation", qid, "generate_quotation")
+    # Sales (or admin) generates; the route derives from the enquiry's quote type
+    # (market_type=domestic set at creation) — it is not asked again.
+    priced = _act(client, org, "sales", qid, "generate_quotation")
     assert _stage(priced) == "quotation_generated"
     assert priced.json()["stage_meta"]["pricing_route"] == "domestic"
     # Sales downloads and sends to the customer.
@@ -142,6 +144,29 @@ def test_granular_happy_path(granular):
     assert len(granular_meta["history_log"]) == 11
     assert granular_meta["history_log"][0]["action"] == "forward_to_estimation"
     assert granular_meta["history_log"][-1]["by"]  # actor recorded for audit
+
+
+def test_generate_route_derived_from_market_type(granular):
+    """An export enquiry generates an international quotation without being asked
+    for the route again — it derives from the quote type set in the enquiry setup."""
+    client = TestClient(app)
+    org = f"org-gw-route-{uuid.uuid4().hex}"
+    qid = _create_enquiry(client, org, market_type="export")
+    for role, action in [
+        ("sales", "forward_to_estimation"),
+        ("estimation", "begin_spec_check"),
+        ("estimation", "mark_spec_complete"),
+        ("estimation", "proceed_to_gasket_check"),
+        ("estimation", "run_gasket_type_check"),
+        ("technical", "return_tr_spec"),
+        ("estimation", "submit_for_pricing"),
+        ("shashnam", "open_pricing"),
+        ("estimation", "submit_priced_quotation"),
+    ]:
+        _act(client, org, role, qid, action)
+    generated = _act(client, org, "sales", qid, "generate_quotation")
+    assert _stage(generated) == "quotation_generated"
+    assert generated.json()["stage_meta"]["pricing_route"] == "international"
 
 
 def test_granular_query_loop(granular):

@@ -527,8 +527,8 @@ export const GRANULAR_ENQUIRY_WORKFLOW_ACTIONS = [
   { action: "submit_for_pricing", from: ["combined_spec_review"], roles: ["estimation"], label: "Submit for pricing" },
   { action: "open_pricing", from: ["sent_for_pricing"], roles: ["admin", "management"], label: "Set pricing formula & send to estimation" },
   { action: "submit_priced_quotation", from: ["pricing_decision"], roles: ["estimation", "management"], label: "Submit priced quotation" },
-  { action: "price_domestic", from: ["pricing_submitted"], roles: ["sales", "admin", "management"], label: "Generate quotation (domestic)" },
-  { action: "price_international", from: ["pricing_submitted"], roles: ["sales", "admin", "management"], label: "Generate quotation (international)" },
+  // Domestic/international is derived from the enquiry's quote type — not asked again.
+  { action: "generate_quotation", from: ["pricing_submitted"], roles: ["sales", "admin", "management"], label: "Generate quotation" },
   { action: "send_to_customer", from: ["quotation_generated"], roles: ["sales", "management"], label: "Send quotation to customer" },
 ] as const;
 

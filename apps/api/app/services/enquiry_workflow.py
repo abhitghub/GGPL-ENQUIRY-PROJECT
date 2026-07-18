@@ -239,23 +239,16 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "with_whom": "Sales / Admin",
         "label": "Submit priced quotation",
     },
-    # stage 9 domestic/international split -> sales OR admin generates the priced
-    # quotation; two sibling actions converging on quotation_generated.
-    "price_domestic": {
+    # Sales OR admin generates the priced quotation. The domestic/international
+    # route is NOT asked again here — it is derived from the quote type chosen in
+    # the enquiry setup (stage_meta.market_type: export -> international).
+    "generate_quotation": {
         "from": {"pricing_submitted"},
         "roles": {"sales", "admin", "management"},
         "to": "quotation_generated",
         "with_whom": "Sales",
-        "label": "Generate quotation (domestic)",
-        "set": {"pricing_route": "domestic"},
-    },
-    "price_international": {
-        "from": {"pricing_submitted"},
-        "roles": {"sales", "admin", "management"},
-        "to": "quotation_generated",
-        "with_whom": "Sales",
-        "label": "Generate quotation (international)",
-        "set": {"pricing_route": "international"},
+        "label": "Generate quotation",
+        "route_from_market_type": True,
     },
     # Sales downloads the generated quotation and releases it to the customer.
     "send_to_customer": {

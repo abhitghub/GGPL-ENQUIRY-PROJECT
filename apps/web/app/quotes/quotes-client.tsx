@@ -106,7 +106,7 @@ import { QUOTATION_STAGES, QUOTATION_STAGE_INDEX, QuotationStageId, quotationSta
 import { appendActivity } from "@/components/quotes/activity-utils";
 import { ClipboardTableDetection, detectClipboardTable, rowsToTsv, structuredRowsToItemFields } from "@/components/quotes/clipboard-table";
 import { QuoteTimeline } from "@/components/quotes/quote-timeline";
-import { DRAFT_STAGES, ENQUIRY_STAGES, EnquiryStageId, PO_STAGES, QuoteSection, enquiryStageFromQuote, enquiryStageLabel, isPricingOnward, revisionLabel, stageLabel } from "@/components/quotes/stage-utils";
+import { DRAFT_STAGES, ENQUIRY_STAGES, EnquiryStageId, PO_STAGES, QuoteSection, enquiryStageFromQuote, enquiryStageLabel, isPricingOnward, revisionLabel, stageLabel, workflowStepOf } from "@/components/quotes/stage-utils";
 import { issueBadgesForItem, TechnicalIssuesPanel } from "@/components/quotes/technical-issues-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -3090,7 +3090,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       setWorkflowComment("");
       toast.success("Workflow updated");
       // After generating the quotation, offer to preview or download it.
-      if (action === "price_domestic" || action === "price_international") {
+      if (action === "generate_quotation") {
         setGeneratedDialogOpen(true);
       }
     } catch (error) {
@@ -3180,6 +3180,16 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     } else if (isMaterialSection) {
       if (row.stage_meta?.material_planning_enabled !== true) return false;
     } else if (!DRAFT_STAGES.has(row.stage)) {
+      return false;
+    }
+    // Once an enquiry is handed off for generation/sending, estimation and
+    // technical have nothing left to do on it — drop it from their Enquiries
+    // list to avoid confusion. Sales/admin/management keep seeing it.
+    if (
+      isDraftSection &&
+      (currentUser.role === "estimation" || currentUser.role === "technical") &&
+      ["pricing_submitted", "quotation_generated", "quotation_sent_to_customer"].includes(workflowStepOf(row))
+    ) {
       return false;
     }
     if (queueFilter === "my_work" && row.stage_meta?.owner_id !== currentUser.id && row.stage_meta?.owner_name !== currentUser.name && row.stage_meta?.owner_email !== currentUser.email) return false;
