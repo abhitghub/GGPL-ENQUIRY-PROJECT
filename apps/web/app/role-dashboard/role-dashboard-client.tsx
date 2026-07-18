@@ -58,6 +58,20 @@ function workflowNote(quote: Quote): string {
   return typeof meta.workflow_comment === "string" ? meta.workflow_comment : "";
 }
 
+// From pricing onward the work happens on the Quotations screen (pricing sheet,
+// generate, PDF) — link those rows there instead of the enquiry editor.
+const PRICING_SCREEN_STEPS = new Set([
+  "sent_for_pricing",
+  "pricing_decision",
+  "pricing_submitted",
+  "quotation_generated",
+  "quotation_sent_to_customer",
+]);
+
+function quoteHref(quote: Quote): string {
+  return PRICING_SCREEN_STEPS.has(currentStep(quote)) ? `/quotes/final?quote=${quote.id}` : `/quotes?quote=${quote.id}`;
+}
+
 function ownedSteps(role: string): Set<string> {
   return new Set(
     Object.entries(STEP_OWNER_ROLES)
@@ -178,7 +192,7 @@ export function RoleDashboardClient() {
                   return (
                     <TableRow key={quote.id}>
                       <TableCell>
-                        <Link href={`/quotes?quote=${quote.id}`} className="font-medium hover:underline">
+                        <Link href={quoteHref(quote)} className="font-medium hover:underline">
                           {quote.customer || "Customer not added"}
                         </Link>
                         <div className="max-w-56 truncate text-xs text-muted-foreground">
@@ -207,7 +221,7 @@ export function RoleDashboardClient() {
                             </Button>
                           ))}
                           <Button asChild variant="ghost" size="sm">
-                            <Link href={`/quotes?quote=${quote.id}`}>Open</Link>
+                            <Link href={quoteHref(quote)}>{PRICING_SCREEN_STEPS.has(step) ? "Open pricing" : "Open"}</Link>
                           </Button>
                         </div>
                       </TableCell>

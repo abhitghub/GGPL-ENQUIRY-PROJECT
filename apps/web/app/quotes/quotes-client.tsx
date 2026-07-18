@@ -4384,11 +4384,25 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     {item.label}
                   </Button>
                 ))}
+                {/* From pricing onward the pricing sheet lives on the Quotations
+                    screen — give a direct way in from the enquiry. */}
+                {isDraftSection && ["sent_for_pricing", "pricing_decision", "pricing_submitted"].includes(currentWorkflowStep) && (
+                  <Button variant="secondary" size="sm" onClick={() => router.push(`/quotes/final?quote=${quote.id}`)}>
+                    <FileSpreadsheet className="h-4 w-4" />
+                    Open pricing sheet
+                  </Button>
+                )}
               </div>
             </div>
           ) : (
-            <div className="mt-2 text-xs text-muted-foreground">
-              No workflow action for your role at this step — it&apos;s with the {workflowSteps[currentWorkflowStepIndex]?.team ?? "team"}.
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+              <span>No workflow action for your role at this step — it&apos;s with the {workflowSteps[currentWorkflowStepIndex]?.team ?? "team"}.</span>
+              {isDraftSection && ["sent_for_pricing", "pricing_decision", "pricing_submitted"].includes(currentWorkflowStep) && (
+                <Button variant="secondary" size="sm" onClick={() => router.push(`/quotes/final?quote=${quote.id}`)}>
+                  <FileSpreadsheet className="h-4 w-4" />
+                  Open pricing sheet
+                </Button>
+              )}
             </div>
           )}
         </div>
