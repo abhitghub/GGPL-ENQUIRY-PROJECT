@@ -1264,6 +1264,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [enquirySetupOpen, setEnquirySetupOpen] = React.useState(false);
   const [quotationSetupOpen, setQuotationSetupOpen] = React.useState(false);
   const [workflowComment, setWorkflowComment] = React.useState("");
+  // Shown right after "Generate quotation" so the user can preview/download it.
+  const [generatedDialogOpen, setGeneratedDialogOpen] = React.useState(false);
   const [addCustomerOpen, setAddCustomerOpen] = React.useState(false);
   const [addingCustomer, setAddingCustomer] = React.useState(false);
   const [newCustomer, setNewCustomer] = React.useState<NewCustomerInput>({ name: "" });
@@ -3087,6 +3089,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       setQuotes((prev) => prev.map((row) => (row.id === updated.id ? quoteSummary(updated) : row)));
       setWorkflowComment("");
       toast.success("Workflow updated");
+      // After generating the quotation, offer to preview or download it.
+      if (action === "price_domestic" || action === "price_international") {
+        setGeneratedDialogOpen(true);
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not update the workflow");
     }
@@ -6699,6 +6705,27 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               className="min-h-0 flex-1 rounded-md border bg-background"
             />
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={generatedDialogOpen} onOpenChange={setGeneratedDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Quotation generated</DialogTitle>
+            <DialogDescription>
+              The quotation has been generated. Preview it now or download the PDF to send to the customer.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button variant="secondary" onClick={() => { setGeneratedDialogOpen(false); void exportCurrent("pdf", "preview"); }}>
+              <FileText className="h-4 w-4" />
+              Preview
+            </Button>
+            <Button onClick={() => { setGeneratedDialogOpen(false); void exportCurrent("pdf"); }}>
+              <Download className="h-4 w-4" />
+              Download PDF
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

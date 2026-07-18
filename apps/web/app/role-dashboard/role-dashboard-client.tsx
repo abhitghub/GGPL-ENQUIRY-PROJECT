@@ -108,6 +108,12 @@ export function RoleDashboardClient() {
     () => quotes.filter((quote) => mine.has(currentStep(quote))),
     [quotes, mine],
   );
+  // Completed quotations (generated / sent) — a read-only section for admin & sales.
+  const showCompleted = role === "admin" || role === "sales" || role === "management";
+  const completed = React.useMemo(
+    () => quotes.filter((quote) => ["quotation_generated", "quotation_sent_to_customer"].includes(currentStep(quote))),
+    [quotes],
+  );
 
   async function runAction(quote: Quote, action: string) {
     setBusy(`${quote.id}:${action}`);
@@ -213,6 +219,58 @@ export function RoleDashboardClient() {
           )}
         </CardContent>
       </Card>
+
+      {showCompleted ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Completed quotations</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {completed.length === 0 ? (
+              <div className="py-4 text-sm text-muted-foreground">
+                No generated quotations yet. Quotations appear here once they are generated and sent.
+              </div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Customer</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Open</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {completed.map((quote) => {
+                    const step = currentStep(quote);
+                    return (
+                      <TableRow key={quote.id}>
+                        <TableCell>
+                          <Link href={`/quotes/final?quote=${quote.id}`} className="font-medium hover:underline">
+                            {quote.customer || "Customer not added"}
+                          </Link>
+                          <div className="max-w-56 truncate text-xs text-muted-foreground">
+                            {quote.project_ref || quote.quote_no || "No reference added"}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={step === "quotation_sent_to_customer" ? "secondary" : "outline"}>
+                            {step === "quotation_sent_to_customer" ? "Sent to customer" : "Quotation generated"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Button asChild variant="ghost" size="sm">
+                            <Link href={`/quotes/final?quote=${quote.id}`}>Open quotation</Link>
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+      ) : null}
     </div>
   );
 }

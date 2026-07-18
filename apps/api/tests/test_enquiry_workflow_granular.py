@@ -117,9 +117,11 @@ def test_granular_happy_path(granular):
     assert _stage(_act(client, org, "estimation", qid, "begin_spec_check")) == "spec_check"
     assert _stage(_act(client, org, "estimation", qid, "mark_spec_complete")) == "converted_to_ggpl_format"
     assert _stage(_act(client, org, "estimation", qid, "proceed_to_gasket_check")) == "gasket_type_check"
-    # Non-specific gasket -> skip technical review, straight to combined review.
-    skip = _act(client, org, "estimation", qid, "run_gasket_type_check", gasket_type="soft_cut")
-    assert _stage(skip) == "combined_spec_review"
+    # Gasket type check routes to the technical review team (no bypass); only
+    # technical forwards it ahead to the combined review.
+    tr = _act(client, org, "estimation", qid, "run_gasket_type_check", gasket_type="soft_cut")
+    assert _stage(tr) == "technical_review_pending"
+    assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "combined_spec_review"
     assert _stage(_act(client, org, "estimation", qid, "submit_for_pricing")) == "sent_for_pricing"
     # Admin sets the pricing formula and hands it back to estimation to price.
     assert _stage(_act(client, org, "shashnam", qid, "open_pricing")) == "pricing_decision"
@@ -137,7 +139,7 @@ def test_granular_happy_path(granular):
 
     granular_meta = final.json()["stage_meta"]["granular_workflow"]
     assert granular_meta["current_stage"] == "quotation_sent_to_customer"
-    assert len(granular_meta["history_log"]) == 10
+    assert len(granular_meta["history_log"]) == 11
     assert granular_meta["history_log"][0]["action"] == "forward_to_estimation"
     assert granular_meta["history_log"][-1]["by"]  # actor recorded for audit
 
@@ -159,11 +161,10 @@ def test_granular_query_loop(granular):
     assert _stage(_act(client, org, "estimation", qid, "mark_spec_complete")) == "converted_to_ggpl_format"
 
 
-def test_granular_optional_technical_review(granular):
-    """Technical review is optional and non-blocking: the spec check goes straight
-    to combined review (and on to pricing), and estimation may optionally send it
-    to technical for a check, which only technical performs, returning it to
-    combined review — no approval gate before pricing."""
+def test_granular_technical_review_routing(granular):
+    """The gasket type check routes the enquiry to the technical review team (no
+    bypass). Only technical may view/forward it ahead. From the combined review,
+    estimation may either send for pricing or send for technical review again."""
     client = TestClient(app)
     org = f"org-gw-tr-{uuid.uuid4().hex}"
     qid = _create_enquiry(client, org)
@@ -172,14 +173,22 @@ def test_granular_optional_technical_review(granular):
     _act(client, org, "estimation", qid, "begin_spec_check")
     _act(client, org, "estimation", qid, "mark_spec_complete")
     _act(client, org, "estimation", qid, "proceed_to_gasket_check")
-    # Gasket check no longer forces technical review — it goes to combined review.
-    assert _stage(_act(client, org, "estimation", qid, "run_gasket_type_check", gasket_type="ring_joint")) == "combined_spec_review"
-    # Optional: estimation sends for a technical check.
-    assert _stage(_act(client, org, "estimation", qid, "send_to_technical_review")) == "technical_review_pending"
-    # Only technical performs the check; it returns to combined review (no approval).
+    # Gasket type check -> technical review team (mandatory, no bypass).
+    assert _stage(_act(client, org, "estimation", qid, "run_gasket_type_check", gasket_type="ring_joint")) == "technical_review_pending"
+    # Estimation cannot skip past TR from here — pricing is a wrong-stage action.
+    _act_blocked_or_conflict = client.post(
+        f"/api/v1/quotes/{qid}/workflow",
+        headers=_headers(org, "estimation"),
+        json={"action": "submit_for_pricing"},
+    )
+    assert _act_blocked_or_conflict.status_code in (403, 404, 409)
+    # Only technical forwards the enquiry ahead.
     _act_blocked(client, org, "estimation", qid, "return_tr_spec")
     assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "combined_spec_review"
-    # And it can proceed to pricing without any technical-review approval.
+    # From the combined review estimation chooses: technical review again...
+    assert _stage(_act(client, org, "estimation", qid, "send_to_technical_review")) == "technical_review_pending"
+    assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "combined_spec_review"
+    # ...or send for pricing.
     assert _stage(_act(client, org, "estimation", qid, "submit_for_pricing")) == "sent_for_pricing"
 
 

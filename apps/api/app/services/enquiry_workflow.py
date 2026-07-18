@@ -187,31 +187,32 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "with_whom": "Estimation",
         "label": "Proceed to gasket type check",
     },
-    # Estimation records the gasket type and moves to the combined spec review.
-    # Technical review is no longer forced here — it is an optional check below.
+    # Estimation runs the gasket type check and the enquiry goes to the
+    # technical review team — TR is not bypassed.
     "run_gasket_type_check": {
         "from": {"gasket_type_check"},
         "roles": {"estimation"},
-        "to": "combined_spec_review",
-        "with_whom": "Estimation",
+        "to": "technical_review_pending",
+        "with_whom": "Technical review",
         "label": "Run gasket type check",
     },
-    # OPTIONAL: estimation may send the enquiry to technical for a check. It is
-    # not an approval gate — the enquiry can go to pricing without it.
+    # Estimation may also route to technical review from the combined review
+    # (either send for pricing or send for technical review).
     "send_to_technical_review": {
         "from": {"combined_spec_review"},
         "roles": {"estimation"},
         "to": "technical_review_pending",
         "with_whom": "Technical review",
-        "label": "Send for technical check (optional)",
+        "label": "Send for technical review",
     },
-    # Technical just checks and returns it — no approval required.
+    # Only technical can view/forward an enquiry that is up for technical
+    # review — it moves it ahead to the combined spec review.
     "return_tr_spec": {
         "from": {"technical_review_pending"},
         "roles": {"technical"},
         "to": "combined_spec_review",
         "with_whom": "Estimation",
-        "label": "Technical check done",
+        "label": "Technical review done — forward",
     },
     "submit_for_pricing": {
         "from": {"combined_spec_review"},
