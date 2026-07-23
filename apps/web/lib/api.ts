@@ -498,7 +498,7 @@ export const GRANULAR_WORKFLOW = process.env.NEXT_PUBLIC_ENABLE_GRANULAR_WORKFLO
 // Granular 11-stage machine (mirrors app/services/enquiry_workflow.py). Additive:
 // the legacy ENQUIRY_WORKFLOW_STEPS/_ACTIONS above are left untouched.
 export const GRANULAR_ENQUIRY_WORKFLOW_STEPS = [
-  { id: "enquiry_received", label: "Enquiry received", team: "Sales" },
+  { id: "enquiry_received", label: "Enquiry received", team: "Estimation" },
   { id: "forwarded_to_estimation", label: "Forwarded to estimation", team: "Estimation" },
   { id: "spec_check", label: "Spec check", team: "Estimation" },
   { id: "query_raised_to_customer", label: "Query raised to customer", team: "Sales" },
@@ -515,7 +515,7 @@ export const GRANULAR_ENQUIRY_WORKFLOW_STEPS = [
 ] as const;
 
 export const GRANULAR_ENQUIRY_WORKFLOW_ACTIONS = [
-  { action: "forward_to_estimation", from: ["enquiry_received"], roles: ["sales", "management"], label: "Forward to estimation" },
+  { action: "forward_to_estimation", from: ["enquiry_received"], roles: ["estimation", "management"], label: "Forward to estimation" },
   { action: "begin_spec_check", from: ["forwarded_to_estimation"], roles: ["estimation"], label: "Begin spec check" },
   { action: "raise_customer_query", from: ["spec_check"], roles: ["estimation"], label: "Raise query to customer" },
   { action: "answer_customer_query", from: ["query_raised_to_customer"], roles: ["sales", "management"], label: "Answer customer query" },
@@ -549,6 +549,62 @@ export async function advanceEnquiryWorkflow(
       method: "POST",
       headers: headers(),
       body: JSON.stringify(body),
+    }),
+  );
+}
+
+// A change query re-orders the flow: any team can ask for an enquiry to be sent
+// to another stage (e.g. back to estimation for a quantity change). It waits for
+// admin/approver sign-off, and every step is kept in its own history log.
+export type ChangeQueryEvent = {
+  at: string;
+  by: string;
+  role: string;
+  action: string;
+  note: string;
+};
+
+export type ChangeQuery = {
+  id: string;
+  raised_by: string;
+  raised_by_role: string;
+  from_stage: string;
+  target_stage: string;
+  target_label?: string;
+  target_team?: string;
+  note: string;
+  status: "pending_approval" | "approved" | "rejected" | "resolved";
+  created_at: string;
+  return_stage?: string;
+  history?: ChangeQueryEvent[];
+};
+
+export function readChangeQueries(stageMeta: Record<string, unknown> | null | undefined): ChangeQuery[] {
+  const raw = (stageMeta as { change_queries?: unknown } | null | undefined)?.change_queries;
+  return Array.isArray(raw) ? (raw as ChangeQuery[]) : [];
+}
+
+export async function raiseChangeQuery(id: string, targetStage: string, note: string): Promise<Quote> {
+  return parse<Quote>(
+    await apiFetch(`${API_BASE}/api/v1/quotes/${id}/queries`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ target_stage: targetStage, note }),
+    }),
+  );
+}
+
+export async function actOnChangeQuery(
+  id: string,
+  queryId: string,
+  action: "approve" | "reject" | "resolve",
+  note = "",
+): Promise<Quote> {
+  return parse<Quote>(
+    await apiFetch(`${API_BASE}/api/v1/quotes/${id}/queries/${encodeURIComponent(queryId)}/action`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ action, note }),
     }),
   );
 }
@@ -705,6 +761,16 @@ export type NewContactInput = {
   phone?: string;
   mobile?: string;
 };
+
+export async function addEpcName(name: string): Promise<BusinessMasterData> {
+  return parse<BusinessMasterData>(
+    await apiFetch(`${API_BASE}/api/v1/customers/epc-names`, {
+      method: "POST",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name }),
+    }),
+  );
+}
 
 export async function addCustomerContact(customerId: string, payload: NewContactInput): Promise<CustomerRecord> {
   return parse<CustomerRecord>(

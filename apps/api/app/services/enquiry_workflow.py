@@ -107,7 +107,7 @@ ROLE_VISIBLE_STEPS: dict[str, set[str]] = {
 # ---------------------------------------------------------------------------
 
 GRANULAR_WORKFLOW_STEPS: list[dict[str, str]] = [
-    {"id": "enquiry_received", "label": "Enquiry received", "team": "Sales"},
+    {"id": "enquiry_received", "label": "Enquiry received", "team": "Estimation"},
     {"id": "forwarded_to_estimation", "label": "Forwarded to estimation", "team": "Estimation"},
     {"id": "spec_check", "label": "Spec check", "team": "Estimation"},
     {"id": "query_raised_to_customer", "label": "Query raised to customer", "team": "Sales"},
@@ -141,9 +141,11 @@ TR_REQUIRED_GASKET_TYPES: set[str] = {
 # anything). Optional keys: "branch" (runtime destination), "set" (extra
 # stage_meta markers to persist).
 GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
+    # Estimation creates enquiries (and assigns the sales owner), so it also
+    # owns the first handoff.
     "forward_to_estimation": {
         "from": {"enquiry_received"},
-        "roles": {"sales", "management"},
+        "roles": {"estimation", "management"},
         "to": "forwarded_to_estimation",
         "with_whom": "Estimation",
         "label": "Forward to estimation",
@@ -266,6 +268,7 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
 # omniscient (mirrors the legacy map).
 GRANULAR_ROLE_VISIBLE_STEPS: dict[str, set[str]] = {
     "estimation": {
+        "enquiry_received",
         "forwarded_to_estimation",
         "spec_check",
         "converted_to_ggpl_format",
@@ -285,7 +288,7 @@ GRANULAR_ROLE_VISIBLE_STEPS: dict[str, set[str]] = {
 # out-of-stage edits even when a transition's role set is broad. `management`
 # retained everywhere for back-compat; `admin` bypasses in code regardless.
 GRANULAR_STAGE_OWNER_ROLES: dict[str, set[str]] = {
-    "enquiry_received": {"sales", "management"},
+    "enquiry_received": {"estimation", "management"},
     "forwarded_to_estimation": {"estimation", "management"},
     "spec_check": {"estimation", "management"},
     "query_raised_to_customer": {"sales", "management"},

@@ -25,7 +25,7 @@ import { getCurrentAppUser, setCurrentAppUser } from "@/lib/auth/users";
 // apps/api/app/services/enquiry_workflow.py). A role's dashboard shows ONLY
 // enquiries currently parked at a stage it owns.
 const STEP_OWNER_ROLES: Record<string, string[]> = {
-  enquiry_received: ["sales"],
+  enquiry_received: ["estimation"],
   forwarded_to_estimation: ["estimation"],
   spec_check: ["estimation"],
   query_raised_to_customer: ["sales"],

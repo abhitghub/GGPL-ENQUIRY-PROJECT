@@ -42,12 +42,13 @@ def _headers(org: str, user_id: str) -> dict:
 
 
 def _create_enquiry(client: TestClient, org: str, owner: str = "sales", market_type: str = "domestic") -> str:
-    """Create an enquiry owned by `owner` (self-assigned) so Sales keeps
-    read visibility after the record is handed off to other teams. The quote
-    type (market_type) is set up front, as in the enquiry setup form."""
+    """Create an enquiry as ESTIMATION (who owns enquiry creation) and assign it
+    to `owner` — estimation decides which sales person owns the record, and the
+    owner keeps read visibility after handoffs. The quote type (market_type) is
+    set up front, as in the enquiry setup form."""
     created = client.post(
         "/api/v1/quotes",
-        headers=_headers(org, owner),
+        headers=_headers(org, "estimation"),
         json={
             "customer": "ACME",
             "project_ref": "P-GW",
@@ -114,7 +115,9 @@ def test_granular_happy_path(granular):
     org = f"org-gw-happy-{uuid.uuid4().hex}"
     qid = _create_enquiry(client, org)
 
-    assert _stage(_act(client, org, "sales", qid, "forward_to_estimation")) == "forwarded_to_estimation"
+    # Estimation creates and forwards the enquiry; sales may not act here.
+    _act_blocked(client, org, "sales", qid, "forward_to_estimation")
+    assert _stage(_act(client, org, "estimation", qid, "forward_to_estimation")) == "forwarded_to_estimation"
     assert _stage(_act(client, org, "estimation", qid, "begin_spec_check")) == "spec_check"
     assert _stage(_act(client, org, "estimation", qid, "mark_spec_complete")) == "converted_to_ggpl_format"
     assert _stage(_act(client, org, "estimation", qid, "proceed_to_gasket_check")) == "gasket_type_check"
@@ -153,7 +156,7 @@ def test_generate_route_derived_from_market_type(granular):
     org = f"org-gw-route-{uuid.uuid4().hex}"
     qid = _create_enquiry(client, org, market_type="export")
     for role, action in [
-        ("sales", "forward_to_estimation"),
+        ("estimation", "forward_to_estimation"),
         ("estimation", "begin_spec_check"),
         ("estimation", "mark_spec_complete"),
         ("estimation", "proceed_to_gasket_check"),
@@ -176,7 +179,7 @@ def test_granular_query_loop(granular):
     org = f"org-gw-query-{uuid.uuid4().hex}"
     qid = _create_enquiry(client, org)
 
-    _act(client, org, "sales", qid, "forward_to_estimation")
+    _act(client, org, "estimation", qid, "forward_to_estimation")
     _act(client, org, "estimation", qid, "begin_spec_check")
     assert _stage(_act(client, org, "estimation", qid, "raise_customer_query")) == "query_raised_to_customer"
     # Estimation may not answer a customer query; Sales must.
@@ -194,7 +197,7 @@ def test_granular_technical_review_routing(granular):
     org = f"org-gw-tr-{uuid.uuid4().hex}"
     qid = _create_enquiry(client, org)
 
-    _act(client, org, "sales", qid, "forward_to_estimation")
+    _act(client, org, "estimation", qid, "forward_to_estimation")
     _act(client, org, "estimation", qid, "begin_spec_check")
     _act(client, org, "estimation", qid, "mark_spec_complete")
     _act(client, org, "estimation", qid, "proceed_to_gasket_check")
@@ -231,32 +234,35 @@ def test_granular_is_superset_of_legacy(granular):
     assert can_act_on_step("sales", "estimation_review") is False
 
 
-# (legacy_step, granular_step, owning_role) equivalence checkpoints.
+# (legacy_step, legacy_role, granular_step, granular_role) ownership checkpoints.
+# The enquiry-received stage intentionally DIVERGES: legacy keeps sales for
+# in-flight records, while the granular machine hands creation to estimation.
 _PARITY = [
-    ("enquiry", "enquiry_received", "sales"),
-    ("estimation_review", "spec_check", "estimation"),
-    ("technical_specs", "technical_review_pending", "technical"),
-    ("pricing", "pricing_decision", "admin"),
+    ("enquiry", "sales", "enquiry_received", "estimation"),
+    ("estimation_review", "estimation", "spec_check", "estimation"),
+    ("technical_specs", "technical", "technical_review_pending", "technical"),
+    ("pricing", "admin", "pricing_decision", "admin"),
 ]
 
 
-@pytest.mark.parametrize("legacy_step, granular_step, role", _PARITY)
-def test_role_ownership_parity(monkeypatch, legacy_step, granular_step, role):
-    """The owning role for each stage agrees across both machines, and a
+@pytest.mark.parametrize("legacy_step, legacy_role, granular_step, granular_role", _PARITY)
+def test_role_ownership_parity(monkeypatch, legacy_step, legacy_role, granular_step, granular_role):
+    """Each stage has the expected owning role in each machine, and a
     non-owning role is rejected on both sides."""
-    other = "technical" if role != "technical" else "sales"
+    legacy_other = "technical" if legacy_role != "technical" else "sales"
+    granular_other = "sales" if granular_role != "sales" else "technical"
 
     # Flag off -> legacy ownership.
     monkeypatch.delenv("ENABLE_GRANULAR_WORKFLOW", raising=False)
     get_settings.cache_clear()
-    assert can_act_on_step(role, legacy_step) is True
-    assert can_act_on_step(other, legacy_step) is False
+    assert can_act_on_step(legacy_role, legacy_step) is True
+    assert can_act_on_step(legacy_other, legacy_step) is False
 
-    # Flag on -> granular ownership, same owning role.
+    # Flag on -> granular ownership.
     monkeypatch.setenv("ENABLE_GRANULAR_WORKFLOW", "true")
     get_settings.cache_clear()
-    assert can_act_on_step(role, granular_step) is True
-    assert can_act_on_step(other, granular_step) is False
+    assert can_act_on_step(granular_role, granular_step) is True
+    assert can_act_on_step(granular_other, granular_step) is False
     # Admin owns every stage in both machines.
     assert can_act_on_step("admin", granular_step) is True
 

@@ -249,13 +249,15 @@ DEFAULT_ACCESS_SETTINGS = AccessSettings(
             "view_dashboard", "view_enquiry", "view_quotation", "view_purchase_orders", "view_history",
             "edit_workflow", "edit_line_items", "edit_quotation", "approve_quotes", "export_quotes",
         ]),
+        # Estimation (not sales) creates enquiries and assigns the sales owner;
+        # sales works the customer-facing steps (queries, sending quotations).
         "sales": _permissions([
             "view_dashboard", "view_enquiry", "view_quotation", "view_purchase_orders", "view_doc_assistant", "view_history",
-            "create_enquiry", "edit_sales_details", "edit_line_items", "export_quotes",
+            "edit_sales_details", "edit_line_items", "export_quotes",
         ]),
         "estimation": _permissions([
             "view_dashboard", "view_enquiry", "view_doc_assistant", "view_history",
-            "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
+            "create_enquiry", "edit_sales_details", "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
         ]),
         "technical": _permissions([
             "view_dashboard", "view_enquiry", "view_doc_assistant", "view_history",
@@ -417,7 +419,12 @@ def _quote_visible_to_viewer(
     if quote_owner_matches(quote, user_id=viewer_id, user_name=viewer_name, user_email=viewer_email):
         return True
     if visible_workflow_steps:
-        step = str((quote.stage_meta or {}).get("workflow_stage") or "enquiry")
+        # A record with no workflow stage yet sits at the active machine's
+        # default step (granular: enquiry_received, owned by estimation who
+        # creates enquiries; legacy: enquiry). Lazy import avoids a cycle.
+        from app.services.enquiry_workflow import active_default_step
+
+        step = str((quote.stage_meta or {}).get("workflow_stage") or "") or active_default_step()
         return step in visible_workflow_steps
     return False
 
