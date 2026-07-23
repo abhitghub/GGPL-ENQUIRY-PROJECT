@@ -38,10 +38,18 @@ def test_assignment_visibility_inheritance_and_legacy_owner_matching():
     estimator_id = create_user(org_id, admin_headers, name="Estimator", role="estimation")
     other_id = create_user(org_id, admin_headers, name="Other Estimator", role="estimation")
 
-    created = client.post(
+    # Enquiry creation is restricted to sales + admin; estimation gets 403.
+    forbidden = client.post(
         "/api/v1/quotes",
         headers=headers(org_id, estimator_id),
         json={"customer": "Owned customer", "items": [], "stage_meta": {}},
+    )
+    assert forbidden.status_code == 403
+
+    created = client.post(
+        "/api/v1/quotes",
+        headers=admin_headers,
+        json={"customer": "Owned customer", "items": [], "stage_meta": {"owner_id": estimator_id}},
     )
     assert created.status_code == 201
     assert created.json()["stage_meta"]["owner_id"] == estimator_id
@@ -104,13 +112,14 @@ def test_summary_patch_authorization_staleness_conflicts_and_search():
     }
     created = client.post(
         "/api/v1/quotes",
-        headers=estimator_headers,
+        headers=admin_headers,
         json={
             "customer": "Searchable ACME",
             "project_ref": "PROJECT-X",
             "items": [item],
             "quote_data": {"unit_prices": [250]},
             "stage_meta": {
+                "owner_id": estimator_id,
                 "material_breakdown": [{"type": "sheet"}],
                 "material_plan": {"rows": []},
                 "material_plan_status": "draft",
@@ -186,11 +195,13 @@ def test_linked_delete_transition_job_visibility_and_dashboard_grouping():
     other_id = create_user(org_id, admin_headers, name="Other", role="estimation")
     estimator_headers = headers(org_id, estimator_id)
     item = {"line_no": 1, "quantity": 1, "status": "ready", "gasket_type": "SOFT_CUT", "size": '4"', "moc": "CNAF"}
-    source = client.post(
+    source_response = client.post(
         "/api/v1/quotes",
-        headers=estimator_headers,
-        json={"customer": "Opportunity", "items": [item], "stage_meta": {}},
-    ).json()
+        headers=admin_headers,
+        json={"customer": "Opportunity", "items": [item], "stage_meta": {"owner_id": estimator_id}},
+    )
+    assert source_response.status_code == 201
+    source = source_response.json()
     invalid_transition = client.post(
         f"/api/v1/quotes/{source['id']}/stage",
         headers=admin_headers,
@@ -198,9 +209,9 @@ def test_linked_delete_transition_job_visibility_and_dashboard_grouping():
     )
     assert invalid_transition.status_code == 409
 
-    linked = client.post(
+    linked_response = client.post(
         "/api/v1/quotes",
-        headers=estimator_headers,
+        headers=admin_headers,
         json={
             "customer": "Opportunity quotation",
             "stage": "quote_prep",
@@ -208,7 +219,9 @@ def test_linked_delete_transition_job_visibility_and_dashboard_grouping():
             "quote_data": {"unit_prices": [100]},
             "stage_meta": {"source_enquiry_id": source["id"]},
         },
-    ).json()
+    )
+    assert linked_response.status_code == 201
+    linked = linked_response.json()
     automatically_linked_source = client.get(f"/api/v1/quotes/{source['id']}", headers=estimator_headers)
     assert automatically_linked_source.status_code == 200
     assert automatically_linked_source.json()["stage_meta"]["linked_quote_id"] == linked["id"]
