@@ -39,7 +39,6 @@ import {
   Trash2,
   Undo2,
   Upload,
-  Users,
   WandSparkles,
   X,
 } from "lucide-react";
@@ -57,9 +56,11 @@ import {
   GRANULAR_WORKFLOW,
   GasketItem,
   ITEM_FIELDS,
+  NewContactInput,
   NewCustomerInput,
   OutlookLinkedMessage,
   Quote,
+  addCustomerContact,
   addCustomerRecord,
   advanceEnquiryWorkflow,
   advanceQuoteStage,
@@ -630,6 +631,8 @@ const GRID_INPUT_CLASS =
 const GRID_TEXTAREA_CLASS =
   "h-14 w-full min-w-0 resize-none rounded-none border-0 bg-transparent px-2 py-1 text-xs shadow-none outline-none focus:ring-1 focus:ring-ring";
 const GRID_READONLY_CLASS = "bg-muted/30 text-muted-foreground";
+// Number inputs are typed manually — hide the browser's increment/decrement spinners.
+const NO_SPINNER_CLASS = "[appearance:textfield] [&::-webkit-inner-spin-button]:hidden [&::-webkit-outer-spin-button]:hidden";
 const SHEET_TABLE_CLASS = "w-max min-w-full border-collapse text-xs [&_td]:border-r [&_td]:border-b [&_th]:border-r [&_th]:border-b";
 const SHEET_HEADER_CLASS = "sticky top-0 z-20 bg-[#f3f3f3] dark:bg-muted";
 const SHEET_HEAD_CLASS = "h-8 whitespace-nowrap bg-[#f3f3f3] px-2 py-1 text-xs font-semibold text-foreground dark:bg-muted";
@@ -1188,6 +1191,7 @@ function Field({
       ) : (
         <Input
           type={type}
+          className={type === "number" ? NO_SPINNER_CLASS : undefined}
           value={value}
           onChange={(event) => onChange(event.target.value)}
           disabled={disabled}
@@ -1269,6 +1273,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [addCustomerOpen, setAddCustomerOpen] = React.useState(false);
   const [addingCustomer, setAddingCustomer] = React.useState(false);
   const [newCustomer, setNewCustomer] = React.useState<NewCustomerInput>({ name: "" });
+  const [addContactOpen, setAddContactOpen] = React.useState(false);
+  const [addingContact, setAddingContact] = React.useState(false);
+  const [newContact, setNewContact] = React.useState<NewContactInput>({ name: "" });
   const [rowEditorOpen, setRowEditorOpen] = React.useState(false);
   const [materialBreakdown, setMaterialBreakdown] = React.useState<MaterialBreakdownRow[] | null>(null);
   const [materialInputs, setMaterialInputs] = React.useState<MaterialInputRow[]>([]);
@@ -2380,7 +2387,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         startedAt: new Date().toISOString(),
       });
       invalidateMaterialPlan();
-      setIntakeCollapsed(false);
+      setIntakeCollapsed(true);
       toast.info("We are creating the item list in the background. You can keep working and will be notified when it finishes.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Extraction failed");
@@ -3078,6 +3085,40 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       toast.error(error instanceof Error ? error.message : "Could not add customer");
     } finally {
       setAddingCustomer(false);
+    }
+  }
+
+  async function saveNewContact() {
+    if (!selectedCustomerRecord) {
+      toast.error("Select a customer first");
+      return;
+    }
+    const name = (newContact.name || "").trim();
+    if (!name) {
+      toast.error("Enter a contact name");
+      return;
+    }
+    setAddingContact(true);
+    try {
+      const updated = await addCustomerContact(selectedCustomerRecord.id, { ...newContact, name });
+      setMasterData((current) => ({
+        ...current,
+        customers: current.customers.map((row) => (row.id === updated.id ? updated : row)),
+      }));
+      const contact = updated.contacts?.[updated.contacts.length - 1];
+      if (contact && quote) {
+        updateQuoteDraft({
+          quote_data: quoteDataWithDefaults(contactQuoteData({ ...qd }, contact)),
+          stage_meta: { ...(quote.stage_meta ?? {}), customer_contact_id: contact.id },
+        });
+      }
+      setAddContactOpen(false);
+      setNewContact({ name: "" });
+      toast.success(`Contact added: ${name}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not add contact");
+    } finally {
+      setAddingContact(false);
     }
   }
 
@@ -3807,7 +3848,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     }
     return (
       <Input
-        className={`${inputClass} ${cellClass}`}
+        className={`${inputClass} ${cellClass} ${column.kind === "number" ? NO_SPINNER_CLASS : ""}`}
         type={column.kind === "number" ? "number" : "text"}
         value={getString(rawValue)}
         onChange={(event) => updateItem(index, column.field, event.target.value)}
@@ -4460,6 +4501,34 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           </DialogContent>
         </Dialog>
 
+        <Dialog open={addContactOpen} onOpenChange={setAddContactOpen}>
+          <DialogContent className="max-w-lg">
+            <DialogHeader>
+              <DialogTitle>Add contact person</DialogTitle>
+              <DialogDescription>
+                Add a new contact person for {selectedCustomerRecord?.name || "the selected customer"}. They will be selected for this enquiry automatically.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="md:col-span-2">
+                <Field label="Contact name *" value={newContact.name} onChange={(value) => setNewContact((c) => ({ ...c, name: value }))} />
+              </div>
+              <Field label="Designation" value={newContact.designation ?? ""} onChange={(value) => setNewContact((c) => ({ ...c, designation: value }))} />
+              <Field label="Department" value={newContact.department ?? ""} onChange={(value) => setNewContact((c) => ({ ...c, department: value }))} />
+              <Field label="Email" value={newContact.email ?? ""} onChange={(value) => setNewContact((c) => ({ ...c, email: value }))} />
+              <Field label="Phone" value={newContact.phone ?? ""} onChange={(value) => setNewContact((c) => ({ ...c, phone: value }))} />
+              <Field label="Mobile" value={newContact.mobile ?? ""} onChange={(value) => setNewContact((c) => ({ ...c, mobile: value }))} />
+            </div>
+            <DialogFooter>
+              <Button variant="secondary" onClick={() => setAddContactOpen(false)}>Cancel</Button>
+              <Button onClick={saveNewContact} disabled={addingContact || !newContact.name.trim()}>
+                {addingContact ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                Add person
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
         <Dialog open={enquirySetupOpen} onOpenChange={setEnquirySetupOpen}>
           <DialogContent className="flex max-h-[90vh] max-w-6xl flex-col overflow-hidden">
             <DialogHeader>
@@ -4468,7 +4537,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
             </DialogHeader>
             <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
         <div>
-          <details className="rounded-md border bg-background p-2.5" open={Boolean(outlookThread)}>
+          <details className="rounded-md border bg-background p-2.5" open>
             <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
               <span className="inline-flex items-center gap-2"><Mail className="h-4 w-4" />Outlook thread</span>
               <Badge variant={outlookThread ? "secondary" : "outline"}>{outlookThread ? "Linked" : "Not linked"}</Badge>
@@ -4645,7 +4714,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
 
         {!isQuotationSection && (
           <div className="mt-3 grid gap-2 border-t pt-3 lg:grid-cols-2 2xl:grid-cols-4">
-            <details className="rounded-md border bg-background p-2.5" open={!quote.customer || !quote.quote_no}>
+            <details className="rounded-md border bg-background p-2.5" open>
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2"><FileText className="h-4 w-4" />Enquiry details</span>
                 <Badge variant={hasCustomerSelected && quote.quote_no ? "secondary" : "outline"}>{hasCustomerSelected && quote.quote_no ? "Saved context" : "Needs context"}</Badge>
@@ -4668,6 +4737,19 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     } : undefined}
                   />
                   <div className="text-xs text-muted-foreground">Search to pick a customer, or use “Add new customer” at the bottom of the list. Buyer details fill in automatically.</div>
+                  {canAddDetails && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        setNewCustomer({ name: "", country: getString(quote.stage_meta?.country), city: getString(quote.stage_meta?.city) });
+                        setAddCustomerOpen(true);
+                      }}
+                    >
+                      <Plus className="h-4 w-4" />
+                      Add company
+                    </Button>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <Label>Contact person</Label>
@@ -4681,6 +4763,21 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     disabled={!canAddDetails || !selectedCustomerRecord || contactOptions.length === 0}
                   />
                   <div className="text-xs text-muted-foreground">Picking a contact fills their name, email, phone and designation.</div>
+                  {canAddDetails && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={!selectedCustomerRecord}
+                      title={selectedCustomerRecord ? undefined : "Select a customer first"}
+                      onClick={() => {
+                        setNewContact({ name: "" });
+                        setAddContactOpen(true);
+                      }}
+                    >
+                      <Plus className="h-4 w-4" />
+                      Add person
+                    </Button>
+                  )}
                 </div>
                 <Field label="Contact person email" value={getString(qd.email)} onChange={(value) => updateQd("email", value)} disabled={!canAddDetails} />
                 <Field label="Contact no" value={getString(qd.contact_no)} onChange={(value) => updateQd("contact_no", value)} disabled={!canAddDetails} />
@@ -4689,7 +4786,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               </div>
             </details>
 
-            <details className="rounded-md border bg-background p-2.5" open={currentUser.role === "sales"}>
+            <details className="rounded-md border bg-background p-2.5" open>
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2"><FileText className="h-4 w-4" />Project details</span>
                 <Badge variant="outline">{quote.project_ref || getString(quote.stage_meta?.epc_name) ? "Added" : "Optional"}</Badge>
@@ -4804,29 +4901,6 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
 
             <details className="rounded-md border bg-background p-2.5" open>
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
-                <span className="inline-flex items-center gap-2"><Users className="h-4 w-4" />With whom</span>
-                <Badge variant="outline">{getString(quote.stage_meta?.with_whom) || "Unassigned"}</Badge>
-              </summary>
-              <div className="mt-3 space-y-1.5">
-                <Label>Enquiry with</Label>
-                <Select
-                  value={getString(quote.stage_meta?.with_whom) || BLANK_SELECT_VALUE}
-                  onValueChange={(value) => updateQueueMeta(quote, { with_whom: value === BLANK_SELECT_VALUE ? "" : value })}
-                  disabled={!canEditWorkflow && !canAddDetails}
-                >
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={BLANK_SELECT_VALUE}>Unassigned</SelectItem>
-                    {accessSettings.with_whom_options.map((name) => (
-                      <SelectItem key={name} value={name}>{name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </details>
-
-            <details className="rounded-md border bg-background p-2.5" open>
-              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2"><FileText className="h-4 w-4" />Created by</span>
                 <Badge variant="outline">{createdByRoleLabel}</Badge>
               </summary>
@@ -4836,7 +4910,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               </div>
             </details>
 
-            <details className="rounded-md border bg-background p-2.5">
+            <details className="rounded-md border bg-background p-2.5" open>
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2"><ShieldCheck className="h-4 w-4" />Quality and risk</span>
                 <Badge variant={qualityReport.score >= 80 ? "secondary" : qualityReport.score >= 60 ? "warning" : "outline"}>{qualityReport.score}%</Badge>
@@ -5333,7 +5407,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 }}
                 onScroll={(event) => setDraftScrollTop(event.currentTarget.scrollTop)}
               >
-                <Table className={`w-max min-w-full border-collapse text-xs ${tableMode === "spreadsheet" ? "[&_td]:border-r [&_td]:border-b [&_th]:border-r [&_th]:border-b" : ""}`}>
+                <Table containerClassName="overflow-visible" className={`w-max min-w-full border-collapse text-xs ${tableMode === "spreadsheet" ? "[&_td]:border-r [&_td]:border-b [&_th]:border-r [&_th]:border-b" : ""}`}>
                   <TableHeader className={tableMode === "spreadsheet" ? "sticky top-0 z-30 bg-muted" : "sticky top-0 z-30 bg-card"}>
                     <TableRow className="hover:bg-transparent">
                       <TableHead className={`sticky left-0 z-40 h-8 w-10 border-r px-2 text-center ${tableMode === "spreadsheet" ? "bg-[#f3f3f3] text-muted-foreground dark:bg-muted" : "bg-card"}`}>
@@ -5688,7 +5762,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       )}
                     </div>
                   <div className="max-h-72 max-w-full overflow-auto border bg-background">
-                    <Table className={`${SHEET_TABLE_CLASS} min-w-[760px]`}>
+                    <Table containerClassName="overflow-visible" className={`${SHEET_TABLE_CLASS} min-w-[760px]`}>
                       <TableHeader className={SHEET_HEADER_CLASS}>
                         <TableRow>
                           <TableHead className={SHEET_ROW_HEADER_CLASS} />
@@ -5890,7 +5964,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <span className="inline-flex items-center gap-2"><Layers3 className="h-4 w-4" />Material needed</span>
                 </summary>
                 <div className="mt-3 max-h-[520px] overflow-auto border bg-background">
-                  <Table className={SHEET_TABLE_CLASS}>
+                  <Table containerClassName="overflow-visible" className={SHEET_TABLE_CLASS}>
                     <TableHeader className={SHEET_HEADER_CLASS}>
                       <TableRow>
                         <TableHead className={SHEET_ROW_HEADER_CLASS} />
@@ -6021,7 +6095,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       <span className="inline-flex items-center gap-2"><ShoppingCart className="h-4 w-4" />Grouped purchase summary</span>
                     </summary>
                     <div className="mt-3 overflow-auto border bg-background">
-                      <Table className={SHEET_TABLE_CLASS}>
+                      <Table containerClassName="overflow-visible" className={SHEET_TABLE_CLASS}>
                         <TableHeader className={SHEET_HEADER_CLASS}>
                           <TableRow>
                             <TableHead className={SHEET_ROW_HEADER_CLASS} />
@@ -6062,7 +6136,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 </div>
 
                 <div className="max-h-[620px] overflow-auto border bg-background">
-                  <Table className={SHEET_TABLE_CLASS}>
+                  <Table containerClassName="overflow-visible" className={SHEET_TABLE_CLASS}>
                     <TableHeader className={SHEET_HEADER_CLASS}>
                       <TableRow>
                         <TableHead className={SHEET_ROW_HEADER_CLASS} />

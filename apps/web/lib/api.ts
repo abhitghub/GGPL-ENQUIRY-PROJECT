@@ -697,6 +697,25 @@ export async function addCustomerRecord(payload: NewCustomerInput): Promise<Cust
   );
 }
 
+export type NewContactInput = {
+  name: string;
+  designation?: string;
+  department?: string;
+  email?: string;
+  phone?: string;
+  mobile?: string;
+};
+
+export async function addCustomerContact(customerId: string, payload: NewContactInput): Promise<CustomerRecord> {
+  return parse<CustomerRecord>(
+    await apiFetch(`${API_BASE}/api/v1/customers/records/${encodeURIComponent(customerId)}/contacts`, {
+      method: "POST",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
 export async function createAppUser(payload: Omit<AppUser, "id"> & { id?: string }): Promise<AppUser> {
   return parse<AppUser>(
     await apiFetch(`${API_BASE}/api/v1/users`, {
