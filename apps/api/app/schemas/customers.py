@@ -37,6 +37,15 @@ class CustomerSettings(BaseModel):
     epc_names: list[str] = Field(default_factory=list)
 
 
+class ContactCreate(BaseModel):
+    name: str
+    designation: str = ""
+    department: str = ""
+    email: str = ""
+    phone: str = ""
+    mobile: str = ""
+
+
 class CustomerCreate(BaseModel):
     name: str
     address_line1: str = ""

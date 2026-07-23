@@ -17,13 +17,23 @@ from app.schemas.quotes import (
     ReprocessTextRequest,
     RfiDraftResponse,
     StageAdvanceRequest,
+    WorkflowActionRequest,
 )
 from app.services.approved_quote_cache import cache_final_approved_quote
+from app.services.enquiry_workflow import (
+    TR_REQUIRED_GASKET_TYPES,
+    active_transitions,
+    can_act_on_step,
+    current_workflow_step,
+    visible_steps_for_role,
+)
 from app.services.export_service import build_pdf, build_xlsx
 from app.services.quote_rules import (
     QuoteConflictError,
     QuoteValidationError,
+    append_activity,
     normalize_identity,
+    now_iso,
     po_snapshot,
     quote_summary,
     workflow_transition_blockers,
@@ -97,7 +107,20 @@ def _repo_visibility_kwargs(user: CurrentUser) -> dict:
         "viewer_name": user.name,
         "viewer_email": user.email,
         "is_admin": user.role == "admin",
+        "visible_workflow_steps": visible_steps_for_role(user.role),
     }
+
+
+def _require_workflow_owner(user: CurrentUser, step: str, transition: dict) -> None:
+    """Single-place RBAC guard for workflow edits. A role must own the CURRENT
+    stage (blocks out-of-stage edits even when a transition's role set is broad)
+    AND be permitted the specific transition. Admin bypasses both. Enforced at
+    the API layer so direct API/URL calls cannot skip stages or edit out of turn."""
+    if not can_act_on_step(user.role, step):
+        raise HTTPException(status_code=403, detail=f"Your role cannot act on enquiries at stage '{step}'")
+    if user.role != "admin" and user.role not in transition["roles"]:
+        allowed = " or ".join(sorted(transition["roles"]))
+        raise HTTPException(status_code=403, detail=f"Only {allowed} (or admin) can {transition['label'].lower()}")
 
 
 def _can_read_quote(user: CurrentUser, quote: QuoteRead) -> bool:
@@ -108,13 +131,35 @@ def _can_read_quote(user: CurrentUser, quote: QuoteRead) -> bool:
     return any(can_role(user, capability) for capability in {"view_enquiry", "view_material_planning", "view_history"})
 
 
+def _enrich_customer_names(org_id: str, quotes: list[QuoteRead]) -> list[QuoteRead]:
+    """Fill the display customer name from the selected master for records that
+    have a customer_master_id but no denormalised customer field, so lists and
+    dashboards never show 'Customer not added' for a chosen customer. Only fetches
+    the customer master when at least one quote needs it."""
+    needs = [q for q in quotes if not (q.customer or "").strip() and str((q.stage_meta or {}).get("customer_master_id") or "").strip()]
+    if not needs:
+        return quotes
+    try:
+        name_by_id = {row.id: row.name for row in repo.get_customer_settings(org_id).customers if row.id}
+    except Exception:
+        return quotes
+    result: list[QuoteRead] = []
+    for quote in quotes:
+        master_id = str((quote.stage_meta or {}).get("customer_master_id") or "").strip()
+        if not (quote.customer or "").strip() and name_by_id.get(master_id):
+            quote = quote.model_copy(update={"customer": name_by_id[master_id]})
+        result.append(quote)
+    return result
+
+
 def _visible_quotes(user: CurrentUser) -> list[QuoteRead]:
     _require_any_capability(user, READ_CAPABILITIES)
-    return [
+    quotes = [
         quote
         for quote in repo.list_quotes(user.org_id, **_repo_visibility_kwargs(user))
         if _can_read_quote(user, quote)
     ]
+    return _enrich_customer_names(user.org_id, quotes)
 
 
 def _quote_or_404(user: CurrentUser, quote_id: str, *, require_read: bool = True) -> QuoteRead:
@@ -168,12 +213,32 @@ def _canonical_owner_metadata(stage_meta: dict, current: QuoteRead | None, user:
     return result
 
 
+def _denormalize_customer(org_id: str, customer: str, stage_meta: dict, quote_data: dict) -> tuple[str, dict]:
+    """When a record has a customer master selected but no denormalised customer
+    name (e.g. imported/API-created enquiries), fill it from the master so lists,
+    dashboards, and the PDF show the customer instead of 'Customer not added'."""
+    master_id = str(stage_meta.get("customer_master_id") or "").strip()
+    if customer.strip() or not master_id:
+        return customer, quote_data
+    try:
+        record = next((row for row in repo.get_customer_settings(org_id).customers if row.id == master_id), None)
+    except Exception:
+        record = None
+    if not record or not record.name:
+        return customer, quote_data
+    next_quote_data = dict(quote_data or {})
+    if not str(next_quote_data.get("buyer_name") or "").strip():
+        next_quote_data["buyer_name"] = record.name
+    return record.name, next_quote_data
+
+
 def _normalize_create_payload(payload: QuoteCreate, user: CurrentUser) -> QuoteCreate:
     stage_meta = dict(payload.stage_meta or {})
+    customer, quote_data = _denormalize_customer(user.org_id, payload.customer or "", stage_meta, payload.quote_data or {})
     source_id = str(stage_meta.get("source_enquiry_id") or "").strip()
     if source_id:
         _quote_or_404(user, source_id)
-        return payload.model_copy(update={"stage_meta": stage_meta})
+        return payload.model_copy(update={"stage_meta": stage_meta, "customer": customer, "quote_data": quote_data})
     if stage_meta.get("owner_id"):
         requested_owner = normalize_identity(stage_meta.get("owner_id"))
         current_aliases = {normalize_identity(user.user_id), normalize_identity(user.email), normalize_identity(user.name)}
@@ -182,7 +247,7 @@ def _normalize_create_payload(payload: QuoteCreate, user: CurrentUser) -> QuoteC
         if user.role != "admin":
             stage_meta["owner_id"] = user.user_id
         stage_meta = _canonical_owner_metadata(stage_meta, None, user)
-    return payload.model_copy(update={"stage_meta": stage_meta})
+    return payload.model_copy(update={"stage_meta": stage_meta, "customer": customer, "quote_data": quote_data})
 
 
 def _require_patch_capabilities(user: CurrentUser, current: QuoteRead, payload: QuotePatch) -> QuotePatch:
@@ -353,7 +418,7 @@ def create_quote(payload: QuoteCreate, user: CurrentUser = Depends(get_current_u
 
 @router.get("/quotes/{quote_id}", response_model=QuoteRead)
 def get_quote(quote_id: str, user: CurrentUser = Depends(get_current_user)) -> QuoteRead:
-    return _quote_or_404(user, quote_id)
+    return _enrich_customer_names(user.org_id, [_quote_or_404(user, quote_id)])[0]
 
 
 @router.patch("/quotes/{quote_id}", response_model=QuoteRead)
@@ -601,6 +666,107 @@ def advance_stage(
     if quote.stage == "po":
         cache_final_approved_quote(quote)
     return quote
+
+
+@router.post("/quotes/{quote_id}/workflow", response_model=QuoteRead)
+def advance_workflow(
+    quote_id: str,
+    payload: WorkflowActionRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> QuoteRead:
+    """Perform an enquiry->priced-specs handoff (Sales -> Estimation -> Technical
+    -> Estimation -> Pricing -> Sales). Each action is gated to the owning team's
+    role and only valid from the matching current step."""
+    current = _quote_or_404(user, quote_id)
+    transition = active_transitions().get(payload.action)
+    if not transition:
+        raise HTTPException(status_code=400, detail=f"Unknown workflow action: {payload.action}")
+    step = current_workflow_step(current.stage_meta)
+    if step not in transition["from"]:
+        raise HTTPException(status_code=409, detail=f"This step is currently at '{step}', so it cannot be {payload.action.replace('_', ' ')}")
+    _require_workflow_owner(user, step, transition)
+    stage_meta = dict(current.stage_meta or {})
+    # Persist the gasket-type flag (from payload or an existing value) before it
+    # is needed to resolve a conditional branch.
+    gasket_type = (payload.gasket_type or stage_meta.get("gasket_type") or "").strip()
+    if gasket_type:
+        stage_meta["gasket_type"] = gasket_type
+    # Resolve the destination: a conditional transition ("branch") picks its
+    # target at runtime from the gasket-type flag; otherwise the static "to".
+    branch = transition.get("branch")
+    if branch:
+        flag = str(stage_meta.get(branch["field"]) or "").strip().lower()
+        dest = branch["specific"] if flag in TR_REQUIRED_GASKET_TYPES else branch["default"]
+    else:
+        dest = transition["to"]
+    stage_meta["workflow_stage"] = dest
+    if transition.get("with_whom"):
+        stage_meta["with_whom"] = transition["with_whom"]
+    # Apply any static markers the transition records (e.g. pricing_route).
+    for key, value in (transition.get("set") or {}).items():
+        stage_meta[key] = value
+    # Generate-quotation derives domestic/international from the quote type the
+    # sales person chose in the enquiry setup — it is not asked again here.
+    if transition.get("route_from_market_type"):
+        market = str(stage_meta.get("market_type") or "").strip().lower()
+        if not market:
+            raise HTTPException(
+                status_code=409,
+                detail="Select Export or Domestic in the enquiry setup before generating the quotation",
+            )
+        stage_meta["pricing_route"] = "international" if market == "export" else "domestic"
+    comment = (payload.comment or "").strip()
+    stage_meta["workflow_comment"] = comment
+    detail = f"{transition['label']} — {comment}" if comment else transition["label"]
+    stage_meta = append_activity(
+        stage_meta,
+        kind="workflow",
+        title="Workflow handoff",
+        detail=detail,
+        user=user.name or user.user_id,
+    )
+    # Additive namespaced record carrying current_stage, assigned_team,
+    # gasket_type and an append-only history_log (who did what, when).
+    granular = dict(stage_meta.get("granular_workflow") or {})
+    history = list(granular.get("history_log") or [])
+    history.append(
+        {
+            "action": payload.action,
+            "from": step,
+            "to": dest,
+            "by": user.name or user.user_id,
+            "role": user.role,
+            "at": now_iso(),
+            "comment": comment,
+        }
+    )
+    granular["current_stage"] = dest
+    granular["assigned_team"] = transition.get("with_whom") or granular.get("assigned_team")
+    granular["gasket_type"] = stage_meta.get("gasket_type")
+    granular["history_log"] = history[-100:]
+    stage_meta["granular_workflow"] = granular
+    try:
+        updated = repo.update_quote(
+            user.org_id,
+            quote_id,
+            QuotePatch(stage_meta=stage_meta, expected_version=payload.expected_version),
+            actor_id=user.user_id,
+        )
+    except (QuoteConflictError, QuoteValidationError) as exc:
+        _raise_repo_error(exc)
+        raise
+    if not updated:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    # When a quotation is generated, mirror its Excel to Google Drive (no-op unless
+    # Drive export is configured; never fails the request).
+    if dest == "quotation_generated":
+        try:
+            from app.services.gdrive_export import export_quote
+
+            export_quote(updated)
+        except Exception:
+            pass
+    return updated
 
 
 @router.get("/quotes/{quote_id}/history", response_model=list[StageHistoryEntry])

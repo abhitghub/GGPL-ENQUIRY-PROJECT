@@ -41,9 +41,28 @@ class Settings(BaseSettings):
     outlook_default_mailbox: str | None = Field(default=None, alias="OUTLOOK_DEFAULT_MAILBOX")
     auth_secret: str = Field(default="dev-only-change-me", alias="AUTH_SECRET")
     auth_cookie_name: str = Field(default="ggpl_session", alias="AUTH_COOKIE_NAME")
+    # Whether the session cookie is marked Secure (HTTPS-only). Leave unset to
+    # derive from the environment; set SESSION_COOKIE_SECURE=false for on-prem
+    # HTTP (LAN) deployments so the cookie works without HTTPS.
+    session_cookie_secure: bool | None = Field(default=None, alias="SESSION_COOKIE_SECURE")
     # When True, requests must carry a valid session cookie (real login).
     # Set LOGIN_ENABLED=false to reopen the app without authentication.
     login_enabled: bool = Field(default=True, alias="LOGIN_ENABLED")
+    # Feature flag for the granular 11-stage enquiry workflow. Default False keeps
+    # the original 6-step handoff behaviour; set ENABLE_GRANULAR_WORKFLOW=true to
+    # activate the finer stages (spec-check query loop, gasket-type branch to
+    # technical review, combined-spec review, domestic/international pricing).
+    enable_granular_workflow: bool = Field(default=False, alias="ENABLE_GRANULAR_WORKFLOW")
+    # Auto-export quotations as Excel to a Google Drive folder (service account).
+    # All three must be set for exports to run; otherwise it is a safe no-op.
+    gdrive_export_enabled: bool = Field(default=False, alias="GDRIVE_EXPORT_ENABLED")
+    # Simplest mode (Google Drive for Desktop): write the Excel files into this
+    # folder, which Drive for Desktop syncs to Drive. Takes precedence over the
+    # service-account API mode below when set.
+    gdrive_local_dir: str | None = Field(default=None, alias="GDRIVE_LOCAL_DIR")
+    # Service-account API mode (blocked by some org policies).
+    gdrive_folder_id: str | None = Field(default=None, alias="GDRIVE_FOLDER_ID")
+    google_service_account_file: str | None = Field(default=None, alias="GOOGLE_SERVICE_ACCOUNT_FILE")
 
     model_config = SettingsConfigDict(
         env_file=".env",

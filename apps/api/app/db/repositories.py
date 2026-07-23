@@ -243,7 +243,7 @@ DEFAULT_ACCESS_SETTINGS = AccessSettings(
         "admin": _permissions(ALL_CAPABILITIES),
         "management": _permissions([
             "view_dashboard", "view_enquiry", "view_material_planning", "view_quotation", "view_purchase_orders", "view_doc_assistant", "view_history",
-            "create_enquiry", "edit_sales_details", "edit_workflow", "edit_line_items", "edit_quotation", "approve_quotes", "export_quotes",
+            "edit_sales_details", "edit_workflow", "edit_line_items", "edit_quotation", "approve_quotes", "export_quotes",
         ]),
         "approver": _permissions([
             "view_dashboard", "view_enquiry", "view_quotation", "view_purchase_orders", "view_history",
@@ -251,29 +251,29 @@ DEFAULT_ACCESS_SETTINGS = AccessSettings(
         ]),
         "sales": _permissions([
             "view_dashboard", "view_enquiry", "view_quotation", "view_purchase_orders", "view_doc_assistant", "view_history",
-            "create_enquiry", "edit_sales_details", "edit_line_items",
+            "create_enquiry", "edit_sales_details", "edit_line_items", "export_quotes",
         ]),
         "estimation": _permissions([
             "view_dashboard", "view_enquiry", "view_doc_assistant", "view_history",
-            "create_enquiry", "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
+            "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
         ]),
         "technical": _permissions([
             "view_dashboard", "view_enquiry", "view_doc_assistant", "view_history",
-            "create_enquiry", "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
+            "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
         ]),
         "planning": _permissions([
-            "view_dashboard", "view_material_planning", "view_purchase_orders", "view_history",
-            "create_enquiry", "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
+            "view_dashboard", "view_enquiry", "view_material_planning", "view_purchase_orders", "view_history",
+            "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
         ]),
         "material_planner": _permissions([
-            "view_dashboard", "view_material_planning", "view_purchase_orders", "view_history",
-            "create_enquiry", "edit_workflow", "edit_line_items", "edit_quotation", "edit_material_phase2", "export_quotes",
+            "view_dashboard", "view_enquiry", "view_material_planning", "view_purchase_orders", "view_history",
+            "edit_workflow", "edit_line_items", "edit_quotation", "edit_material_phase2", "export_quotes",
         ]),
         "purchase": _permissions([
-            "view_dashboard", "view_material_planning", "view_purchase_orders", "view_history",
-            "create_enquiry", "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
+            "view_dashboard", "view_enquiry", "view_material_planning", "view_purchase_orders", "view_history",
+            "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
         ]),
-        "viewer": _permissions(["view_history"]),
+        "viewer": _permissions(["view_enquiry", "view_history"]),
     },
 )
 
@@ -404,6 +404,24 @@ def _verify_password(password: str, stored: str | None) -> bool:
     return hmac.compare_digest(value, password)
 
 
+def _quote_visible_to_viewer(
+    quote: QuoteRead,
+    *,
+    viewer_id: str | None,
+    viewer_name: str,
+    viewer_email: str,
+    visible_workflow_steps: set[str] | None,
+) -> bool:
+    """A non-admin viewer sees a quote they own, or one currently parked at a
+    workflow step their role is allowed to handle (team handoffs)."""
+    if quote_owner_matches(quote, user_id=viewer_id, user_name=viewer_name, user_email=viewer_email):
+        return True
+    if visible_workflow_steps:
+        step = str((quote.stage_meta or {}).get("workflow_stage") or "enquiry")
+        return step in visible_workflow_steps
+    return False
+
+
 class LocalJsonRepository:
     """Persistent local fallback used when Postgres is unavailable."""
 
@@ -454,25 +472,32 @@ class LocalJsonRepository:
         row["updated_at"] = _parse_dt(row["updated_at"])
         return AppUserRead(**row)
 
-    def _ensure_app_users(self, org_id: str) -> None:
+    def _ensure_app_users(self, org_id: str) -> bool:
+        """Seed/backfill default users. Returns True only when state actually
+        changed, so callers can avoid rewriting the store on a pure read."""
         now = _now().isoformat()
         users = self._state.setdefault("app_users", {})
+        changed = False
         for seed in DEFAULT_APP_USERS:
             key = f"{org_id}:{seed['id']}"
-            if key not in users:
+            existing = users.get(key)
+            if existing is None:
                 users[key] = {"org_id": org_id, "created_at": now, "updated_at": now, **seed}
-            else:
-                # Backfill only empty profile fields; never override an
-                # admin-edited role or active flag on an existing account.
-                users[key].update({
-                    "name": users[key].get("name") or seed["name"],
-                    "designation": users[key].get("designation") or seed["designation"],
-                    "contact": users[key].get("contact") or seed["contact"],
-                    "email": users[key].get("email") or seed["email"],
-                    "password_hash": users[key].get("password_hash") or seed["password_hash"],
-                    "role": users[key].get("role") or seed["role"],
-                    "updated_at": now,
-                })
+                changed = True
+                continue
+            # Backfill only empty profile fields; never override an admin-edited
+            # role or active flag. Only touch state (and bump updated_at) when a
+            # field was actually filled, so already-seeded reads stay writes-free.
+            backfill = {
+                field: seed[field]
+                for field in ("name", "designation", "contact", "email", "password_hash", "role")
+                if not existing.get(field) and seed.get(field)
+            }
+            if backfill:
+                existing.update(backfill)
+                existing["updated_at"] = now
+                changed = True
+        return changed
 
     def _ensure_quote_numbers(self, org_id: str) -> None:
         rows = [
@@ -550,13 +575,16 @@ class LocalJsonRepository:
 
     def list_app_users(self, org_id: str) -> list[AppUserRead]:
         with self._lock:
-            self._ensure_app_users(org_id)
+            changed = self._ensure_app_users(org_id)
             rows = [
                 self._app_user_from_data(deepcopy(user))
                 for user in self._state["app_users"].values()
                 if user.get("org_id") == org_id
             ]
-            self._save()
+            # Only persist when seeding/backfill actually changed something;
+            # a plain user listing must not rewrite the whole store.
+            if changed:
+                self._save()
         return sorted(rows, key=lambda user: user.id)
 
     def create_app_user(self, org_id: str, payload: AppUserCreate) -> AppUserRead:
@@ -654,6 +682,7 @@ class LocalJsonRepository:
         viewer_name: str = "",
         viewer_email: str = "",
         is_admin: bool = False,
+        visible_workflow_steps: set[str] | None = None,
     ) -> list[QuoteRead]:
         with self._lock:
             self._ensure_quote_numbers(org_id)
@@ -668,7 +697,13 @@ class LocalJsonRepository:
         return [
             quote
             for quote in rows
-            if quote_owner_matches(quote, user_id=viewer_id, user_name=viewer_name, user_email=viewer_email)
+            if _quote_visible_to_viewer(
+                quote,
+                viewer_id=viewer_id,
+                viewer_name=viewer_name,
+                viewer_email=viewer_email,
+                visible_workflow_steps=visible_workflow_steps,
+            )
         ]
 
     def get_quote(
@@ -680,6 +715,7 @@ class LocalJsonRepository:
         viewer_name: str = "",
         viewer_email: str = "",
         is_admin: bool = False,
+        visible_workflow_steps: set[str] | None = None,
     ) -> QuoteRead | None:
         with self._lock:
             self._ensure_quote_numbers(org_id)
@@ -687,11 +723,12 @@ class LocalJsonRepository:
             if not quote or quote.get("org_id") != org_id:
                 return None
             result = self._quote_from_data(deepcopy(quote))
-            if viewer_id is not None and not is_admin and not quote_owner_matches(
+            if viewer_id is not None and not is_admin and not _quote_visible_to_viewer(
                 result,
-                user_id=viewer_id,
-                user_name=viewer_name,
-                user_email=viewer_email,
+                viewer_id=viewer_id,
+                viewer_name=viewer_name,
+                viewer_email=viewer_email,
+                visible_workflow_steps=visible_workflow_steps,
             ):
                 return None
             return result
@@ -1306,6 +1343,7 @@ class PostgresRepository:
         viewer_name: str = "",
         viewer_email: str = "",
         is_admin: bool = False,
+        visible_workflow_steps: set[str] | None = None,
     ) -> list[QuoteRead]:
         org_uuid = _tenant_uuid(org_id)
         self._ensure_quote_numbers(org_id)
@@ -1317,7 +1355,13 @@ class PostgresRepository:
         return [
             quote
             for quote in rows
-            if quote_owner_matches(quote, user_id=viewer_id, user_name=viewer_name, user_email=viewer_email)
+            if _quote_visible_to_viewer(
+                quote,
+                viewer_id=viewer_id,
+                viewer_name=viewer_name,
+                viewer_email=viewer_email,
+                visible_workflow_steps=visible_workflow_steps,
+            )
         ]
 
     def get_quote(
@@ -1329,6 +1373,7 @@ class PostgresRepository:
         viewer_name: str = "",
         viewer_email: str = "",
         is_admin: bool = False,
+        visible_workflow_steps: set[str] | None = None,
     ) -> QuoteRead | None:
         org_uuid = _tenant_uuid(org_id)
         self._ensure_quote_numbers(org_id)
@@ -1336,11 +1381,12 @@ class PostgresRepository:
         with self._engine.begin() as conn:
             row = conn.execute(stmt).first()
         quote = self._quote_from_row(row) if row else None
-        if quote and viewer_id is not None and not is_admin and not quote_owner_matches(
+        if quote and viewer_id is not None and not is_admin and not _quote_visible_to_viewer(
             quote,
-            user_id=viewer_id,
-            user_name=viewer_name,
-            user_email=viewer_email,
+            viewer_id=viewer_id,
+            viewer_name=viewer_name,
+            viewer_email=viewer_email,
+            visible_workflow_steps=visible_workflow_steps,
         ):
             return None
         return quote

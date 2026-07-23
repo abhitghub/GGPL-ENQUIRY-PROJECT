@@ -53,6 +53,15 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL("/dashboard", request.url));
   }
 
+  // Feature-flagged role-based routing: when the granular workflow is on, send
+  // authed users landing on the root or the legacy dashboard to their
+  // role-specific queue. Flag off => this block is skipped and behaviour is
+  // exactly as before. The /dashboard component itself is unchanged.
+  const granularEnabled = process.env.NEXT_PUBLIC_ENABLE_GRANULAR_WORKFLOW === "true";
+  if (granularEnabled && isAuthed && (pathname === "/" || pathname === "/dashboard")) {
+    return NextResponse.redirect(new URL("/role-dashboard", request.url));
+  }
+
   return NextResponse.next();
 }
 

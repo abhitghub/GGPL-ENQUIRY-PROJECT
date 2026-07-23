@@ -88,3 +88,13 @@ class StageAdvanceRequest(BaseModel):
     reason: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
     expected_version: int | None = None
+
+
+class WorkflowActionRequest(BaseModel):
+    action: str
+    comment: str = ""
+    expected_version: int | None = None
+    # Optional gasket-type flag that drives the granular stage-5 branch (specific
+    # types route to technical review). When omitted, any value already on
+    # stage_meta is reused. Ignored unless ENABLE_GRANULAR_WORKFLOW is on.
+    gasket_type: str | None = None

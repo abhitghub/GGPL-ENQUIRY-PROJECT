@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.db import repo
 from app.deps import CurrentUser, can_manage_users, get_current_user, require_capability
-from app.schemas.customers import ContactPerson, CustomerCreate, CustomerRecord, CustomerSettings
+from app.schemas.customers import ContactCreate, ContactPerson, CustomerCreate, CustomerRecord, CustomerSettings
 
 router = APIRouter(prefix="/api/v1", tags=["customers"])
 
@@ -60,5 +60,34 @@ def add_customer(payload: CustomerCreate, user: CurrentUser = Depends(get_curren
         contacts=contacts,
     )
     settings.customers.append(record)
+    repo.update_customer_settings(user.org_id, settings)
+    return record
+
+
+@router.post("/customers/records/{record_id}/contacts", response_model=CustomerRecord)
+def add_customer_contact(record_id: str, payload: ContactCreate, user: CurrentUser = Depends(get_current_user)) -> CustomerRecord:
+    """Append a contact person to an existing customer, allowed to anyone who can
+    create enquiries (so sales can add a buyer contact while filling an enquiry)."""
+    require_capability(user, "create_enquiry")
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Contact name is required")
+    settings = repo.get_customer_settings(user.org_id)
+    record = next((customer for customer in settings.customers if customer.id == record_id), None)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Customer not found: {record_id}")
+    if any((contact.name or "").strip().lower() == name.lower() for contact in record.contacts):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Contact already exists: {name}")
+    record.contacts.append(
+        ContactPerson(
+            id=f"{record_id}-c-{uuid.uuid4().hex[:8]}",
+            name=name,
+            designation=payload.designation,
+            department=payload.department,
+            email=payload.email,
+            phone=payload.phone,
+            mobile=payload.mobile,
+        )
+    )
     repo.update_customer_settings(user.org_id, settings)
     return record

@@ -1,0 +1,99 @@
+# On-prem production stack: Postgres + API + Web, for LAN use only.
+# Start:  docker compose -f docker-compose.prod.yml up -d --build
+# Access: http://<this-machine-LAN-ip>:3000  from any office PC.
+# Stop:   docker compose -f docker-compose.prod.yml down
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gasket_quote
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d gasket_quote"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Not published to the host — only the API (same Docker network) reaches it.
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    env_file:
+      - ./.env            # OPENAI_API_KEY (and any other secrets) live here
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gasket_quote
+      ENABLE_GRANULAR_WORKFLOW: "true"
+      LOGIN_ENABLED: "true"
+      # Served over plain HTTP on the office LAN, so the session cookie must not
+      # be Secure (HTTPS-only) or logins won't stick.
+      SESSION_COOKIE_SECURE: "false"
+      AUTH_SECRET: ${AUTH_SECRET:?set a long random AUTH_SECRET in .env}
+      REDIS_ENABLED: "false"
+      APPROVED_QUOTE_REDIS_ENABLED: "false"
+      SMART_PARSE_REDIS_CACHE_ENABLED: "false"
+      GGPL_LOGO_PATH: /app/apps/streamlit/logo.png
+      # Auto-export quotations as Excel. Folder mode (Google Drive for Desktop):
+      # files are written to GDRIVE_LOCAL_DIR, which Drive for Desktop syncs.
+      # Safe no-op until GDRIVE_EXPORT_ENABLED=true.
+      GDRIVE_EXPORT_ENABLED: ${GDRIVE_EXPORT_ENABLED:-false}
+      GDRIVE_LOCAL_DIR: /gdrive
+      GDRIVE_FOLDER_ID: ${GDRIVE_FOLDER_ID:-1zo_0EMTFkbHemTxq-R1eaYaADuDjFfCM}
+      GOOGLE_SERVICE_ACCOUNT_FILE: /run/secrets/gdrive-sa.json
+    volumes:
+      - ${GDRIVE_HOST_DIR:-./gdrive-out}:/gdrive   # Drive-for-Desktop synced folder
+      - ./secrets:/run/secrets:ro                  # gdrive-sa.json (API mode, gitignored)
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Not published to the host — the web container proxies to it internally.
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_ENABLE_GRANULAR_WORKFLOW: "true"
+    restart: unless-stopped
+    environment:
+      API_BASE_URL: http://api:8000
+      # The middleware verifies the session cookie signature — it must use the
+      # SAME secret the API signed it with, or every logged-in user is bounced.
+      AUTH_SECRET: ${AUTH_SECRET:?set a long random AUTH_SECRET in .env}
+    ports:
+      - "3000:3000"       # the only port exposed to the office LAN
+    depends_on:
+      - api
+
+  # Nightly job: export every enquiry/quotation as Excel to the Drive folder.
+  exporter:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    command: sh -c "while true; do python -m app.scripts.export_all_to_drive || true; sleep 86400; done"
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gasket_quote
+      REDIS_ENABLED: "false"
+      GGPL_LOGO_PATH: /app/apps/streamlit/logo.png
+      GDRIVE_EXPORT_ENABLED: ${GDRIVE_EXPORT_ENABLED:-false}
+      GDRIVE_LOCAL_DIR: /gdrive
+      GDRIVE_FOLDER_ID: ${GDRIVE_FOLDER_ID:-1zo_0EMTFkbHemTxq-R1eaYaADuDjFfCM}
+      GOOGLE_SERVICE_ACCOUNT_FILE: /run/secrets/gdrive-sa.json
+    volumes:
+      - ${GDRIVE_HOST_DIR:-./gdrive-out}:/gdrive
+      - ./secrets:/run/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

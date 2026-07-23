@@ -39,7 +39,6 @@ import {
   Trash2,
   Undo2,
   Upload,
-  Users,
   WandSparkles,
   X,
 } from "lucide-react";
@@ -50,12 +49,20 @@ import {
   BusinessMasterData,
   ContactPerson,
   CustomerRecord,
+  ENQUIRY_WORKFLOW_ACTIONS,
+  ENQUIRY_WORKFLOW_STEPS,
+  GRANULAR_ENQUIRY_WORKFLOW_ACTIONS,
+  GRANULAR_ENQUIRY_WORKFLOW_STEPS,
+  GRANULAR_WORKFLOW,
   GasketItem,
   ITEM_FIELDS,
+  NewContactInput,
   NewCustomerInput,
   OutlookLinkedMessage,
   Quote,
+  addCustomerContact,
   addCustomerRecord,
+  advanceEnquiryWorkflow,
   advanceQuoteStage,
   bulkRecompute,
   createExtraction,
@@ -94,11 +101,13 @@ import { getString, notesFor, validateItemField } from "@/components/quotes/item
 import { buildQuotePricingSummary } from "@/components/quotes/pricing-utils";
 import { evaluateQuoteQuality } from "@/components/quotes/quality-utils";
 import { itemMatchesSmartFilter, quoteDueState, quoteHasClarification, quoteIsHighRisk, quoteIsHighValue } from "@/components/quotes/queue-utils";
+import { PricingGrid } from "@/components/quotes/pricing-grid";
 import { QuoteSummaryRow } from "@/components/quotes/quote-summary-row";
+import { QUOTATION_STAGES, QUOTATION_STAGE_INDEX, QuotationStageId, quotationStageBadgeVariant, quotationStageFromData } from "@/components/quotes/quotation-stage";
 import { appendActivity } from "@/components/quotes/activity-utils";
 import { ClipboardTableDetection, detectClipboardTable, rowsToTsv, structuredRowsToItemFields } from "@/components/quotes/clipboard-table";
 import { QuoteTimeline } from "@/components/quotes/quote-timeline";
-import { DRAFT_STAGES, ENQUIRY_STAGES, EnquiryStageId, FINAL_STAGES, PO_STAGES, QuoteSection, enquiryStageFromQuote, enquiryStageLabel, revisionLabel, stageLabel } from "@/components/quotes/stage-utils";
+import { DRAFT_STAGES, ENQUIRY_STAGES, EnquiryStageId, PO_STAGES, QuoteSection, enquiryStageFromQuote, enquiryStageLabel, isPricingOnward, revisionLabel, stageLabel, workflowStepOf } from "@/components/quotes/stage-utils";
 import { issueBadgesForItem, TechnicalIssuesPanel } from "@/components/quotes/technical-issues-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -178,6 +187,7 @@ const quoteDefaults: Record<string, unknown> = {
   unit_prices: [],
   cost_prices: [],
   target_margins_pct: [],
+  line_discounts_pct: [],
   discount_approval_pct: 0,
   discount_pct: 0,
   gst_type: "IGST",
@@ -374,40 +384,6 @@ function nextQuotationNumber(rows: Quote[], marketType: string) {
   });
   return `${prefix}${String(highest + 1).padStart(3, "0")}`;
 }
-
-type QuotationStageId =
-  | "draft_preparation"
-  | "technical_review"
-  | "costing"
-  | "commercial_review"
-  | "approval"
-  | "ready_to_send"
-  | "sent_to_customer"
-  | "negotiation"
-  | "revision"
-  | "po_received"
-  | "lost";
-
-const QUOTATION_STAGES: Array<{
-  id: QuotationStageId;
-  label: string;
-  owner: string;
-  description: string;
-}> = [
-  { id: "draft_preparation", label: "Draft preparation", owner: "Sales", description: "Customer details, enquiry references, line descriptions, and quote header are prepared." },
-  { id: "technical_review", label: "Technical review", owner: "Engineering", description: "Specs, materials, risk items, drawings, deviations, and regret rows are checked." },
-  { id: "costing", label: "Costing", owner: "Planning / costing", description: "Material, bought-out, machining, packing, freight, and overhead cost inputs are entered." },
-  { id: "commercial_review", label: "Commercial review", owner: "Sales / commercial", description: "Margins, discount, currency, taxes, delivery, validity, and payment terms are reviewed." },
-  { id: "approval", label: "Internal approval", owner: "Approver", description: "Approval is requested when margins, discount, risk, or value require sign-off." },
-  { id: "ready_to_send", label: "Ready to send", owner: "Sales", description: "Quotation PDF is approved and ready for customer release." },
-  { id: "sent_to_customer", label: "Sent to customer", owner: "Sales", description: "Approved quotation has been shared with the customer." },
-  { id: "negotiation", label: "Negotiation", owner: "Sales", description: "Customer feedback, commercial negotiation, alternates, and clarifications are being handled." },
-  { id: "revision", label: "Revision", owner: "Sales / engineering", description: "A revised quotation is being prepared after customer or internal changes." },
-  { id: "po_received", label: "PO received", owner: "Sales", description: "Customer PO is received and the quotation is ready for handover." },
-  { id: "lost", label: "Lost / closed", owner: "Sales", description: "Opportunity is closed without order, with loss reason captured in notes." },
-];
-
-const QUOTATION_STAGE_INDEX = new Map(QUOTATION_STAGES.map((stage, index) => [stage.id, index]));
 
 type TableColumn = {
   label: string;
@@ -655,6 +631,8 @@ const GRID_INPUT_CLASS =
 const GRID_TEXTAREA_CLASS =
   "h-14 w-full min-w-0 resize-none rounded-none border-0 bg-transparent px-2 py-1 text-xs shadow-none outline-none focus:ring-1 focus:ring-ring";
 const GRID_READONLY_CLASS = "bg-muted/30 text-muted-foreground";
+// Number inputs are typed manually — hide the browser's increment/decrement spinners.
+const NO_SPINNER_CLASS = "[appearance:textfield] [&::-webkit-inner-spin-button]:hidden [&::-webkit-outer-spin-button]:hidden";
 const SHEET_TABLE_CLASS = "w-max min-w-full border-collapse text-xs [&_td]:border-r [&_td]:border-b [&_th]:border-r [&_th]:border-b";
 const SHEET_HEADER_CLASS = "sticky top-0 z-20 bg-[#f3f3f3] dark:bg-muted";
 const SHEET_HEAD_CLASS = "h-8 whitespace-nowrap bg-[#f3f3f3] px-2 py-1 text-xs font-semibold text-foreground dark:bg-muted";
@@ -931,22 +909,6 @@ function approvalBadgeVariant(status: ApprovalState["status"]) {
   if (status === "approved") return "secondary";
   if (status === "rejected") return "warning";
   return "outline";
-}
-
-function quotationStageFromData(qd: Record<string, unknown>, quote: Quote | null): QuotationStageId {
-  const explicit = getString(qd.quotation_stage) as QuotationStageId;
-  if (QUOTATION_STAGE_INDEX.has(explicit)) return explicit;
-  if (quote?.stage === "po") return "po_received";
-  if (quote?.stage === "sent") return "sent_to_customer";
-  return "draft_preparation";
-}
-
-function quotationStageBadgeVariant(stage: QuotationStageId) {
-  if (stage === "po_received") return "secondary";
-  if (stage === "lost") return "warning";
-  if (stage === "approval" || stage === "negotiation" || stage === "revision") return "warning";
-  if (stage === "sent_to_customer" || stage === "ready_to_send") return "outline";
-  return "muted";
 }
 
 function quotationStageChecklist(
@@ -1229,6 +1191,7 @@ function Field({
       ) : (
         <Input
           type={type}
+          className={type === "number" ? NO_SPINNER_CLASS : undefined}
           value={value}
           onChange={(event) => onChange(event.target.value)}
           disabled={disabled}
@@ -1304,9 +1267,15 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [intakeCollapsed, setIntakeCollapsed] = React.useState(false);
   const [enquirySetupOpen, setEnquirySetupOpen] = React.useState(false);
   const [quotationSetupOpen, setQuotationSetupOpen] = React.useState(false);
+  const [workflowComment, setWorkflowComment] = React.useState("");
+  // Shown right after "Generate quotation" so the user can preview/download it.
+  const [generatedDialogOpen, setGeneratedDialogOpen] = React.useState(false);
   const [addCustomerOpen, setAddCustomerOpen] = React.useState(false);
   const [addingCustomer, setAddingCustomer] = React.useState(false);
   const [newCustomer, setNewCustomer] = React.useState<NewCustomerInput>({ name: "" });
+  const [addContactOpen, setAddContactOpen] = React.useState(false);
+  const [addingContact, setAddingContact] = React.useState(false);
+  const [newContact, setNewContact] = React.useState<NewContactInput>({ name: "" });
   const [rowEditorOpen, setRowEditorOpen] = React.useState(false);
   const [materialBreakdown, setMaterialBreakdown] = React.useState<MaterialBreakdownRow[] | null>(null);
   const [materialInputs, setMaterialInputs] = React.useState<MaterialInputRow[]>([]);
@@ -1335,6 +1304,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [selectionAnchor, setSelectionAnchor] = React.useState<GridCell | null>(null);
   const [selectionFocus, setSelectionFocus] = React.useState<GridCell | null>(null);
   const [isSelectingCells, setIsSelectingCells] = React.useState(false);
+  // Excel-style fill handle: the source block being dragged from, and the cell
+  // the pointer is currently over while dragging.
+  const [fillSource, setFillSource] = React.useState<{ minPosition: number; maxPosition: number; minCol: number; maxCol: number } | null>(null);
+  const [fillFocus, setFillFocus] = React.useState<{ position: number; colIndex: number } | null>(null);
   const [columnFilters, setColumnFilters] = React.useState<Record<string, string>>({});
   const [gridSort, setGridSort] = React.useState<GridSort>(null);
   const isDraftSection = section === "drafts";
@@ -1350,6 +1323,29 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const canEditWorkflow = canRole(currentUser.role, "edit_workflow", accessSettings);
   const canEditQuotation = canRole(currentUser.role, "edit_quotation", accessSettings);
   const canEditQuote = canCreateEnquiry || canEditLineItems || canEditWorkflow || canEditQuotation;
+  // Estimation now does the pricing (admin only sets the formula), so estimation
+  // may open the quotation to price. Sales cannot edit pricing — they view and
+  // download the finished quotation to send to the customer.
+  const canOpenQuotation = currentUser.role !== "sales";
+  // Resolve the workflow machine per-quote so mixed legacy/granular data both
+  // render correctly. Prefer the granular namespace, then the legacy stage key.
+  // A granular stage id => granular steps/actions; a legacy id => legacy; an
+  // unknown/empty stage falls back to whichever machine the flag has active.
+  const granularWorkflowMeta = (quote?.stage_meta?.granular_workflow ?? {}) as Record<string, unknown>;
+  const rawWorkflowStep = getString(granularWorkflowMeta.current_stage) || getString(quote?.stage_meta?.workflow_stage);
+  const isGranularStep = GRANULAR_ENQUIRY_WORKFLOW_STEPS.some((step) => step.id === rawWorkflowStep);
+  const isLegacyStep = ENQUIRY_WORKFLOW_STEPS.some((step) => step.id === rawWorkflowStep);
+  const useGranularWorkflow = isGranularStep || (!isLegacyStep && GRANULAR_WORKFLOW);
+  const workflowSteps = useGranularWorkflow ? GRANULAR_ENQUIRY_WORKFLOW_STEPS : ENQUIRY_WORKFLOW_STEPS;
+  const workflowActions = useGranularWorkflow ? GRANULAR_ENQUIRY_WORKFLOW_ACTIONS : ENQUIRY_WORKFLOW_ACTIONS;
+  const defaultWorkflowStep = useGranularWorkflow ? "enquiry_received" : "enquiry";
+  const currentWorkflowStep = workflowSteps.some((step) => step.id === rawWorkflowStep) ? rawWorkflowStep : defaultWorkflowStep;
+  const currentWorkflowStepIndex = workflowSteps.findIndex((step) => step.id === currentWorkflowStep);
+  const availableWorkflowActions = workflowActions.filter(
+    (item) =>
+      (item.from as readonly string[]).includes(currentWorkflowStep) &&
+      (currentUser.role === "admin" || (item.roles as readonly string[]).includes(currentUser.role)),
+  );
   const canRunMaterialPhase1 = canEditWorkflow;
   const canEditMaterialPhase2 = canRole(currentUser.role, "edit_material_phase2", accessSettings);
   const canSaveProgress = Boolean(quote && (canEditQuote || canAddDetails || canEditMaterialPhase2));
@@ -1369,6 +1365,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     () => masterData.customers.find((row) => row.id === getString(quote?.stage_meta?.customer_master_id)),
     [masterData.customers, quote?.stage_meta?.customer_master_id],
   );
+  // A customer counts as selected when the top-level field, the chosen master
+  // record, or the buyer name resolves — records created via import/API may have
+  // only the master id set, so keying off quote.customer alone wrongly reads as
+  // "Customer not selected / Setup incomplete".
+  const customerMasterId = getString(quote?.stage_meta?.customer_master_id);
+  const enquiryCustomerName = getString(quote?.customer) || selectedCustomerRecord?.name || getString(quote?.quote_data?.buyer_name);
+  const hasCustomerSelected = Boolean(enquiryCustomerName || customerMasterId);
   const contactOptions = React.useMemo<ComboboxOption[]>(
     () => (selectedCustomerRecord?.contacts ?? []).map((contact) => ({
       value: contact.id,
@@ -1418,6 +1421,12 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     : createdByNameFromMeta || "Not recorded";
   const currentEnquiryStage = quote ? enquiryStageFromQuote(quote) : "draft";
   const enquiryMarketType = getString(quote?.stage_meta?.market_type);
+  // Which required setup pieces are still missing, so the badge can name them.
+  const setupMissing = [
+    !hasCustomerSelected ? "customer" : null,
+    !enquiryMarketType ? "quote type" : null,
+    !selectedEnquiryOwnerId ? "sales rep" : null,
+  ].filter((item): item is string => Boolean(item));
   const effectiveQuoteNo = getString(quote?.quote_no);
   const isLargeDraft = items.length > LARGE_DRAFT_THRESHOLD;
   const activeTableColumns = React.useMemo(
@@ -1468,6 +1477,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       }
     : null;
   const selectedCellCount = selectedRange ? (selectedRange.maxPosition - selectedRange.minPosition + 1) * (selectedRange.maxCol - selectedRange.minCol + 1) : 0;
+  // The rectangle the fill handle would fill, extended from the source block
+  // along the dominant drag axis (down or right, like Excel).
+  const fillRange = fillSource && fillFocus
+    ? (() => {
+        const downDelta = fillFocus.position - fillSource.maxPosition;
+        const rightDelta = fillFocus.colIndex - fillSource.maxCol;
+        if (downDelta <= 0 && rightDelta <= 0) return null;
+        return downDelta >= rightDelta
+          ? { ...fillSource, maxPosition: Math.max(fillSource.maxPosition, fillFocus.position) }
+          : { ...fillSource, maxCol: Math.max(fillSource.maxCol, fillFocus.colIndex) };
+      })()
+    : null;
   const filterCount = activeColumnFilters.length + (gridSort ? 1 : 0);
   const pageCount = Math.max(1, Math.ceil(displayIndices.length / DRAFT_PAGE_SIZE));
   const safeDraftPage = Math.min(draftPage, pageCount - 1);
@@ -1488,11 +1509,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const virtualPaddingBottom = Math.max(0, (pagedDisplayIndices.length - virtualEnd) * activeVirtualRowHeight);
   const pageStart = displayIndices.length ? safeDraftPage * DRAFT_PAGE_SIZE + 1 : 0;
   const pageEnd = Math.min(displayIndices.length, (safeDraftPage + 1) * DRAFT_PAGE_SIZE);
-  const finalPageCount = Math.max(1, Math.ceil(items.length / FINAL_PAGE_SIZE));
-  const safeFinalPage = Math.min(finalPage, finalPageCount - 1);
-  const finalPageStartIndex = safeFinalPage * FINAL_PAGE_SIZE;
-  const finalPageEndIndex = Math.min(items.length, finalPageStartIndex + FINAL_PAGE_SIZE);
-  const finalPageItems = items.slice(finalPageStartIndex, finalPageEndIndex);
+  // (Quotation pricing pagination removed — the pricing sheet is one continuous
+  // Excel-style grid; finalPage state is kept only because effects reset it.)
+  void finalPage;
+  void FINAL_PAGE_SIZE;
   const selectedIndices = selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : [];
   const selectedOrVisibleIndices = selectedIndices.length ? selectedIndices : displayIndices;
   const selectedOrVisibleRows = selectedOrVisibleIndices.map((index) => items[index]).filter(Boolean);
@@ -1803,6 +1823,19 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params]);
 
+  // After the initial load, a soft navigation to the section root (e.g. clicking
+  // the sidebar "Enquiries"/"Quotations" link while a record is open) drops the
+  // ?quote= param without remounting. Return to the list so the section re-opens
+  // instead of appearing to do nothing. Keyed only on params so it never races
+  // with the internal open/create flows, which keep state and URL in sync.
+  React.useEffect(() => {
+    if (!initialRouteLoaded.current) return;
+    if (params.get("new") === "1") return;
+    if (params.get("quote")) return;
+    setQuote((current) => (current ? null : current));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params]);
+
   React.useEffect(() => {
     if (quote?.id === loadedQuoteId.current) return;
     loadedQuoteId.current = quote?.id ?? null;
@@ -1874,6 +1907,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     window.addEventListener("mouseup", stopSelecting);
     return () => window.removeEventListener("mouseup", stopSelecting);
   }, [isSelectingCells]);
+
+  React.useEffect(() => {
+    if (!fillSource) return undefined;
+    const releaseFill = () => applyFillHandle();
+    window.addEventListener("mouseup", releaseFill);
+    return () => window.removeEventListener("mouseup", releaseFill);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fillSource, fillFocus]);
 
   React.useEffect(() => {
     const refresh = () => {
@@ -2346,7 +2387,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         startedAt: new Date().toISOString(),
       });
       invalidateMaterialPlan();
-      setIntakeCollapsed(false);
+      setIntakeCollapsed(true);
       toast.info("We are creating the item list in the background. You can keep working and will be notified when it finishes.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Extraction failed");
@@ -2948,6 +2989,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     setHasUnsavedLocalEdits(true);
   }
 
+  // Apply several quote_data keys in one update (updateQd merges one key off the
+  // current closure, so sequential calls would drop earlier ones).
+  function updateQdMany(patch: Record<string, unknown>) {
+    if (!canEditQuotation) return;
+    setQuote((current) => (current ? { ...current, quote_data: { ...current.quote_data, ...patch }, quote_no: effectiveQuoteNo } : current));
+    setHasUnsavedLocalEdits(true);
+  }
+
   function contactQuoteData(base: Record<string, unknown>, contact?: ContactPerson) {
     return {
       ...base,
@@ -3039,6 +3088,64 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     }
   }
 
+  async function saveNewContact() {
+    if (!selectedCustomerRecord) {
+      toast.error("Select a customer first");
+      return;
+    }
+    const name = (newContact.name || "").trim();
+    if (!name) {
+      toast.error("Enter a contact name");
+      return;
+    }
+    setAddingContact(true);
+    try {
+      const updated = await addCustomerContact(selectedCustomerRecord.id, { ...newContact, name });
+      setMasterData((current) => ({
+        ...current,
+        customers: current.customers.map((row) => (row.id === updated.id ? updated : row)),
+      }));
+      const contact = updated.contacts?.[updated.contacts.length - 1];
+      if (contact && quote) {
+        updateQuoteDraft({
+          quote_data: quoteDataWithDefaults(contactQuoteData({ ...qd }, contact)),
+          stage_meta: { ...(quote.stage_meta ?? {}), customer_contact_id: contact.id },
+        });
+      }
+      setAddContactOpen(false);
+      setNewContact({ name: "" });
+      toast.success(`Contact added: ${name}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not add contact");
+    } finally {
+      setAddingContact(false);
+    }
+  }
+
+  async function runWorkflowAction(action: string) {
+    if (!quote) return;
+    const comment = workflowComment.trim();
+    // When estimation sends the enquiry back to sales for missing info, require a
+    // one-line note so sales knows what is missing.
+    if (action === "raise_customer_query" && !comment) {
+      toast.error("Add a one-line note on what is missing before sending back to sales.");
+      return;
+    }
+    try {
+      const updated = await advanceEnquiryWorkflow(quote.id, action, comment);
+      setQuote(updated);
+      setQuotes((prev) => prev.map((row) => (row.id === updated.id ? quoteSummary(updated) : row)));
+      setWorkflowComment("");
+      toast.success("Workflow updated");
+      // After generating the quotation, offer to preview or download it.
+      if (action === "generate_quotation") {
+        setGeneratedDialogOpen(true);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not update the workflow");
+    }
+  }
+
   function salesRepQuoteData(user: (typeof salesRepUsers)[number]) {
     return {
       ...qd,
@@ -3063,6 +3170,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const unitPrices = React.useMemo(() => Array.isArray(qd.unit_prices) ? qd.unit_prices.map((value) => toNumber(value)) : [], [qd.unit_prices]);
   const costPrices = React.useMemo(() => Array.isArray(qd.cost_prices) ? qd.cost_prices.map((value) => toNumber(value)) : [], [qd.cost_prices]);
   const targetMargins = React.useMemo(() => Array.isArray(qd.target_margins_pct) ? qd.target_margins_pct.map((value) => toNumber(value, 0)) : [], [qd.target_margins_pct]);
+  const lineDiscounts = React.useMemo(() => Array.isArray(qd.line_discounts_pct) ? qd.line_discounts_pct.map((value) => toNumber(value, 0)) : [], [qd.line_discounts_pct]);
   const currency = getString(qd.currency) || "INR";
   const fxRate = toNumber(qd.fx_rate, defaultFx[currency] ?? 1);
   const discountPct = toNumber(qd.discount_pct);
@@ -3074,18 +3182,23 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       unitPrices,
       costPrices,
       targetMargins,
+      lineDiscountsPct: lineDiscounts,
       discountPct,
       gstPct,
       riskCount: qualityReport.risks.filter((risk) => risk.severity === "high").length,
       fxRate,
       isForeignCurrency: currency !== "INR",
     }),
-    [costPrices, currency, discountPct, fxRate, gstPct, items, qualityReport.risks, targetMargins, unitPrices],
+    [costPrices, currency, discountPct, fxRate, gstPct, items, lineDiscounts, qualityReport.risks, targetMargins, unitPrices],
   );
   const subtotal = pricingSummary.subtotal;
   const discount = pricingSummary.discount;
   const gst = pricingSummary.gst;
   const grandTotal = pricingSummary.grandTotal;
+  // International orders show the equivalent USD value using a ₹/$ conversion rate.
+  const isInternationalOrder = enquiryMarketType === "export" || currency !== "INR";
+  const usdRate = toNumber(qd.usd_rate, defaultFx.USD ?? 83);
+  const grandTotalUsd = currency === "USD" ? grandTotal : usdRate > 0 ? grandTotal / usdRate : 0;
   const totalQuantity = pricingSummary.lines.reduce((sum, line) => sum + line.quantity, 0);
   const totalQuantityLabel = Number.isInteger(totalQuantity) ? `${totalQuantity}` : totalQuantity.toFixed(2);
   const readyCount = items.filter((item) => item.status === "ready").length;
@@ -3109,10 +3222,22 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     if (isPoSection) {
       if (!PO_STAGES.has(row.stage)) return false;
     } else if (isFinalSection) {
-      if (!FINAL_STAGES.has(row.stage)) return false;
+      // Quotations = records that have reached pricing and beyond (in pricing,
+      // priced, or ready to deliver) per the enquiry->quotation workflow.
+      if (!isPricingOnward(row)) return false;
     } else if (isMaterialSection) {
       if (row.stage_meta?.material_planning_enabled !== true) return false;
     } else if (!DRAFT_STAGES.has(row.stage)) {
+      return false;
+    }
+    // Once an enquiry is handed off for generation/sending, estimation and
+    // technical have nothing left to do on it — drop it from their Enquiries
+    // list to avoid confusion. Sales/admin/management keep seeing it.
+    if (
+      isDraftSection &&
+      (currentUser.role === "estimation" || currentUser.role === "technical") &&
+      ["pricing_submitted", "quotation_generated", "quotation_sent_to_customer"].includes(workflowStepOf(row))
+    ) {
       return false;
     }
     if (queueFilter === "my_work" && row.stage_meta?.owner_id !== currentUser.id && row.stage_meta?.owner_name !== currentUser.name && row.stage_meta?.owner_email !== currentUser.email) return false;
@@ -3370,6 +3495,59 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     setHasUnsavedLocalEdits(true);
     toast.success(`Filled ${changed} cell${changed === 1 ? "" : "s"} down`);
     return true;
+  }
+
+  function isInFillPreview(rowIndex: number, colIndex: number) {
+    if (!fillRange) return false;
+    const position = displayIndexPositions.get(rowIndex) ?? -1;
+    return position >= fillRange.minPosition && position <= fillRange.maxPosition && colIndex >= fillRange.minCol && colIndex <= fillRange.maxCol;
+  }
+
+  // Apply the fill handle drag: tile the source block's values across the
+  // extended rectangle (so a single cell repeats the same value, and a multi-cell
+  // block repeats as a pattern — like Excel's copy-fill).
+  function applyFillHandle() {
+    if (!fillSource || !fillRange) {
+      setFillSource(null);
+      setFillFocus(null);
+      return;
+    }
+    const srcRows = fillSource.maxPosition - fillSource.minPosition + 1;
+    const srcCols = fillSource.maxCol - fillSource.minCol + 1;
+    const next = [...items];
+    let changed = 0;
+    for (let position = fillRange.minPosition; position <= fillRange.maxPosition; position += 1) {
+      for (let colIndex = fillRange.minCol; colIndex <= fillRange.maxCol; colIndex += 1) {
+        const inSource = position >= fillSource.minPosition && position <= fillSource.maxPosition && colIndex >= fillSource.minCol && colIndex <= fillSource.maxCol;
+        if (inSource) continue;
+        const rowIndex = displayIndices[position];
+        if (rowIndex === undefined || !next[rowIndex]) continue;
+        const column = activeTableColumns[colIndex];
+        if (!column || !isEditableGridColumn(column)) continue;
+        const srcPosition = fillSource.minPosition + ((position - fillSource.minPosition) % srcRows);
+        const srcCol = fillSource.minCol + ((colIndex - fillSource.minCol) % srcCols);
+        const srcItem = items[displayIndices[srcPosition]];
+        const srcColumn = activeTableColumns[srcCol];
+        if (!srcItem || !srcColumn) continue;
+        next[rowIndex] = setItemValue(next[rowIndex], column.field, columnValue(srcItem, srcColumn));
+        changed += 1;
+      }
+    }
+    if (changed) {
+      setUndoItems({ label: "Undo fill", items, local: true });
+      invalidateMaterialPlan();
+      setQuote((current) => (current ? { ...current, items: next } : current));
+      setHasUnsavedLocalEdits(true);
+      const anchorRow = displayIndices[fillRange.minPosition];
+      const focusRow = displayIndices[fillRange.maxPosition];
+      if (anchorRow !== undefined && focusRow !== undefined) {
+        setSelectionAnchor({ rowIndex: anchorRow, colIndex: fillRange.minCol });
+        setSelectionFocus({ rowIndex: focusRow, colIndex: fillRange.maxCol });
+      }
+      toast.success(`Filled ${changed} cell${changed === 1 ? "" : "s"}`);
+    }
+    setFillSource(null);
+    setFillFocus(null);
   }
 
   function copyGridSelection(event: React.ClipboardEvent<HTMLDivElement>) {
@@ -3670,7 +3848,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     }
     return (
       <Input
-        className={`${inputClass} ${cellClass}`}
+        className={`${inputClass} ${cellClass} ${column.kind === "number" ? NO_SPINNER_CLASS : ""}`}
         type={column.kind === "number" ? "number" : "text"}
         value={getString(rawValue)}
         onChange={(event) => updateItem(index, column.field, event.target.value)}
@@ -4163,29 +4341,120 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <RefreshCw className="h-4 w-4" />
                   Revision
                 </Button>
-                <Button size="sm" onClick={() => {
-                  if (items.length) {
-                    void openQuotationScreen();
-                    return;
-                  }
-                  setIntakeCollapsed(false);
-                  window.requestAnimationFrame(() => document.getElementById("enquiry-intake")?.scrollIntoView({ behavior: "smooth", block: "start" }));
-                }}>
-                  <ArrowRight className="h-4 w-4" />
-                  {items.length ? "Continue to quotation" : "Add enquiry items"}
-                </Button>
+                {(!items.length || canOpenQuotation) && (
+                  <Button size="sm" onClick={() => {
+                    if (items.length) {
+                      void openQuotationScreen();
+                      return;
+                    }
+                    setIntakeCollapsed(false);
+                    window.requestAnimationFrame(() => document.getElementById("enquiry-intake")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+                  }}>
+                    <ArrowRight className="h-4 w-4" />
+                    {items.length ? "Continue to quotation" : "Add enquiry items"}
+                  </Button>
+                )}
               </>
             )}
           </div>
         </div>
       </div>}
 
+      {/* Shown in every section (including Quotations/Orders) so pricing, quotation
+          generation, and closing the enquiry are all available where the work happens. */}
+      {(
+        <div className="rounded-md border bg-card p-3">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-medium">Enquiry workflow</div>
+            <div className="text-xs text-muted-foreground">
+              Currently with: <span className="font-medium text-foreground">{workflowSteps[currentWorkflowStepIndex]?.team ?? "Sales"}</span>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-1">
+            {workflowSteps.map((step, index) => {
+              const state = index < currentWorkflowStepIndex ? "done" : index === currentWorkflowStepIndex ? "current" : "todo";
+              return (
+                <React.Fragment key={step.id}>
+                  <span
+                    className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${
+                      state === "current"
+                        ? "bg-primary text-primary-foreground"
+                        : state === "done"
+                          ? "bg-primary/15 text-primary"
+                          : "bg-muted text-muted-foreground"
+                    }`}
+                    title={`${step.label} — ${step.team}`}
+                  >
+                    <span
+                      className={`flex h-4 w-4 items-center justify-center rounded-full text-[10px] font-semibold ${
+                        state === "current" ? "bg-primary-foreground text-primary" : state === "done" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground"
+                      }`}
+                    >
+                      {state === "done" ? <Check className="h-3 w-3" /> : index + 1}
+                    </span>
+                    {step.label}
+                  </span>
+                  {index < workflowSteps.length - 1 && <span className="h-px w-3 bg-border sm:w-5" aria-hidden />}
+                </React.Fragment>
+              );
+            })}
+          </div>
+          {currentWorkflowStep === "query_raised_to_customer" && getString(quote.stage_meta?.workflow_comment) ? (
+            <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-950/30 dark:text-amber-200">
+              <span className="font-medium">Missing / needs clarification: </span>
+              <span>{getString(quote.stage_meta?.workflow_comment)}</span>
+            </div>
+          ) : getString(quote.stage_meta?.workflow_comment) ? (
+            <div className="mt-2 rounded-md border bg-muted/30 px-2.5 py-1.5 text-xs">
+              <span className="text-muted-foreground">Last note: </span>
+              <span>{getString(quote.stage_meta?.workflow_comment)}</span>
+            </div>
+          ) : null}
+          {availableWorkflowActions.length > 0 ? (
+            <div className="mt-3 space-y-2">
+              <textarea
+                value={workflowComment}
+                onChange={(event) => setWorkflowComment(event.target.value)}
+                placeholder="Add a comment for the receiving team (optional)"
+                className="min-h-[52px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+              />
+              <div className="flex flex-wrap gap-2">
+                {availableWorkflowActions.map((item) => (
+                  <Button key={item.action} size="sm" onClick={() => runWorkflowAction(item.action)}>
+                    <ArrowRight className="h-4 w-4" />
+                    {item.label}
+                  </Button>
+                ))}
+                {/* From pricing onward the pricing sheet lives on the Quotations
+                    screen — give a direct way in from the enquiry. */}
+                {isDraftSection && ["sent_for_pricing", "pricing_decision", "pricing_submitted"].includes(currentWorkflowStep) && (
+                  <Button variant="secondary" size="sm" onClick={() => router.push(`/quotes/final?quote=${quote.id}`)}>
+                    <FileSpreadsheet className="h-4 w-4" />
+                    Open pricing sheet
+                  </Button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+              <span>No workflow action for your role at this step — it&apos;s with the {workflowSteps[currentWorkflowStepIndex]?.team ?? "team"}.</span>
+              {isDraftSection && ["sent_for_pricing", "pricing_decision", "pricing_submitted"].includes(currentWorkflowStep) && (
+                <Button variant="secondary" size="sm" onClick={() => router.push(`/quotes/final?quote=${quote.id}`)}>
+                  <FileSpreadsheet className="h-4 w-4" />
+                  Open pricing sheet
+                </Button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className={isQuotationSection ? "hidden" : "border bg-card"}>
         {!isQuotationSection && <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2 text-sm">
-              <span className="font-medium">{quote.customer || "Customer not selected"}</span>
-              {!quote.customer || !enquiryMarketType || !selectedEnquiryOwnerId ? <Badge variant="warning">Setup incomplete</Badge> : <Badge variant="secondary">Context ready</Badge>}
+              <span className="font-medium">{enquiryCustomerName || "Customer not selected"}</span>
+              {setupMissing.length ? <Badge variant="warning">Setup incomplete: {setupMissing.join(", ")}</Badge> : <Badge variant="secondary">Context ready</Badge>}
             </div>
             <div className="mt-0.5 truncate text-xs text-muted-foreground">
               {[enquiryMarketType || "Quote type needed", selectedEnquiryOwnerLabel, getString(quote.project_ref) || "No project reference"].join(" / ")}
@@ -4232,6 +4501,34 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           </DialogContent>
         </Dialog>
 
+        <Dialog open={addContactOpen} onOpenChange={setAddContactOpen}>
+          <DialogContent className="max-w-lg">
+            <DialogHeader>
+              <DialogTitle>Add contact person</DialogTitle>
+              <DialogDescription>
+                Add a new contact person for {selectedCustomerRecord?.name || "the selected customer"}. They will be selected for this enquiry automatically.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="md:col-span-2">
+                <Field label="Contact name *" value={newContact.name} onChange={(value) => setNewContact((c) => ({ ...c, name: value }))} />
+              </div>
+              <Field label="Designation" value={newContact.designation ?? ""} onChange={(value) => setNewContact((c) => ({ ...c, designation: value }))} />
+              <Field label="Department" value={newContact.department ?? ""} onChange={(value) => setNewContact((c) => ({ ...c, department: value }))} />
+              <Field label="Email" value={newContact.email ?? ""} onChange={(value) => setNewContact((c) => ({ ...c, email: value }))} />
+              <Field label="Phone" value={newContact.phone ?? ""} onChange={(value) => setNewContact((c) => ({ ...c, phone: value }))} />
+              <Field label="Mobile" value={newContact.mobile ?? ""} onChange={(value) => setNewContact((c) => ({ ...c, mobile: value }))} />
+            </div>
+            <DialogFooter>
+              <Button variant="secondary" onClick={() => setAddContactOpen(false)}>Cancel</Button>
+              <Button onClick={saveNewContact} disabled={addingContact || !newContact.name.trim()}>
+                {addingContact ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                Add person
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
         <Dialog open={enquirySetupOpen} onOpenChange={setEnquirySetupOpen}>
           <DialogContent className="flex max-h-[90vh] max-w-6xl flex-col overflow-hidden">
             <DialogHeader>
@@ -4240,7 +4537,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
             </DialogHeader>
             <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
         <div>
-          <details className="rounded-md border bg-background p-2.5" open={Boolean(outlookThread)}>
+          <details className="rounded-md border bg-background p-2.5" open>
             <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
               <span className="inline-flex items-center gap-2"><Mail className="h-4 w-4" />Outlook thread</span>
               <Badge variant={outlookThread ? "secondary" : "outline"}>{outlookThread ? "Linked" : "Not linked"}</Badge>
@@ -4396,7 +4693,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               </div>
               <div className="space-y-1.5">
                 <Label>Export or domestic *</Label>
-                <Select value={getString(quote.stage_meta?.market_type) || BLANK_SELECT_VALUE} onValueChange={(value) => updateQuoteDraft({ stage_meta: { ...(quote.stage_meta ?? {}), market_type: value === BLANK_SELECT_VALUE ? "" : value } })} disabled={!canAddDetails}>
+                <Select value={getString(quote.stage_meta?.market_type) || BLANK_SELECT_VALUE} onValueChange={(value) => {
+                  const market_type = value === BLANK_SELECT_VALUE ? "" : value;
+                  const nextMeta: Record<string, unknown> = { ...(quote.stage_meta ?? {}), market_type };
+                  // Domestic orders are within India — default the country automatically.
+                  if (market_type === "domestic") nextMeta.country = "India";
+                  updateQuoteDraft({ stage_meta: nextMeta });
+                }} disabled={!canAddDetails}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value={BLANK_SELECT_VALUE}>Select</SelectItem>
@@ -4411,10 +4714,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
 
         {!isQuotationSection && (
           <div className="mt-3 grid gap-2 border-t pt-3 lg:grid-cols-2 2xl:grid-cols-4">
-            <details className="rounded-md border bg-background p-2.5" open={!quote.customer || !quote.quote_no}>
+            <details className="rounded-md border bg-background p-2.5" open>
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2"><FileText className="h-4 w-4" />Enquiry details</span>
-                <Badge variant={quote.customer && quote.quote_no ? "secondary" : "outline"}>{quote.customer && quote.quote_no ? "Saved context" : "Needs context"}</Badge>
+                <Badge variant={hasCustomerSelected && quote.quote_no ? "secondary" : "outline"}>{hasCustomerSelected && quote.quote_no ? "Saved context" : "Needs context"}</Badge>
               </summary>
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 <div className="space-y-1.5">
@@ -4434,6 +4737,19 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     } : undefined}
                   />
                   <div className="text-xs text-muted-foreground">Search to pick a customer, or use “Add new customer” at the bottom of the list. Buyer details fill in automatically.</div>
+                  {canAddDetails && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        setNewCustomer({ name: "", country: getString(quote.stage_meta?.country), city: getString(quote.stage_meta?.city) });
+                        setAddCustomerOpen(true);
+                      }}
+                    >
+                      <Plus className="h-4 w-4" />
+                      Add company
+                    </Button>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <Label>Contact person</Label>
@@ -4447,6 +4763,21 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     disabled={!canAddDetails || !selectedCustomerRecord || contactOptions.length === 0}
                   />
                   <div className="text-xs text-muted-foreground">Picking a contact fills their name, email, phone and designation.</div>
+                  {canAddDetails && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={!selectedCustomerRecord}
+                      title={selectedCustomerRecord ? undefined : "Select a customer first"}
+                      onClick={() => {
+                        setNewContact({ name: "" });
+                        setAddContactOpen(true);
+                      }}
+                    >
+                      <Plus className="h-4 w-4" />
+                      Add person
+                    </Button>
+                  )}
                 </div>
                 <Field label="Contact person email" value={getString(qd.email)} onChange={(value) => updateQd("email", value)} disabled={!canAddDetails} />
                 <Field label="Contact no" value={getString(qd.contact_no)} onChange={(value) => updateQd("contact_no", value)} disabled={!canAddDetails} />
@@ -4455,7 +4786,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               </div>
             </details>
 
-            <details className="rounded-md border bg-background p-2.5" open={currentUser.role === "sales"}>
+            <details className="rounded-md border bg-background p-2.5" open>
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2"><FileText className="h-4 w-4" />Project details</span>
                 <Badge variant="outline">{quote.project_ref || getString(quote.stage_meta?.epc_name) ? "Added" : "Optional"}</Badge>
@@ -4570,29 +4901,6 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
 
             <details className="rounded-md border bg-background p-2.5" open>
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
-                <span className="inline-flex items-center gap-2"><Users className="h-4 w-4" />With whom</span>
-                <Badge variant="outline">{getString(quote.stage_meta?.with_whom) || "Unassigned"}</Badge>
-              </summary>
-              <div className="mt-3 space-y-1.5">
-                <Label>Enquiry with</Label>
-                <Select
-                  value={getString(quote.stage_meta?.with_whom) || BLANK_SELECT_VALUE}
-                  onValueChange={(value) => updateQueueMeta(quote, { with_whom: value === BLANK_SELECT_VALUE ? "" : value })}
-                  disabled={!canEditWorkflow && !canAddDetails}
-                >
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={BLANK_SELECT_VALUE}>Unassigned</SelectItem>
-                    {accessSettings.with_whom_options.map((name) => (
-                      <SelectItem key={name} value={name}>{name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </details>
-
-            <details className="rounded-md border bg-background p-2.5" open>
-              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2"><FileText className="h-4 w-4" />Created by</span>
                 <Badge variant="outline">{createdByRoleLabel}</Badge>
               </summary>
@@ -4602,7 +4910,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               </div>
             </details>
 
-            <details className="rounded-md border bg-background p-2.5">
+            <details className="rounded-md border bg-background p-2.5" open>
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2"><ShieldCheck className="h-4 w-4" />Quality and risk</span>
                 <Badge variant={qualityReport.score >= 80 ? "secondary" : qualityReport.score >= 60 ? "warning" : "outline"}>{qualityReport.score}%</Badge>
@@ -4955,7 +5263,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       </Button>
                     </>
                   )}
-                  {canEditQuotation && (
+                  {canEditQuotation && canOpenQuotation && (
                     <Button size="sm" className="shrink-0" onClick={openQuotationScreen} disabled={!quote || !items.length}>
                       <ArrowRight className="h-4 w-4" />
                       Quotation
@@ -5099,7 +5407,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 }}
                 onScroll={(event) => setDraftScrollTop(event.currentTarget.scrollTop)}
               >
-                <Table className={`w-max min-w-full border-collapse text-xs ${tableMode === "spreadsheet" ? "[&_td]:border-r [&_td]:border-b [&_th]:border-r [&_th]:border-b" : ""}`}>
+                <Table containerClassName="overflow-visible" className={`w-max min-w-full border-collapse text-xs ${tableMode === "spreadsheet" ? "[&_td]:border-r [&_td]:border-b [&_th]:border-r [&_th]:border-b" : ""}`}>
                   <TableHeader className={tableMode === "spreadsheet" ? "sticky top-0 z-30 bg-muted" : "sticky top-0 z-30 bg-card"}>
                     <TableRow className="hover:bg-transparent">
                       <TableHead className={`sticky left-0 z-40 h-8 w-10 border-r px-2 text-center ${tableMode === "spreadsheet" ? "bg-[#f3f3f3] text-muted-foreground dark:bg-muted" : "bg-card"}`}>
@@ -5219,13 +5527,21 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                           {activeTableColumns.map((column, colIndex) => {
                             const selectedCell = tableMode === "spreadsheet" && isGridCellSelected(index, colIndex);
                             const activeGridCell = tableMode === "spreadsheet" && isActiveGridCell(index, colIndex);
+                            const cellPosition = tableMode === "spreadsheet" ? (displayIndexPositions.get(index) ?? -1) : -1;
+                            // The fill handle sits on the bottom-right corner of the selection (or the active cell).
+                            const isFillCorner = tableMode === "spreadsheet" && !editingCell && (
+                              selectedRange
+                                ? (cellPosition === selectedRange.maxPosition && colIndex === selectedRange.maxCol)
+                                : activeGridCell
+                            );
+                            const inFillPreview = tableMode === "spreadsheet" && isInFillPreview(index, colIndex);
                             return (
                             <TableCell
                               key={column.label}
                               data-grid-row={index}
                               data-grid-col={colIndex}
                               tabIndex={tableMode === "spreadsheet" ? 0 : undefined}
-                              className={`border-r p-0 align-top outline-none ${selectedCell ? "bg-emerald-50 ring-1 ring-inset ring-emerald-400/60 dark:bg-emerald-950/20" : ""} ${activeGridCell ? "ring-2 ring-inset ring-emerald-600" : ""}`}
+                              className={`relative border-r p-0 align-top outline-none ${selectedCell ? "bg-emerald-50 ring-1 ring-inset ring-emerald-400/60 dark:bg-emerald-950/20" : ""} ${activeGridCell ? "ring-2 ring-inset ring-emerald-600" : ""} ${inFillPreview ? "ring-1 ring-inset ring-emerald-500/70" : ""}`}
                               onMouseDown={(event) => {
                                 if (tableMode !== "spreadsheet") return;
                                 if ((event.target as HTMLElement).closest("button,input,textarea,[role='combobox']")) return;
@@ -5244,7 +5560,12 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                                 startEditingGridCell(index, colIndex);
                               }}
                               onMouseEnter={() => {
-                                if (tableMode !== "spreadsheet" || !isSelectingCells) return;
+                                if (tableMode !== "spreadsheet") return;
+                                if (fillSource) {
+                                  setFillFocus({ position: displayIndexPositions.get(index) ?? -1, colIndex });
+                                  return;
+                                }
+                                if (!isSelectingCells) return;
                                 selectGridCell(index, colIndex, true);
                               }}
                               onFocus={() => {
@@ -5254,6 +5575,19 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                               }}
                             >
                               {renderGridCell(index, item, column, colIndex)}
+                              {isFillCorner && (
+                                <span
+                                  className="absolute bottom-0 right-0 z-30 h-2 w-2 translate-x-1/2 translate-y-1/2 cursor-crosshair rounded-[1px] border border-white bg-emerald-600 shadow-sm"
+                                  title="Drag to fill"
+                                  onMouseDown={(event) => {
+                                    event.stopPropagation();
+                                    event.preventDefault();
+                                    const pos = displayIndexPositions.get(index) ?? -1;
+                                    setFillSource(selectedRange ?? { minPosition: pos, maxPosition: pos, minCol: colIndex, maxCol: colIndex });
+                                    setFillFocus(null);
+                                  }}
+                                />
+                              )}
                             </TableCell>
                           );
                           })}
@@ -5428,7 +5762,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       )}
                     </div>
                   <div className="max-h-72 max-w-full overflow-auto border bg-background">
-                    <Table className={`${SHEET_TABLE_CLASS} min-w-[760px]`}>
+                    <Table containerClassName="overflow-visible" className={`${SHEET_TABLE_CLASS} min-w-[760px]`}>
                       <TableHeader className={SHEET_HEADER_CLASS}>
                         <TableRow>
                           <TableHead className={SHEET_ROW_HEADER_CLASS} />
@@ -5630,7 +5964,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <span className="inline-flex items-center gap-2"><Layers3 className="h-4 w-4" />Material needed</span>
                 </summary>
                 <div className="mt-3 max-h-[520px] overflow-auto border bg-background">
-                  <Table className={SHEET_TABLE_CLASS}>
+                  <Table containerClassName="overflow-visible" className={SHEET_TABLE_CLASS}>
                     <TableHeader className={SHEET_HEADER_CLASS}>
                       <TableRow>
                         <TableHead className={SHEET_ROW_HEADER_CLASS} />
@@ -5761,7 +6095,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       <span className="inline-flex items-center gap-2"><ShoppingCart className="h-4 w-4" />Grouped purchase summary</span>
                     </summary>
                     <div className="mt-3 overflow-auto border bg-background">
-                      <Table className={SHEET_TABLE_CLASS}>
+                      <Table containerClassName="overflow-visible" className={SHEET_TABLE_CLASS}>
                         <TableHeader className={SHEET_HEADER_CLASS}>
                           <TableRow>
                             <TableHead className={SHEET_ROW_HEADER_CLASS} />
@@ -5802,7 +6136,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 </div>
 
                 <div className="max-h-[620px] overflow-auto border bg-background">
-                  <Table className={SHEET_TABLE_CLASS}>
+                  <Table containerClassName="overflow-visible" className={SHEET_TABLE_CLASS}>
                     <TableHeader className={SHEET_HEADER_CLASS}>
                       <TableRow>
                         <TableHead className={SHEET_ROW_HEADER_CLASS} />
@@ -5958,7 +6292,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <RotateCcw className="h-4 w-4" />
                   Back to enquiry
                 </Button>
-                {canEditQuotation && (
+                {(canEditQuotation || canExportQuotes) && (
                   <>
                     <Button size="sm" onClick={() => exportCurrent("pdf")} disabled={!canExportFinal}>
                       {exporting === "pdf" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
@@ -6113,6 +6447,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     <div className="rounded-md border bg-background p-3"><div className="text-xs text-muted-foreground">GST</div><div className="text-lg font-semibold">{gst.toFixed(2)}</div></div>
                     <div className="rounded-md border bg-background p-3"><div className="text-xs text-muted-foreground">Grand total</div><div className="text-lg font-semibold">{grandTotal.toFixed(2)}</div></div>
                     <div className="rounded-md border bg-background p-3"><div className="text-xs text-muted-foreground">Cost total</div><div className="text-lg font-semibold">{pricingSummary.costTotal.toFixed(2)}</div></div>
+                    {isInternationalOrder && (
+                      <div className="rounded-md border border-primary/30 bg-primary/5 p-3">
+                        <div className="text-xs text-muted-foreground">Grand total (USD equiv.)</div>
+                        <div className="text-lg font-semibold">${grandTotalUsd.toFixed(2)}</div>
+                        <div className="text-[11px] text-muted-foreground">@ ₹{usdRate}/$</div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="rounded-md border bg-background p-3">
@@ -6126,6 +6467,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                         </Select>
                       </div>
                       <Field label="FX rate" value={getString(qd.fx_rate)} onChange={(value) => updateQd("fx_rate", Number(value))} type="number" disabled={!canEditQuotation} />
+                      {isInternationalOrder && (
+                        <Field label="USD conversion (₹/$)" value={getString(qd.usd_rate) || String(defaultFx.USD ?? 83)} onChange={(value) => updateQd("usd_rate", Number(value))} type="number" disabled={!canEditQuotation} />
+                      )}
                       <Field label="Approved discount %" value={getString(qd.discount_pct)} onChange={(value) => updateQd("discount_pct", Number(value))} type="number" disabled={!canEditQuotation} />
                       <div className="space-y-1.5">
                         <Label>GST type</Label>
@@ -6154,90 +6498,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
 
                 <TabsContent value="items" className="space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/30 px-3 py-2 text-sm">
-                    <div className="text-muted-foreground">Showing {items.length ? finalPageStartIndex + 1 : 0}-{finalPageEndIndex} of {items.length} quotation row(s).</div>
-                    <div className="flex items-center gap-2">
-                      <Button variant="secondary" size="sm" onClick={() => setFinalPage((page) => Math.max(0, page - 1))} disabled={safeFinalPage <= 0}>Previous</Button>
-                      <span className="text-xs text-muted-foreground">Page {safeFinalPage + 1} of {finalPageCount}</span>
-                      <Button variant="secondary" size="sm" onClick={() => setFinalPage((page) => Math.min(finalPageCount - 1, page + 1))} disabled={safeFinalPage >= finalPageCount - 1}>Next</Button>
+                    <div className="text-muted-foreground">{items.length} quotation row(s) — Excel-style pricing sheet.</div>
+                    <div className="text-xs text-muted-foreground">
+                      Click a cell and type · drag the corner handle to fill · paste from Excel · Ctrl+D fills down
                     </div>
                   </div>
-
-                  <div className="max-h-[620px] overflow-auto rounded-md border">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>#</TableHead>
-                          <TableHead>Cust Sl.No</TableHead>
-                          <TableHead>Customer item code</TableHead>
-                          <TableHead>Description</TableHead>
-                          <TableHead>Qty</TableHead>
-                          <TableHead>UOM</TableHead>
-                          <TableHead>Cost/unit</TableHead>
-                          <TableHead>Target margin %</TableHead>
-                          <TableHead>Base INR unit price</TableHead>
-                          <TableHead>{currency} unit price</TableHead>
-                          <TableHead>Margin %</TableHead>
-                          <TableHead>Discount impact</TableHead>
-                          <TableHead>Total {currency}</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {finalPageItems.map((item, pageIndex) => {
-                          const index = finalPageStartIndex + pageIndex;
-                          const price = unitPrices[index] ?? 0;
-                          const converted = currency === "INR" ? price : price / (fxRate || 1);
-                          const total = item.status === "regret" ? 0 : converted * toNumber(item.quantity);
-                          const pricingLine = pricingSummary.lines[index];
-                          return (
-                            <TableRow key={index}>
-                              <TableCell>{index + 1}</TableCell>
-                              <TableCell><Input className="w-24" value={getString(item.customer_sl_no)} onChange={(event) => updateItem(index, "customer_sl_no", event.target.value)} disabled={!canEditLineItems} /></TableCell>
-                              <TableCell><Input className="w-36" value={getString(item.customer_item_code)} onChange={(event) => updateItem(index, "customer_item_code", event.target.value)} disabled={!canEditLineItems} /></TableCell>
-                              <TableCell className="min-w-96 text-xs">
-                                {item.status === "regret" ? (
-                                  "REGRET - CANNOT PRODUCE"
-                                ) : (
-                                  <div className="space-y-1">
-                                    <div>{getString(item.raw_description || item.ggpl_description)}</div>
-                                    {item.ggpl_description && item.ggpl_description !== item.raw_description && <div className="text-muted-foreground">GGPL: {getString(item.ggpl_description)}</div>}
-                                  </div>
-                                )}
-                              </TableCell>
-                              <TableCell><Input className="w-24" type="number" value={getString(item.quantity)} onChange={(event) => updateItem(index, "quantity", event.target.value)} disabled={!canEditLineItems} /></TableCell>
-                              <TableCell>{getString(item.uom || "NOS")}</TableCell>
-                              <TableCell>
-                                <Input className="w-28" type="number" value={getString(costPrices[index] ?? 0)} disabled={!canEditQuotation} onChange={(event) => {
-                                  const next = [...costPrices];
-                                  next[index] = Number(event.target.value);
-                                  updateQd("cost_prices", next);
-                                }} />
-                              </TableCell>
-                              <TableCell>
-                                <Input className="w-28" type="number" value={getString(targetMargins[index] ?? 0)} disabled={!canEditQuotation} onChange={(event) => {
-                                  const next = [...targetMargins];
-                                  next[index] = Number(event.target.value);
-                                  updateQd("target_margins_pct", next);
-                                }} />
-                              </TableCell>
-                              <TableCell>
-                                <Input className="w-32" type="number" value={getString(price)} disabled={!canEditQuotation} onChange={(event) => {
-                                  const next = [...unitPrices];
-                                  next[index] = Number(event.target.value);
-                                  updateQd("unit_prices", next);
-                                }} />
-                              </TableCell>
-                              <TableCell>{converted.toFixed(2)}</TableCell>
-                              <TableCell className={pricingLine?.marginPct !== null && pricingLine?.marginPct !== undefined && pricingLine.marginPct < 0 ? "text-red-600" : ""}>
-                                {pricingLine?.marginPct === null || pricingLine?.marginPct === undefined ? "-" : pricingLine.marginPct.toFixed(1)}
-                              </TableCell>
-                              <TableCell>{(pricingLine?.discountImpact ?? 0).toFixed(2)}</TableCell>
-                              <TableCell>{total.toFixed(2)}</TableCell>
-                            </TableRow>
-                          );
-                        })}
-                      </TableBody>
-                    </Table>
-                  </div>
+                  <PricingGrid
+                    items={items}
+                    unitPrices={unitPrices}
+                    lineDiscounts={lineDiscounts}
+                    canEdit={canEditQuotation}
+                    onApply={(next) => updateQdMany(next)}
+                  />
                 </TabsContent>
 
                 <TabsContent value="terms" className="space-y-3">
@@ -6334,11 +6606,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                               <ShieldCheck className="h-4 w-4" />
                               Request approval
                             </Button>
-                            <Button onClick={() => decideApproval("approved")} disabled={!canApprove || approval.status !== "pending"}>
+                            <Button onClick={() => decideApproval("approved")} disabled={!canApprove || approval.status === "approved"}>
                               <CheckCircle2 className="h-4 w-4" />
                               Approve
                             </Button>
-                            <Button variant="secondary" onClick={() => decideApproval("rejected")} disabled={!canApprove || approval.status !== "pending"}>
+                            <Button variant="secondary" onClick={() => decideApproval("rejected")} disabled={!canApprove || approval.status === "rejected"}>
                               <Ban className="h-4 w-4" />
                               Reject
                             </Button>
@@ -6446,6 +6718,27 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               className="min-h-0 flex-1 rounded-md border bg-background"
             />
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={generatedDialogOpen} onOpenChange={setGeneratedDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Quotation generated</DialogTitle>
+            <DialogDescription>
+              The quotation has been generated. Preview it now or download the PDF to send to the customer.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button variant="secondary" onClick={() => { setGeneratedDialogOpen(false); void exportCurrent("pdf", "preview"); }}>
+              <FileText className="h-4 w-4" />
+              Preview
+            </Button>
+            <Button onClick={() => { setGeneratedDialogOpen(false); void exportCurrent("pdf"); }}>
+              <Download className="h-4 w-4" />
+              Download PDF
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

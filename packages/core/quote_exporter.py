@@ -309,7 +309,21 @@ def build_quotation_excel(
             ws.write(row, col_idx, hdr, f_tbl_hdr)
     row += 1
 
-    unit_prices = quote_data.get('unit_prices', [])
+    # Apply per-line discount % so the shown unit price is the net (final) price
+    # and totals match; missing/zero discount leaves the unit price unchanged.
+    raw_unit_prices = quote_data.get('unit_prices', []) or []
+    line_discounts = quote_data.get('line_discounts_pct', []) or []
+
+    def _line_disc(i):
+        try:
+            return max(float(line_discounts[i]) if i < len(line_discounts) else 0.0, 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    unit_prices = [
+        (float(up) if up else 0.0) * (1 - _line_disc(i) / 100)
+        for i, up in enumerate(raw_unit_prices)
+    ]
     total_qty = 0.0
     subtotal  = 0.0
 

@@ -67,7 +67,8 @@ def verify_session_token(token: str | None) -> SessionClaims | None:
 
 
 def session_cookie_params() -> dict[str, Any]:
-    secure = get_settings().environment.lower() in {"prod", "production"}
+    _s = get_settings()
+    secure = _s.session_cookie_secure if _s.session_cookie_secure is not None else (_s.environment.lower() in {"prod", "production"})
     return {
         "key": get_settings().auth_cookie_name,
         "httponly": True,
