@@ -511,17 +511,29 @@ _ITEM_TSTYLE = TableStyle([
 def _item_columns(quote_data: dict):
     include_customer_sl = _bool(quote_data.get("include_customer_sl_no"))
     include_customer_code = _bool(quote_data.get("include_customer_item_code"))
-    first_header = "Cust<br/>SL.NO" if include_customer_sl else "Sl.<br/>No."
-    columns = [
-        ("serial", Paragraph(first_header, _PS_HDR), 25.3),
+    include_ggpl_sl = _bool(quote_data.get("include_ggpl_sl_no"))
+    # Serial column(s): default is the plain sequential "Sl. No.". The customer
+    # flag swaps it for the customer's SL No; the GGPL flag keeps GGPL's own
+    # serial visible (so with both flags on, the PDF prints both columns).
+    columns = []
+    if include_customer_sl and include_ggpl_sl:
+        columns.append(("ggpl_serial", Paragraph("GGPL<br/>SL.NO", _PS_HDR), 34.0))
+        columns.append(("customer_serial", Paragraph("Cust<br/>SL.NO", _PS_HDR), 34.0))
+    elif include_customer_sl:
+        columns.append(("customer_serial", Paragraph("Cust<br/>SL.NO", _PS_HDR), 34.0))
+    elif include_ggpl_sl:
+        columns.append(("ggpl_serial", Paragraph("GGPL<br/>SL.NO", _PS_HDR), 34.0))
+    else:
+        columns.append(("ggpl_serial", Paragraph("Sl.<br/>No.", _PS_HDR), 25.3))
+    if include_customer_code:
+        columns.append(("customer_item_code", Paragraph("Customer<br/>Item Code", _PS_HDR), 70.0))
+    columns += [
         ("description", Paragraph("Material Description", _PS_HDR), 0),
         ("quantity", Paragraph("Quantity", _PS_HDR), 59.3),
         ("uom", Paragraph("UOM", _PS_HDR), 33.0),
         ("unit", None, 66.0),
         ("total", None, 71.4),
     ]
-    if include_customer_code:
-        columns.insert(1, ("customer_item_code", Paragraph("Customer<br/>Item Code", _PS_HDR), 70.0))
     fixed_width = sum(width for _, _, width in columns)
     desc_width = ITEM_COLS[-1] - ITEM_COLS[0] - fixed_width
     return [(key, header, desc_width if key == "description" else width) for key, header, width in columns]
@@ -532,7 +544,7 @@ def _item_table_style(desc_col: int, qty_col: int, uom_col: int, unit_col: int, 
         ('FONTNAME',      (0, 0), (-1,  0), 'Times-Bold'),
         ('FONTNAME',      (0, 1), (-1, -1), 'Times-Roman'),
         ('FONTSIZE',      (0, 0), (-1, -1), 8.5),
-        ('ALIGN',         (0, 0), (0, -1), 'CENTER'),
+        ('ALIGN',         (0, 0), (max(desc_col - 1, 0), -1), 'CENTER'),
         ('ALIGN',         (desc_col, 0), (desc_col, 0), 'CENTER'),
         ('ALIGN',         (desc_col, 1), (desc_col, -1), 'LEFT'),
         ('ALIGN',         (qty_col, 0), (qty_col, -1), 'RIGHT'),
@@ -608,7 +620,6 @@ def _make_items_table(
     quote_data: dict | None = None,
 ) -> Table:
     quote_data = quote_data or {}
-    include_customer_sl = _bool(quote_data.get("include_customer_sl_no"))
     columns = _item_columns(quote_data)
     keys = [key for key, _, _ in columns]
     header = [
@@ -623,7 +634,8 @@ def _make_items_table(
         quoted_qty = 0 if item.get("status") == "regret" else qty
         total = quoted_qty * unit
         values = {
-            "serial": str(item.get("customer_sl_no") or start_serial + i) if include_customer_sl else str(start_serial + i),
+            "ggpl_serial": str(start_serial + i),
+            "customer_serial": str(item.get("customer_sl_no") or start_serial + i),
             "customer_item_code": str(item.get("customer_item_code") or ""),
             "description": _description_cell(item),
             "quantity": _fmt_qty(qty),

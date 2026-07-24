@@ -10,11 +10,12 @@ import { toNumber } from "@/lib/api";
 // and a drag fill-handle on the selection corner. Editable columns are Unit
 // price and Discount %; everything else is read-only context.
 
-type ColKey = "sl" | "desc" | "qty" | "uom" | "unit" | "disc" | "final" | "total";
+type ColKey = "sl" | "desc" | "ggpl" | "qty" | "uom" | "unit" | "disc" | "final" | "total";
 
 const COLS: Array<{ key: ColKey; label: string; editable: boolean; className: string }> = [
   { key: "sl", label: "#", editable: false, className: "w-12 text-center" },
-  { key: "desc", label: "Description", editable: false, className: "min-w-[320px]" },
+  { key: "desc", label: "Description", editable: false, className: "min-w-[280px]" },
+  { key: "ggpl", label: "GGPL description", editable: false, className: "min-w-[280px]" },
   { key: "qty", label: "Qty", editable: false, className: "w-16 text-right" },
   { key: "uom", label: "UOM", editable: false, className: "w-16" },
   { key: "unit", label: "Unit price", editable: true, className: "w-28 text-right" },
@@ -84,6 +85,7 @@ export function PricingGrid({
     switch (COLS[col].key) {
       case "sl": return String(row + 1);
       case "desc": return item.status === "regret" ? "REGRET - CANNOT PRODUCE" : String(item.raw_description || item.ggpl_description || "");
+      case "ggpl": return item.status === "regret" ? "" : String(item.ggpl_description || "");
       case "qty": return String(item.quantity ?? "");
       case "uom": return String(item.uom || "NOS");
       case "unit": return String(unitPrices[row] ?? 0);
@@ -289,9 +291,9 @@ export function PricingGrid({
                     className={`relative border-b border-r px-2 py-1 align-middle last:border-r-0 ${col.className} ${col.editable && canEdit ? "cursor-cell" : "cursor-default"} ${
                       selected ? "bg-emerald-50 ring-1 ring-inset ring-emerald-400/60 dark:bg-emerald-950/20" : ""
                     } ${isActive ? "ring-2 ring-inset ring-emerald-600" : ""} ${isFillPreview ? "ring-1 ring-inset ring-emerald-500/70" : ""} ${
-                      col.key === "desc" ? "max-w-[420px] truncate text-xs" : ""
+                      col.key === "desc" || col.key === "ggpl" ? "max-w-[420px] truncate text-xs" : ""
                     }`}
-                    title={col.key === "desc" ? cellValue(row, colIndex) : undefined}
+                    title={col.key === "desc" || col.key === "ggpl" ? cellValue(row, colIndex) : undefined}
                     onMouseDown={(event) => {
                       if ((event.target as HTMLElement).closest("input")) return;
                       event.preventDefault();

@@ -6,6 +6,7 @@ import { Toaster } from "sonner";
 
 import { GasketChatWidget } from "@/components/chat/gasket-chat-widget";
 import { BackgroundJobMonitor } from "@/components/providers/background-job-monitor";
+import { NotificationListener } from "@/components/providers/notification-listener";
 import { PostHogProvider } from "@/lib/posthog";
 
 export function AppProviders({ children }: { children: React.ReactNode }) {
@@ -14,6 +15,7 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
       <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
         {children}
         <BackgroundJobMonitor />
+        <NotificationListener />
         <GasketChatWidget />
         <Toaster richColors position="top-right" closeButton />
       </ThemeProvider>

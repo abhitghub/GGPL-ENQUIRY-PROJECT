@@ -470,6 +470,17 @@ export async function exportQuote(id: string, type: "pdf" | "xlsx"): Promise<Sig
   );
 }
 
+// Excel register of every enquiry whose quotation has been generated, for
+// colleagues to browse past enquiries (customer, quote type, project, value).
+export async function exportEnquiryRegister(): Promise<SignedUrl> {
+  return parse<SignedUrl>(
+    await apiFetch(`${API_BASE}/api/v1/quotes/exports/enquiry-register`, {
+      method: "POST",
+      headers: headers(),
+    }),
+  );
+}
+
 // Enquiry -> priced-specs handoff pipeline (mirrors app/services/enquiry_workflow.py).
 export const ENQUIRY_WORKFLOW_STEPS = [
   { id: "enquiry", label: "Enquiry", team: "Sales" },

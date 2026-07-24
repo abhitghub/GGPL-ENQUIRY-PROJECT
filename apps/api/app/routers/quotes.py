@@ -24,6 +24,7 @@ from app.schemas.quotes import (
     WorkflowActionRequest,
 )
 from app.services.approved_quote_cache import cache_final_approved_quote
+from app.services.enquiry_register import REGISTER_FILENAME, build_enquiry_register_xlsx
 from app.services.enquiry_workflow import (
     TR_REQUIRED_GASKET_TYPES,
     active_step_ids,
@@ -34,6 +35,7 @@ from app.services.enquiry_workflow import (
     visible_steps_for_role,
 )
 from app.services.export_service import build_pdf, build_xlsx
+from app.services.notification_hub import notify_assignment, notify_change_query, notify_stage_change
 from app.services.quote_rules import (
     QuoteConflictError,
     QuoteValidationError,
@@ -420,10 +422,29 @@ def search_quotes(
 def create_quote(payload: QuoteCreate, user: CurrentUser = Depends(get_current_user)) -> QuoteRead:
     require_capability(user, "create_enquiry")
     try:
-        return repo.create_quote(user.org_id, user.user_id, _normalize_create_payload(payload, user))
+        created = repo.create_quote(user.org_id, user.user_id, _normalize_create_payload(payload, user))
     except (QuoteConflictError, QuoteValidationError) as exc:
         _raise_repo_error(exc)
         raise
+    # Real-time: the new enquiry lands in the first workflow stage's queue (and
+    # possibly on a specific owner's desk) — ping the connected browsers.
+    notify_stage_change(user, created, current_workflow_step(created.stage_meta), kind="enquiry_created")
+    notify_assignment(user, created, str((created.stage_meta or {}).get("owner_id") or ""))
+    # Legacy flow: creating a quotation record from an enquiry marks that
+    # enquiry as quoted — refresh the enquiry's Drive folder and the org-wide
+    # register (no-op unless Drive export is configured; never fails the request).
+    source_enquiry_id = str((created.stage_meta or {}).get("source_enquiry_id") or "").strip()
+    if source_enquiry_id:
+        try:
+            from app.services.gdrive_export import export_enquiry_package, export_enquiry_register
+
+            enquiry = repo.get_quote(user.org_id, source_enquiry_id)
+            if enquiry:
+                export_enquiry_package(enquiry, created)
+            export_enquiry_register(repo.list_quotes(user.org_id))
+        except Exception:
+            pass
+    return created
 
 
 @router.get("/quotes/{quote_id}", response_model=QuoteRead)
@@ -446,6 +467,9 @@ def patch_quote(
         raise
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
+    new_owner = str((quote.stage_meta or {}).get("owner_id") or "").strip()
+    if new_owner and new_owner != str((current.stage_meta or {}).get("owner_id") or "").strip():
+        notify_assignment(user, quote, new_owner)
     return quote
 
 
@@ -623,6 +647,32 @@ def export_xlsx(
     )
 
 
+@router.post("/quotes/exports/enquiry-register", response_model=SignedUrlResponse)
+def export_enquiry_register_xlsx(
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+) -> SignedUrlResponse:
+    """Excel register of every enquiry whose quotation has been generated —
+    customer, quote type, project, owner, value — so any colleague can download
+    the full history in one click. Rebuilt from the database on every call."""
+    _require_any_capability(user, READ_CAPABILITIES)
+    quotes = _enrich_customer_names(user.org_id, repo.list_quotes(user.org_id))
+    content = build_enquiry_register_xlsx(quotes)
+    filename = REGISTER_FILENAME
+    token = repo.save_export(
+        user.org_id,
+        content,
+        filename,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        export_type="enquiry_register",
+    )
+    return SignedUrlResponse(
+        signed_url=str(request.app.url_path_for("download_export", token=token)),
+        filename=filename,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 @router.get("/exports/{token}", name="download_export")
 def download_export(token: str, disposition: str = "attachment") -> Response:
     row = repo.get_export(token)
@@ -770,13 +820,19 @@ def advance_workflow(
         raise
     if not updated:
         raise HTTPException(status_code=404, detail="Quote not found")
-    # When a quotation is generated, mirror its Excel to Google Drive (no-op unless
-    # Drive export is configured; never fails the request).
+    # Real-time: tell the team that owns the destination stage that work just
+    # landed in their queue (the actor themselves is not notified).
+    notify_stage_change(user, updated, dest)
+    # When a quotation is generated, mirror the enquiry's full folder (details,
+    # line items, workflow history, quotation Excel) and the org-wide enquiry
+    # register to Google Drive (no-op unless Drive export is configured; never
+    # fails the request).
     if dest == "quotation_generated":
         try:
-            from app.services.gdrive_export import export_quote
+            from app.services.gdrive_export import export_enquiry_package, export_enquiry_register
 
-            export_quote(updated)
+            export_enquiry_package(updated)
+            export_enquiry_register(repo.list_quotes(user.org_id))
         except Exception:
             pass
     return updated
@@ -873,6 +929,8 @@ def raise_change_query(
         raise
     if not updated:
         raise HTTPException(status_code=404, detail="Quote not found")
+    # Real-time: pending queries are decided by approvers/admin — ping them.
+    notify_change_query(user, updated, target_label)
     return updated
 
 
@@ -900,6 +958,7 @@ def act_on_change_query(
     note = payload.note.strip()
     actor = user.name or user.user_id
     event = {"at": now_iso(), "by": actor, "role": user.role, "action": action, "note": note}
+    jump_dest: str | None = None
     if action in {"approve", "reject"}:
         if not can_approve(user):
             raise HTTPException(status_code=403, detail="Only an admin or approver can decide change queries")
@@ -908,7 +967,8 @@ def act_on_change_query(
         query["status"] = "approved" if action == "approve" else "rejected"
         if action == "approve":
             query["return_stage"] = current_workflow_step(stage_meta)
-            stage_meta = _jump_workflow_stage(stage_meta, str(query.get("target_stage")), user, "query_approved", note or str(query.get("note") or ""))
+            jump_dest = str(query.get("target_stage"))
+            stage_meta = _jump_workflow_stage(stage_meta, jump_dest, user, "query_approved", note or str(query.get("note") or ""))
         title = "Change query approved" if action == "approve" else "Change query rejected"
         detail = f"{query.get('target_label') or query.get('target_stage')} — {note or query.get('note')}"
     else:
@@ -920,6 +980,7 @@ def act_on_change_query(
         query["status"] = "resolved"
         return_stage = str(query.get("return_stage") or "")
         if return_stage in active_step_ids():
+            jump_dest = return_stage
             stage_meta = _jump_workflow_stage(stage_meta, return_stage, user, "query_resolved", note)
         title = "Change query resolved"
         detail = note or str(query.get("note") or "")
@@ -933,6 +994,10 @@ def act_on_change_query(
         raise
     if not updated:
         raise HTTPException(status_code=404, detail="Quote not found")
+    # Real-time: an approved/resolved query moved the enquiry to another team's
+    # queue — tell the receiving team.
+    if jump_dest:
+        notify_stage_change(user, updated, jump_dest)
     return updated
 
 

@@ -72,6 +72,7 @@ import {
   createExtraction,
   createQuote,
   deleteQuote,
+  exportEnquiryRegister,
   exportQuote,
   getAccessSettingsRemote,
   getBusinessMasterData,
@@ -169,6 +170,7 @@ const quoteDefaults: Record<string, unknown> = {
   quotation_stage_history: [],
   include_customer_sl_no: false,
   include_customer_item_code: false,
+  include_ggpl_sl_no: false,
   buyer_name_address: "",
   buyer_name: "",
   buyer_address_line1: "",
@@ -1355,6 +1357,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [rfiText, setRfiText] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const [exporting, setExporting] = React.useState<string | null>(null);
+  const [registerExporting, setRegisterExporting] = React.useState(false);
   const [intakeCollapsed, setIntakeCollapsed] = React.useState(false);
   const [enquirySetupOpen, setEnquirySetupOpen] = React.useState(false);
   const [quotationSetupOpen, setQuotationSetupOpen] = React.useState(false);
@@ -2825,6 +2828,19 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       toast.error(error instanceof Error ? error.message : "Export failed");
     } finally {
       setExporting(null);
+    }
+  }
+
+  async function downloadEnquiryRegister() {
+    setRegisterExporting(true);
+    try {
+      const response = await exportEnquiryRegister();
+      const url = response.signed_url.startsWith("http") ? response.signed_url : `${API_BASE}${response.signed_url}`;
+      window.open(url, "_blank");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not download the enquiry register");
+    } finally {
+      setRegisterExporting(false);
     }
   }
 
@@ -4583,6 +4599,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   </SelectContent>
                 </Select>
                 <div className="flex gap-1.5">
+                  {!isPoSection && !isMaterialSection && (
+                    <Button
+                      className="h-9"
+                      variant="secondary"
+                      onClick={downloadEnquiryRegister}
+                      disabled={registerExporting}
+                      title="Download the enquiry register — one Excel row per enquiry with a generated quotation"
+                    >
+                      {registerExporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
+                      Register
+                    </Button>
+                  )}
                   <Button className="h-9" variant="secondary" onClick={() => refreshQuotes().catch((error) => toast.error(error.message))} aria-label="Refresh quotes">
                     <RefreshCw className="h-4 w-4" />
                   </Button>
@@ -6883,6 +6911,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       <span>
                         <span className="block font-medium">Add customer item code to quotation PDF</span>
                         <span className="block text-xs text-muted-foreground">Keep disabled when the customer code is only for internal matching.</span>
+                      </span>
+                    </label>
+                    <label className="flex items-start gap-3 text-sm">
+                      <input className="mt-1" type="checkbox" checked={Boolean(qd.include_ggpl_sl_no)} onChange={(event) => updateQd("include_ggpl_sl_no", event.target.checked)} disabled={!canEditQuotation} />
+                      <span>
+                        <span className="block font-medium">Use GGPL serial no. in quotation PDF</span>
+                        <span className="block text-xs text-muted-foreground">Prints GGPL&apos;s own serial number for the gaskets. Enable together with customer SL No. to show both columns.</span>
                       </span>
                     </label>
                   </div>

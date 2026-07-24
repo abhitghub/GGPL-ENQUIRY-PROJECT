@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import threading
+import time
 import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -457,7 +458,16 @@ class LocalJsonRepository:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self._state, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(self._path)
+        # On Windows the target can be transiently locked by sync/antivirus
+        # tools (e.g. OneDrive) — retry the atomic swap briefly before failing.
+        for attempt in range(5):
+            try:
+                tmp.replace(self._path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
 
     def _quote_from_data(self, data: dict[str, Any]) -> QuoteRead:
         row = dict(data)

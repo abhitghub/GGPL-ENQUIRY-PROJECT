@@ -95,5 +95,31 @@ services:
       postgres:
         condition: service_healthy
 
+  # Nightly database backup: pg_dump the whole database into the Drive-synced
+  # folder (db-backups/), keeping the last 14 days. With Google Drive for
+  # Desktop syncing GDRIVE_HOST_DIR, a copy of ALL portal data lives off this
+  # machine — if the server dies, restore with:
+  #   docker compose -f docker-compose.prod.yml exec -T postgres \
+  #     pg_restore -U postgres -d gasket_quote --clean --if-exists /backup/<file>.dump
+  db-backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    command: >
+      sh -c 'while true; do
+        mkdir -p /gdrive/db-backups &&
+        pg_dump -h postgres -U postgres -d gasket_quote -F c
+          -f /gdrive/db-backups/gasket_quote-$$(date +%Y-%m-%d).dump &&
+        echo "[db-backup] saved gasket_quote-$$(date +%Y-%m-%d).dump" &&
+        ls -1t /gdrive/db-backups/gasket_quote-*.dump 2>/dev/null | tail -n +15 | xargs -r rm --;
+        sleep 86400;
+      done'
+    volumes:
+      - ${GDRIVE_HOST_DIR:-./gdrive-out}:/gdrive
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres-data:
