@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from core.formatter import format_description
@@ -11,6 +13,8 @@ from app.schemas.common import APIMessage, SignedUrlResponse, StageHistoryEntry
 from app.schemas.quotes import (
     BulkItemsRequest,
     BulkRecomputeRequest,
+    ChangeQueryActionRequest,
+    ChangeQueryCreateRequest,
     QuoteCreate,
     QuotePatch,
     QuoteRead,
@@ -20,14 +24,18 @@ from app.schemas.quotes import (
     WorkflowActionRequest,
 )
 from app.services.approved_quote_cache import cache_final_approved_quote
+from app.services.enquiry_register import REGISTER_FILENAME, build_enquiry_register_xlsx
 from app.services.enquiry_workflow import (
     TR_REQUIRED_GASKET_TYPES,
+    active_step_ids,
+    active_steps,
     active_transitions,
     can_act_on_step,
     current_workflow_step,
     visible_steps_for_role,
 )
 from app.services.export_service import build_pdf, build_xlsx
+from app.services.notification_hub import notify_assignment, notify_change_query, notify_stage_change
 from app.services.quote_rules import (
     QuoteConflictError,
     QuoteValidationError,
@@ -191,10 +199,11 @@ def _canonical_owner_metadata(stage_meta: dict, current: QuoteRead | None, user:
         normalize_identity(user.name),
     }
     assigning_to_self = owner_id in actor_aliases
-    # Anyone may own (or keep owning) their own record; only assigning a record
-    # to a different user is restricted to admins.
-    if owner_changed and not assigning_to_self and user.role != "admin":
-        raise HTTPException(status_code=403, detail="Only admin users can assign or reassign records")
+    # Anyone may own (or keep owning) their own record. Assigning a record to a
+    # different user is for estimation (who decides the sales owner when they
+    # create the enquiry), management, and admin.
+    if owner_changed and not assigning_to_self and user.role not in {"admin", "estimation", "management"}:
+        raise HTTPException(status_code=403, detail="Only estimation, management, or admin users can assign or reassign records")
     users = repo.list_app_users(user.org_id)
     owner = next(
         (
@@ -242,9 +251,12 @@ def _normalize_create_payload(payload: QuoteCreate, user: CurrentUser) -> QuoteC
     if stage_meta.get("owner_id"):
         requested_owner = normalize_identity(stage_meta.get("owner_id"))
         current_aliases = {normalize_identity(user.user_id), normalize_identity(user.email), normalize_identity(user.name)}
-        if user.role != "admin" and requested_owner not in current_aliases:
-            raise HTTPException(status_code=403, detail="Only admin users can assign a new record to another user")
-        if user.role != "admin":
+        # Estimation creates enquiries and decides which sales person owns them,
+        # so it (and management/admin) may assign a new record to another user.
+        assigner_roles = {"admin", "estimation", "management"}
+        if user.role not in assigner_roles and requested_owner not in current_aliases:
+            raise HTTPException(status_code=403, detail="Only estimation, management, or admin users can assign a new record to another user")
+        if user.role not in assigner_roles:
             stage_meta["owner_id"] = user.user_id
         stage_meta = _canonical_owner_metadata(stage_meta, None, user)
     return payload.model_copy(update={"stage_meta": stage_meta, "customer": customer, "quote_data": quote_data})
@@ -410,10 +422,29 @@ def search_quotes(
 def create_quote(payload: QuoteCreate, user: CurrentUser = Depends(get_current_user)) -> QuoteRead:
     require_capability(user, "create_enquiry")
     try:
-        return repo.create_quote(user.org_id, user.user_id, _normalize_create_payload(payload, user))
+        created = repo.create_quote(user.org_id, user.user_id, _normalize_create_payload(payload, user))
     except (QuoteConflictError, QuoteValidationError) as exc:
         _raise_repo_error(exc)
         raise
+    # Real-time: the new enquiry lands in the first workflow stage's queue (and
+    # possibly on a specific owner's desk) — ping the connected browsers.
+    notify_stage_change(user, created, current_workflow_step(created.stage_meta), kind="enquiry_created")
+    notify_assignment(user, created, str((created.stage_meta or {}).get("owner_id") or ""))
+    # Legacy flow: creating a quotation record from an enquiry marks that
+    # enquiry as quoted — refresh the enquiry's Drive folder and the org-wide
+    # register (no-op unless Drive export is configured; never fails the request).
+    source_enquiry_id = str((created.stage_meta or {}).get("source_enquiry_id") or "").strip()
+    if source_enquiry_id:
+        try:
+            from app.services.gdrive_export import export_enquiry_package, export_enquiry_register
+
+            enquiry = repo.get_quote(user.org_id, source_enquiry_id)
+            if enquiry:
+                export_enquiry_package(enquiry, created)
+            export_enquiry_register(repo.list_quotes(user.org_id))
+        except Exception:
+            pass
+    return created
 
 
 @router.get("/quotes/{quote_id}", response_model=QuoteRead)
@@ -436,6 +467,9 @@ def patch_quote(
         raise
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
+    new_owner = str((quote.stage_meta or {}).get("owner_id") or "").strip()
+    if new_owner and new_owner != str((current.stage_meta or {}).get("owner_id") or "").strip():
+        notify_assignment(user, quote, new_owner)
     return quote
 
 
@@ -577,8 +611,11 @@ def export_pdf(
     visible_quote_no = str(quote.quote_data.get("quote_no") or "").strip()
     filename = f"{(visible_quote_no or quote.quote_no or 'quotation').replace('/', '-')}.pdf"
     token = repo.save_export(user.org_id, content, filename, "application/pdf", quote_id=quote_id, export_type="pdf")
+    # Return a RELATIVE path: behind the Next.js proxy the API only sees the
+    # Docker-internal host (http://api:8000), so an absolute url_for() link is
+    # unreachable from the user's browser. The frontend prefixes API_BASE.
     return SignedUrlResponse(
-        signed_url=str(request.url_for("download_export", token=token)),
+        signed_url=str(request.app.url_path_for("download_export", token=token)),
         filename=filename,
         content_type="application/pdf",
     )
@@ -604,7 +641,33 @@ def export_xlsx(
         export_type="xlsx",
     )
     return SignedUrlResponse(
-        signed_url=str(request.url_for("download_export", token=token)),
+        signed_url=str(request.app.url_path_for("download_export", token=token)),
+        filename=filename,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@router.post("/quotes/exports/enquiry-register", response_model=SignedUrlResponse)
+def export_enquiry_register_xlsx(
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+) -> SignedUrlResponse:
+    """Excel register of every enquiry whose quotation has been generated —
+    customer, quote type, project, owner, value — so any colleague can download
+    the full history in one click. Rebuilt from the database on every call."""
+    _require_any_capability(user, READ_CAPABILITIES)
+    quotes = _enrich_customer_names(user.org_id, repo.list_quotes(user.org_id))
+    content = build_enquiry_register_xlsx(quotes)
+    filename = REGISTER_FILENAME
+    token = repo.save_export(
+        user.org_id,
+        content,
+        filename,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        export_type="enquiry_register",
+    )
+    return SignedUrlResponse(
+        signed_url=str(request.app.url_path_for("download_export", token=token)),
         filename=filename,
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
@@ -757,15 +820,184 @@ def advance_workflow(
         raise
     if not updated:
         raise HTTPException(status_code=404, detail="Quote not found")
-    # When a quotation is generated, mirror its Excel to Google Drive (no-op unless
-    # Drive export is configured; never fails the request).
+    # Real-time: tell the team that owns the destination stage that work just
+    # landed in their queue (the actor themselves is not notified).
+    notify_stage_change(user, updated, dest)
+    # When a quotation is generated, mirror the enquiry's full folder (details,
+    # line items, workflow history, quotation Excel) and the org-wide enquiry
+    # register to Google Drive (no-op unless Drive export is configured; never
+    # fails the request).
     if dest == "quotation_generated":
         try:
-            from app.services.gdrive_export import export_quote
+            from app.services.gdrive_export import export_enquiry_package, export_enquiry_register
 
-            export_quote(updated)
+            export_enquiry_package(updated)
+            export_enquiry_register(repo.list_quotes(user.org_id))
         except Exception:
             pass
+    return updated
+
+
+def _step_label_and_team(step_id: str) -> tuple[str, str]:
+    for step in active_steps():
+        if step["id"] == step_id:
+            return step["label"], step.get("team") or ""
+    return step_id, ""
+
+
+def _jump_workflow_stage(stage_meta: dict, dest: str, user: CurrentUser, action: str, comment: str) -> dict:
+    """Move the workflow pointer outside the normal transition table (approved
+    change-queries re-order the flow, e.g. pricing -> back to estimation). The
+    jump is recorded in the same granular history_log the regular advance
+    endpoint writes, so the audit trail stays in one place."""
+    origin = current_workflow_step(stage_meta)
+    _, team = _step_label_and_team(dest)
+    stage_meta["workflow_stage"] = dest
+    if team:
+        stage_meta["with_whom"] = team
+    granular = dict(stage_meta.get("granular_workflow") or {})
+    history = list(granular.get("history_log") or [])
+    history.append(
+        {
+            "action": action,
+            "from": origin,
+            "to": dest,
+            "by": user.name or user.user_id,
+            "role": user.role,
+            "at": now_iso(),
+            "comment": comment,
+        }
+    )
+    granular["current_stage"] = dest
+    granular["assigned_team"] = team or granular.get("assigned_team")
+    granular["history_log"] = history[-100:]
+    stage_meta["granular_workflow"] = granular
+    return stage_meta
+
+
+@router.post("/quotes/{quote_id}/queries", response_model=QuoteRead)
+def raise_change_query(
+    quote_id: str,
+    payload: ChangeQueryCreateRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> QuoteRead:
+    """Raise a change query on an enquiry (e.g. pricing learns of a quantity
+    change and needs estimation to redo the numbers). The query is parked as
+    pending until an approver/admin decides it; approval jumps the enquiry to
+    the requested stage and records the round trip in the history log."""
+    if user.role == "viewer":
+        raise HTTPException(status_code=403, detail="Viewers cannot raise change queries")
+    current = _quote_or_404(user, quote_id)
+    note = payload.note.strip()
+    if not note:
+        raise HTTPException(status_code=422, detail="Add a note describing the change that is needed")
+    target = payload.target_stage.strip()
+    if target not in active_step_ids():
+        raise HTTPException(status_code=400, detail=f"Unknown workflow stage: {target}")
+    stage_meta = dict(current.stage_meta or {})
+    target_label, target_team = _step_label_and_team(target)
+    raised_at = now_iso()
+    raiser = user.name or user.user_id
+    queries = [dict(entry) for entry in (stage_meta.get("change_queries") or [])]
+    queries.append(
+        {
+            "id": f"qry-{uuid.uuid4().hex[:10]}",
+            "raised_by": raiser,
+            "raised_by_role": user.role,
+            "from_stage": current_workflow_step(stage_meta),
+            "target_stage": target,
+            "target_label": target_label,
+            "target_team": target_team,
+            "note": note,
+            "status": "pending_approval",
+            "created_at": raised_at,
+            "history": [{"at": raised_at, "by": raiser, "role": user.role, "action": "raised", "note": note}],
+        }
+    )
+    stage_meta["change_queries"] = queries[-50:]
+    stage_meta = append_activity(
+        stage_meta,
+        kind="query",
+        title="Change query raised",
+        detail=f"To {target_label} (awaiting approval) — {note}",
+        user=raiser,
+    )
+    try:
+        updated = repo.update_quote(user.org_id, quote_id, QuotePatch(stage_meta=stage_meta), actor_id=user.user_id)
+    except (QuoteConflictError, QuoteValidationError) as exc:
+        _raise_repo_error(exc)
+        raise
+    if not updated:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    # Real-time: pending queries are decided by approvers/admin — ping them.
+    notify_change_query(user, updated, target_label)
+    return updated
+
+
+@router.post("/quotes/{quote_id}/queries/{query_id}/action", response_model=QuoteRead)
+def act_on_change_query(
+    quote_id: str,
+    query_id: str,
+    payload: ChangeQueryActionRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> QuoteRead:
+    """Decide or close a change query. approve/reject need an approver/admin;
+    approve jumps the enquiry to the query's target stage (remembering where it
+    was). resolve is done by the team that made the change and sends the enquiry
+    back to the remembered stage. Every step is appended to the query's own
+    history plus the quote-level logs."""
+    current = _quote_or_404(user, quote_id)
+    action = payload.action.strip().lower()
+    if action not in {"approve", "reject", "resolve"}:
+        raise HTTPException(status_code=400, detail=f"Unknown query action: {payload.action}")
+    stage_meta = dict(current.stage_meta or {})
+    queries = [dict(entry) for entry in (stage_meta.get("change_queries") or [])]
+    query = next((entry for entry in queries if entry.get("id") == query_id), None)
+    if query is None:
+        raise HTTPException(status_code=404, detail="Change query not found")
+    note = payload.note.strip()
+    actor = user.name or user.user_id
+    event = {"at": now_iso(), "by": actor, "role": user.role, "action": action, "note": note}
+    jump_dest: str | None = None
+    if action in {"approve", "reject"}:
+        if not can_approve(user):
+            raise HTTPException(status_code=403, detail="Only an admin or approver can decide change queries")
+        if query.get("status") != "pending_approval":
+            raise HTTPException(status_code=409, detail=f"This query is already {query.get('status', 'decided')}")
+        query["status"] = "approved" if action == "approve" else "rejected"
+        if action == "approve":
+            query["return_stage"] = current_workflow_step(stage_meta)
+            jump_dest = str(query.get("target_stage"))
+            stage_meta = _jump_workflow_stage(stage_meta, jump_dest, user, "query_approved", note or str(query.get("note") or ""))
+        title = "Change query approved" if action == "approve" else "Change query rejected"
+        detail = f"{query.get('target_label') or query.get('target_stage')} — {note or query.get('note')}"
+    else:
+        if query.get("status") != "approved":
+            raise HTTPException(status_code=409, detail="Only an approved query can be marked resolved")
+        step = current_workflow_step(stage_meta)
+        if not can_act_on_step(user.role, step):
+            raise HTTPException(status_code=403, detail=f"Your role cannot resolve queries while the enquiry is at stage '{step}'")
+        query["status"] = "resolved"
+        return_stage = str(query.get("return_stage") or "")
+        if return_stage in active_step_ids():
+            jump_dest = return_stage
+            stage_meta = _jump_workflow_stage(stage_meta, return_stage, user, "query_resolved", note)
+        title = "Change query resolved"
+        detail = note or str(query.get("note") or "")
+    query["history"] = [*list(query.get("history") or []), event]
+    stage_meta["change_queries"] = queries
+    stage_meta = append_activity(stage_meta, kind="query", title=title, detail=detail, user=actor)
+    try:
+        updated = repo.update_quote(user.org_id, quote_id, QuotePatch(stage_meta=stage_meta), actor_id=user.user_id)
+    except (QuoteConflictError, QuoteValidationError) as exc:
+        _raise_repo_error(exc)
+        raise
+    if not updated:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    # Real-time: an approved/resolved query moved the enquiry to another team's
+    # queue — tell the receiving team.
+    if jump_dest:
+        notify_stage_change(user, updated, jump_dest)
     return updated
 
 

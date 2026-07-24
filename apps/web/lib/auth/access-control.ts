@@ -93,13 +93,15 @@ export const defaultAccessSettings: AccessSettings = {
       "view_dashboard", "view_enquiry", "view_quotation", "view_purchase_orders", "view_history",
       "edit_workflow", "edit_line_items", "edit_quotation", "approve_quotes", "export_quotes",
     ]),
+    // Estimation (not sales) creates enquiries and assigns the sales owner;
+    // sales works the customer-facing steps (queries, sending quotations).
     sales: permissions([
       "view_dashboard", "view_enquiry", "view_quotation", "view_purchase_orders", "view_doc_assistant", "view_history",
-      "create_enquiry", "edit_sales_details", "edit_line_items", "export_quotes",
+      "edit_sales_details", "edit_line_items", "export_quotes",
     ]),
     estimation: permissions([
       "view_dashboard", "view_enquiry", "view_doc_assistant", "view_history",
-      "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
+      "create_enquiry", "edit_sales_details", "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
     ]),
     technical: permissions([
       "view_dashboard", "view_enquiry", "view_doc_assistant", "view_history",

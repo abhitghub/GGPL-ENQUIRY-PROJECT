@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .observability import configure_observability
-from .routers import access_settings, auth, chat, converter, customers, dashboard, docs, extraction, health, outlook, quotes, users
+from .routers import access_settings, auth, chat, converter, customers, dashboard, docs, extraction, health, notifications, outlook, quotes, users
 
 
 settings = get_settings()
@@ -40,3 +40,4 @@ app.include_router(chat.router)
 app.include_router(docs.router)
 app.include_router(converter.router)
 app.include_router(outlook.router)
+app.include_router(notifications.router)

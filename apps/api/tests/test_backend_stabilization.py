@@ -38,13 +38,21 @@ def test_assignment_visibility_inheritance_and_legacy_owner_matching():
     estimator_id = create_user(org_id, admin_headers, name="Estimator", role="estimation")
     other_id = create_user(org_id, admin_headers, name="Other Estimator", role="estimation")
 
-    # Enquiry creation is restricted to sales + admin; estimation gets 403.
+    # Enquiry creation is an estimation duty (estimation assigns the sales
+    # owner); sales gets 403 and estimation succeeds.
+    sales_id = create_user(org_id, admin_headers, name="Sales Person", role="sales")
     forbidden = client.post(
         "/api/v1/quotes",
-        headers=headers(org_id, estimator_id),
+        headers=headers(org_id, sales_id),
         json={"customer": "Owned customer", "items": [], "stage_meta": {}},
     )
     assert forbidden.status_code == 403
+    allowed = client.post(
+        "/api/v1/quotes",
+        headers=headers(org_id, estimator_id),
+        json={"customer": "Estimation-created", "items": [], "stage_meta": {}},
+    )
+    assert allowed.status_code == 201
 
     created = client.post(
         "/api/v1/quotes",

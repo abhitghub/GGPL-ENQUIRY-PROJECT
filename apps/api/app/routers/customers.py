@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.db import repo
 from app.deps import CurrentUser, can_manage_users, get_current_user, require_capability
-from app.schemas.customers import ContactCreate, ContactPerson, CustomerCreate, CustomerRecord, CustomerSettings
+from app.schemas.customers import ContactCreate, ContactPerson, CustomerCreate, CustomerRecord, CustomerSettings, EpcNameCreate
 
 router = APIRouter(prefix="/api/v1", tags=["customers"])
 
@@ -62,6 +62,22 @@ def add_customer(payload: CustomerCreate, user: CurrentUser = Depends(get_curren
     settings.customers.append(record)
     repo.update_customer_settings(user.org_id, settings)
     return record
+
+
+@router.post("/customers/epc-names", response_model=CustomerSettings)
+def add_epc_name(payload: EpcNameCreate, user: CurrentUser = Depends(get_current_user)) -> CustomerSettings:
+    """Append an EPC / project company to the master list, allowed to anyone who
+    can create enquiries (so sales can add one while filling the enquiry setup
+    instead of waiting for an admin). Adding an existing name is a no-op."""
+    require_capability(user, "create_enquiry")
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="EPC / company name is required")
+    settings = repo.get_customer_settings(user.org_id)
+    if not any(existing.strip().lower() == name.lower() for existing in settings.epc_names):
+        settings.epc_names.append(name)
+        repo.update_customer_settings(user.org_id, settings)
+    return settings
 
 
 @router.post("/customers/records/{record_id}/contacts", response_model=CustomerRecord)

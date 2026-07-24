@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import * as React from "react";
-import { ClipboardList, RefreshCw } from "lucide-react";
+import { ClipboardList, FileSpreadsheet, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { EmptyState } from "@/components/app-shell/empty-state";
@@ -11,21 +11,24 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
+  API_BASE,
   GRANULAR_ENQUIRY_WORKFLOW_ACTIONS,
   GRANULAR_ENQUIRY_WORKFLOW_STEPS,
   GRANULAR_WORKFLOW,
   Quote,
   advanceEnquiryWorkflow,
+  exportEnquiryRegister,
   getCurrentAppUserRemote,
   listQuotes,
 } from "@/lib/api";
+import { WORK_NOTIFICATION_EVENT } from "@/components/providers/notification-listener";
 import { getCurrentAppUser, setCurrentAppUser } from "@/lib/auth/users";
 
 // Which granular stage each role OWNS (mirrors GRANULAR_STAGE_OWNER_ROLES in
 // apps/api/app/services/enquiry_workflow.py). A role's dashboard shows ONLY
 // enquiries currently parked at a stage it owns.
 const STEP_OWNER_ROLES: Record<string, string[]> = {
-  enquiry_received: ["sales"],
+  enquiry_received: ["estimation"],
   forwarded_to_estimation: ["estimation"],
   spec_check: ["estimation"],
   query_raised_to_customer: ["sales"],
@@ -95,23 +98,48 @@ export function RoleDashboardClient() {
   const [currentUser, setCurrentUser] = React.useState(() => getCurrentAppUser());
   const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState<string | null>(null);
+  const [registerExporting, setRegisterExporting] = React.useState(false);
 
-  const refresh = React.useCallback(async () => {
-    setLoading(true);
+  async function downloadEnquiryRegister() {
+    setRegisterExporting(true);
+    try {
+      const response = await exportEnquiryRegister();
+      const url = response.signed_url.startsWith("http") ? response.signed_url : `${API_BASE}${response.signed_url}`;
+      window.open(url, "_blank");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not download the enquiry register");
+    } finally {
+      setRegisterExporting(false);
+    }
+  }
+
+  const refresh = React.useCallback(async (options?: { silent?: boolean }) => {
+    if (!options?.silent) setLoading(true);
     try {
       const [current, quoteData] = await Promise.all([getCurrentAppUserRemote(), listQuotes()]);
       setCurrentAppUser(current);
       setCurrentUser(current);
       setQuotes(quoteData);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not load your queue");
+      if (!options?.silent) toast.error(error instanceof Error ? error.message : "Could not load your queue");
     } finally {
-      setLoading(false);
+      if (!options?.silent) setLoading(false);
     }
   }, []);
 
   React.useEffect(() => {
     refresh();
+  }, [refresh]);
+
+  // Live updates: the global NotificationListener re-broadcasts every pushed
+  // work notification as a window event — reload the queue in place so new
+  // work appears without a manual refresh.
+  React.useEffect(() => {
+    const onWorkNotification = () => {
+      void refresh({ silent: true });
+    };
+    window.addEventListener(WORK_NOTIFICATION_EVENT, onWorkNotification);
+    return () => window.removeEventListener(WORK_NOTIFICATION_EVENT, onWorkNotification);
   }, [refresh]);
 
   const role = currentUser.role;
@@ -151,9 +179,21 @@ export function RoleDashboardClient() {
             Enquiries waiting on your team ({role}). You can only act on stages your role owns.
           </div>
         </div>
-        <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
-          <RefreshCw className="mr-2 h-4 w-4" /> Refresh
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={downloadEnquiryRegister}
+            disabled={registerExporting}
+            title="Download the enquiry register — one Excel row per enquiry with a generated quotation"
+          >
+            {registerExporting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileSpreadsheet className="mr-2 h-4 w-4" />}
+            Register
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => refresh()} disabled={loading}>
+            <RefreshCw className="mr-2 h-4 w-4" /> Refresh
+          </Button>
+        </div>
       </div>
 
       {!GRANULAR_WORKFLOW ? (

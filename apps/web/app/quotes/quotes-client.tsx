@@ -24,6 +24,7 @@ import {
   Mail,
   Layers3,
   Maximize2,
+  MessageSquarePlus,
   Minimize2,
   MoreHorizontal,
   PanelRight,
@@ -47,6 +48,7 @@ import { toast } from "sonner";
 import {
   API_BASE,
   BusinessMasterData,
+  ChangeQuery,
   ContactPerson,
   CustomerRecord,
   ENQUIRY_WORKFLOW_ACTIONS,
@@ -60,14 +62,17 @@ import {
   NewCustomerInput,
   OutlookLinkedMessage,
   Quote,
+  actOnChangeQuery,
   addCustomerContact,
   addCustomerRecord,
+  addEpcName,
   advanceEnquiryWorkflow,
   advanceQuoteStage,
   bulkRecompute,
   createExtraction,
   createQuote,
   deleteQuote,
+  exportEnquiryRegister,
   exportQuote,
   getAccessSettingsRemote,
   getBusinessMasterData,
@@ -78,6 +83,8 @@ import {
   listQuotes,
   listOutlookThreadMessages,
   patchQuote,
+  raiseChangeQuery,
+  readChangeQueries,
   reprocessText,
   resolveOutlookMessage,
   rfiDraft,
@@ -163,6 +170,7 @@ const quoteDefaults: Record<string, unknown> = {
   quotation_stage_history: [],
   include_customer_sl_no: false,
   include_customer_item_code: false,
+  include_ggpl_sl_no: false,
   buyer_name_address: "",
   buyer_name: "",
   buyer_address_line1: "",
@@ -633,6 +641,91 @@ const GRID_TEXTAREA_CLASS =
 const GRID_READONLY_CLASS = "bg-muted/30 text-muted-foreground";
 // Number inputs are typed manually — hide the browser's increment/decrement spinners.
 const NO_SPINNER_CLASS = "[appearance:textfield] [&::-webkit-inner-spin-button]:hidden [&::-webkit-outer-spin-button]:hidden";
+const QUERY_STATUS_LABELS: Record<string, string> = {
+  pending_approval: "Awaiting approval",
+  approved: "Approved — change in progress",
+  rejected: "Rejected",
+  resolved: "Resolved",
+};
+const QUERY_EVENT_LABELS: Record<string, string> = {
+  raised: "raised the query",
+  approve: "approved",
+  reject: "rejected",
+  resolve: "marked it resolved",
+};
+
+// --- Excel-style helpers for the material planning sheets -------------------
+type SheetSort = { field: string; direction: "asc" | "desc" } | null;
+
+// Which original row indexes are visible, given per-column filters and a sort.
+// Works on indexes (not rows) so edits keep targeting the right underlying row.
+function sheetVisibleIndexes(rows: Array<Record<string, unknown>>, filters: Record<string, string>, sort: SheetSort): number[] {
+  const active = Object.entries(filters).filter(([, value]) => value.trim());
+  let indexes = rows.map((_, index) => index);
+  if (active.length) {
+    indexes = indexes.filter((index) =>
+      active.every(([field, value]) => getString(rows[index][field]).toLowerCase().includes(value.trim().toLowerCase())),
+    );
+  }
+  if (sort) {
+    const direction = sort.direction === "asc" ? 1 : -1;
+    indexes = [...indexes].sort((a, b) => {
+      const left = getString(rows[a][sort.field]);
+      const right = getString(rows[b][sort.field]);
+      const leftNum = Number(left);
+      const rightNum = Number(right);
+      if (left !== "" && right !== "" && Number.isFinite(leftNum) && Number.isFinite(rightNum)) return (leftNum - rightNum) * direction;
+      return left.localeCompare(right, undefined, { numeric: true }) * direction;
+    });
+  }
+  return indexes;
+}
+
+// Excel-style column header: label, sort toggle (asc -> desc -> off) and a
+// per-column filter box. Pass no field for plain, non-sortable headers.
+function SheetHead({
+  label,
+  width,
+  field,
+  sort,
+  onSort,
+  filters,
+  onFilter,
+}: {
+  label: string;
+  width?: string;
+  field?: string;
+  sort?: SheetSort;
+  onSort?: (field: string) => void;
+  filters?: Record<string, string>;
+  onFilter?: (field: string, value: string) => void;
+}) {
+  return (
+    <TableHead className={`${SHEET_HEAD_CLASS} ${width ?? ""} align-top`}>
+      <div className="flex min-h-6 items-center justify-between gap-1">
+        <span className="truncate">{label}</span>
+        {field && onSort ? (
+          <button
+            type="button"
+            className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm border text-muted-foreground hover:bg-background ${sort?.field === field ? "bg-background text-foreground" : ""}`}
+            onClick={() => onSort(field)}
+            title={`Sort by ${label}`}
+          >
+            {sort?.field === field && sort.direction === "desc" ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}
+          </button>
+        ) : null}
+      </div>
+      {field && onFilter ? (
+        <input
+          value={filters?.[field] ?? ""}
+          onChange={(event) => onFilter(field, event.target.value)}
+          placeholder="Filter"
+          className="mb-1 mt-1 h-6 w-full min-w-16 rounded-sm border bg-background px-1.5 text-[11px] font-normal outline-none focus:ring-1 focus:ring-emerald-600"
+        />
+      ) : null}
+    </TableHead>
+  );
+}
 const SHEET_TABLE_CLASS = "w-max min-w-full border-collapse text-xs [&_td]:border-r [&_td]:border-b [&_th]:border-r [&_th]:border-b";
 const SHEET_HEADER_CLASS = "sticky top-0 z-20 bg-[#f3f3f3] dark:bg-muted";
 const SHEET_HEAD_CLASS = "h-8 whitespace-nowrap bg-[#f3f3f3] px-2 py-1 text-xs font-semibold text-foreground dark:bg-muted";
@@ -1264,6 +1357,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [rfiText, setRfiText] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const [exporting, setExporting] = React.useState<string | null>(null);
+  const [registerExporting, setRegisterExporting] = React.useState(false);
   const [intakeCollapsed, setIntakeCollapsed] = React.useState(false);
   const [enquirySetupOpen, setEnquirySetupOpen] = React.useState(false);
   const [quotationSetupOpen, setQuotationSetupOpen] = React.useState(false);
@@ -1276,16 +1370,45 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [addContactOpen, setAddContactOpen] = React.useState(false);
   const [addingContact, setAddingContact] = React.useState(false);
   const [newContact, setNewContact] = React.useState<NewContactInput>({ name: "" });
+  const [raiseQueryOpen, setRaiseQueryOpen] = React.useState(false);
+  const [raiseQueryTarget, setRaiseQueryTarget] = React.useState("");
+  const [raiseQueryNote, setRaiseQueryNote] = React.useState("");
+  const [raisingQuery, setRaisingQuery] = React.useState(false);
+  const [queryActionNotes, setQueryActionNotes] = React.useState<Record<string, string>>({});
+  const [actingQueryId, setActingQueryId] = React.useState<string | null>(null);
   const [rowEditorOpen, setRowEditorOpen] = React.useState(false);
   const [materialBreakdown, setMaterialBreakdown] = React.useState<MaterialBreakdownRow[] | null>(null);
   const [materialInputs, setMaterialInputs] = React.useState<MaterialInputRow[]>([]);
   const [materialPlan, setMaterialPlan] = React.useState<MaterialPlan | null>(null);
+  // "all" or a gasket type (RTJ, SPIRAL_WOUND, ...) — lets planners view one material at a time.
+  const [materialTypeFilter, setMaterialTypeFilter] = React.useState("all");
+  // Excel-style per-column sort + filters for the two material planning sheets.
+  const [breakdownSort, setBreakdownSort] = React.useState<SheetSort>(null);
+  const [breakdownFilters, setBreakdownFilters] = React.useState<Record<string, string>>({});
+  const [planSort, setPlanSort] = React.useState<SheetSort>(null);
+  const [planFilters, setPlanFilters] = React.useState<Record<string, string>>({});
   const [materialConfig, setMaterialConfig] = React.useState({
     sheet_width_mm: DEFAULT_SHEET_WIDTH_MM,
     sheet_length_mm: DEFAULT_SHEET_LENGTH_MM,
     nesting_efficiency: DEFAULT_NESTING_EFFICIENCY,
     ...DEFAULT_MATERIAL_PLANNING_INPUTS,
   });
+  const materialTypeOptions = React.useMemo(
+    () => Array.from(new Set((materialBreakdown ?? []).map((row) => (row.gasket_type || "").trim().toUpperCase()).filter(Boolean))).sort(),
+    [materialBreakdown],
+  );
+  const visibleBreakdownIndexes = React.useMemo(() => {
+    const rows = materialBreakdown ?? [];
+    return sheetVisibleIndexes(rows as unknown as Array<Record<string, unknown>>, breakdownFilters, breakdownSort).filter(
+      (index) => materialTypeFilter === "all" || (rows[index].gasket_type || "").trim().toUpperCase() === materialTypeFilter,
+    );
+  }, [materialBreakdown, breakdownFilters, breakdownSort, materialTypeFilter]);
+  const visiblePlanIndexes = React.useMemo(
+    () => sheetVisibleIndexes((materialPlan?.rows ?? []) as unknown as Array<Record<string, unknown>>, planFilters, planSort),
+    [materialPlan?.rows, planFilters, planSort],
+  );
+  const breakdownSheetActive = Boolean(breakdownSort) || Object.values(breakdownFilters).some((value) => value.trim());
+  const planSheetActive = Boolean(planSort) || Object.values(planFilters).some((value) => value.trim());
   const [currentUser, setCurrentUser] = React.useState(() => getCurrentAppUser());
   const [appUsers, setAppUsers] = React.useState(() => getAppUsers());
   const [masterData, setMasterData] = React.useState<BusinessMasterData>({ customers: [], epc_names: [] });
@@ -1348,6 +1471,21 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   );
   const canRunMaterialPhase1 = canEditWorkflow;
   const canEditMaterialPhase2 = canRole(currentUser.role, "edit_material_phase2", accessSettings);
+  // Change queries: anyone except viewers can raise one; deciding them needs an
+  // admin/approver. Pending queries across all visible enquiries feed the
+  // Approvals card on the list screen.
+  const canRaiseQuery = currentUser.role !== "viewer";
+  const canApproveQueries = currentUser.role === "admin" || canRole(currentUser.role, "approve_quotes", accessSettings);
+  const changeQueries = React.useMemo(() => readChangeQueries(quote?.stage_meta), [quote?.stage_meta]);
+  const pendingApprovals = React.useMemo(
+    () =>
+      quotes.flatMap((row) =>
+        readChangeQueries(row.stage_meta)
+          .filter((query) => query.status === "pending_approval")
+          .map((query) => ({ row, query })),
+      ),
+    [quotes],
+  );
   const canSaveProgress = Boolean(quote && (canEditQuote || canAddDetails || canEditMaterialPhase2));
   const loadedQuoteId = React.useRef<string | null>(null);
   const draftGridRef = React.useRef<HTMLDivElement | null>(null);
@@ -1380,6 +1518,27 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     })),
     [selectedCustomerRecord],
   );
+  // EPC / project company choices come from the customer master itself, with any
+  // separately saved EPC presets appended (deduped) so older selections still list.
+  const epcOptions = React.useMemo<ComboboxOption[]>(() => {
+    const seen = new Set<string>();
+    const options: ComboboxOption[] = [];
+    // Offer a clear row only once something is selected — the field is optional.
+    if (getString(quote?.stage_meta?.epc_name)) options.push({ value: BLANK_SELECT_VALUE, label: "None (clear selection)" });
+    for (const row of masterData.customers) {
+      const key = row.name.trim().toLowerCase();
+      if (!row.active || !key || seen.has(key)) continue;
+      seen.add(key);
+      options.push({ value: row.name, label: row.name, hint: row.country || undefined });
+    }
+    for (const name of masterData.epc_names) {
+      const key = name.trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      options.push({ value: name, label: name });
+    }
+    return options;
+  }, [masterData.customers, masterData.epc_names, quote?.stage_meta?.epc_name]);
   const items = React.useMemo(() => quote?.items ?? [], [quote?.items]);
   const salesRepUsers = React.useMemo(
     () => appUsers
@@ -1842,6 +2001,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     setIntakeCollapsed(Boolean(quote && !isQuotationSection && (quote.items?.length ?? 0) > 0));
     setMaterialBreakdown(isMaterialSection ? storedMaterialBreakdown(quote) : null);
     setMaterialInputs(isMaterialSection ? storedMaterialInputs(quote) : []);
+    setMaterialTypeFilter("all");
+    setBreakdownSort(null);
+    setBreakdownFilters({});
+    setPlanSort(null);
+    setPlanFilters({});
     const storedPlan = isMaterialSection ? storedMaterialPlan(quote) : null;
     setMaterialPlan(storedPlan);
     if (storedPlan?.config) {
@@ -2667,6 +2831,19 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     }
   }
 
+  async function downloadEnquiryRegister() {
+    setRegisterExporting(true);
+    try {
+      const response = await exportEnquiryRegister();
+      const url = response.signed_url.startsWith("http") ? response.signed_url : `${API_BASE}${response.signed_url}`;
+      window.open(url, "_blank");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not download the enquiry register");
+    } finally {
+      setRegisterExporting(false);
+    }
+  }
+
   async function requestApproval() {
     if (!canEditQuotation) {
       toast.error("Sales users cannot request quotation approval.");
@@ -3120,6 +3297,138 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     } finally {
       setAddingContact(false);
     }
+  }
+
+  async function createEpcName(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      toast.error("Type the EPC / company name in the search box first");
+      return;
+    }
+    try {
+      const updated = await addEpcName(trimmed);
+      setMasterData(updated);
+      const canonical = updated.epc_names.find((row) => row.toLowerCase() === trimmed.toLowerCase()) ?? trimmed;
+      if (quote) updateQuoteDraft({ stage_meta: { ...(quote.stage_meta ?? {}), epc_name: canonical } });
+      toast.success(`EPC / company added: ${canonical}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not add the EPC / company");
+    }
+  }
+
+  async function submitChangeQuery() {
+    if (!quote) return;
+    const note = raiseQueryNote.trim();
+    if (!raiseQueryTarget) {
+      toast.error("Choose where to send the query");
+      return;
+    }
+    if (!note) {
+      toast.error("Add a note describing the change that is needed");
+      return;
+    }
+    setRaisingQuery(true);
+    try {
+      const updated = await raiseChangeQuery(quote.id, raiseQueryTarget, note);
+      setQuote(updated);
+      setQuotes((prev) => prev.map((row) => (row.id === updated.id ? quoteSummary(updated) : row)));
+      setRaiseQueryOpen(false);
+      setRaiseQueryNote("");
+      setRaiseQueryTarget("");
+      toast.success("Query raised — it will move once an admin approves it");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not raise the query");
+    } finally {
+      setRaisingQuery(false);
+    }
+  }
+
+  async function handleQueryAction(quoteId: string, queryId: string, action: "approve" | "reject" | "resolve") {
+    const note = (queryActionNotes[queryId] ?? "").trim();
+    setActingQueryId(queryId);
+    try {
+      const updated = await actOnChangeQuery(quoteId, queryId, action, note);
+      if (quote?.id === updated.id) setQuote(updated);
+      setQuotes((prev) => prev.map((row) => (row.id === updated.id ? quoteSummary(updated) : row)));
+      setQueryActionNotes((prev) => ({ ...prev, [queryId]: "" }));
+      toast.success(
+        action === "approve"
+          ? "Query approved — the enquiry moved to the requested stage"
+          : action === "reject"
+            ? "Query rejected"
+            : "Query resolved — the enquiry returned to its previous stage",
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not update the query");
+    } finally {
+      setActingQueryId(null);
+    }
+  }
+
+  function renderQueryCard(quoteId: string, query: ChangeQuery) {
+    const busy = actingQueryId === query.id;
+    const showDecide = query.status === "pending_approval" && canApproveQueries;
+    const showResolve = query.status === "approved" && canRaiseQuery;
+    const roleLabel = roleLabels[query.raised_by_role as keyof typeof roleLabels] ?? query.raised_by_role;
+    return (
+      <div key={query.id} className="rounded-md border bg-background p-2.5 text-sm">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={query.status === "pending_approval" ? "warning" : query.status === "rejected" ? "outline" : "secondary"}>
+              {QUERY_STATUS_LABELS[query.status] ?? query.status}
+            </Badge>
+            <span className="font-medium">{query.raised_by}</span>
+            <span className="text-xs text-muted-foreground">({roleLabel})</span>
+            <span className="text-xs text-muted-foreground">to {query.target_label || query.target_stage}</span>
+          </div>
+          <span className="text-xs text-muted-foreground">{query.created_at ? new Date(query.created_at).toLocaleString("en-GB") : ""}</span>
+        </div>
+        <div className="mt-1">{query.note}</div>
+        {(showDecide || showResolve) && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Input
+              className="h-8 w-64"
+              placeholder={showDecide ? "Optional note for the decision" : "Describe the change you made"}
+              value={queryActionNotes[query.id] ?? ""}
+              onChange={(event) => setQueryActionNotes((prev) => ({ ...prev, [query.id]: event.target.value }))}
+            />
+            {showDecide && (
+              <>
+                <Button size="sm" disabled={busy} onClick={() => handleQueryAction(quoteId, query.id, "approve")}>
+                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                  Approve
+                </Button>
+                <Button variant="secondary" size="sm" disabled={busy} onClick={() => handleQueryAction(quoteId, query.id, "reject")}>
+                  <X className="h-4 w-4" />
+                  Reject
+                </Button>
+              </>
+            )}
+            {showResolve && (
+              <Button size="sm" disabled={busy} onClick={() => handleQueryAction(quoteId, query.id, "resolve")}>
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                Change done — send back
+              </Button>
+            )}
+          </div>
+        )}
+        {(query.history ?? []).length > 0 && (
+          <details className="mt-2">
+            <summary className="cursor-pointer text-xs font-medium text-muted-foreground">History ({(query.history ?? []).length})</summary>
+            <div className="mt-1 space-y-1 border-l pl-3">
+              {(query.history ?? []).map((event, index) => (
+                <div key={`${query.id}-${index}`} className="text-xs text-muted-foreground">
+                  <span className="font-medium text-foreground">{event.by}</span>{" "}
+                  {QUERY_EVENT_LABELS[event.action] ?? event.action}
+                  {event.at ? ` · ${new Date(event.at).toLocaleString("en-GB")}` : ""}
+                  {event.note ? ` — ${event.note}` : ""}
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+      </div>
+    );
   }
 
   async function runWorkflowAction(action: string) {
@@ -3962,6 +4271,22 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     await savePatch({ stage_meta: nextStageMeta } as Partial<Quote>, "Material plan cleared");
   }
 
+  function toggleBreakdownSort(field: string) {
+    setBreakdownSort((current) => (current?.field === field ? (current.direction === "asc" ? { field, direction: "desc" as const } : null) : { field, direction: "asc" as const }));
+  }
+
+  function setBreakdownFilter(field: string, value: string) {
+    setBreakdownFilters((prev) => ({ ...prev, [field]: value }));
+  }
+
+  function togglePlanSort(field: string) {
+    setPlanSort((current) => (current?.field === field ? (current.direction === "asc" ? { field, direction: "desc" as const } : null) : { field, direction: "asc" as const }));
+  }
+
+  function setPlanFilter(field: string, value: string) {
+    setPlanFilters((prev) => ({ ...prev, [field]: value }));
+  }
+
   function updateBreakdownRow(index: number, patch: Partial<MaterialBreakdownRow>) {
     if (!canEditWorkflow) return;
     setMaterialBreakdown((current) => {
@@ -4123,9 +4448,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   function phase1ExportRows() {
+    // Honour the on-screen view (material filter, column filters, sort) so
+    // Copy/CSV export exactly what is shown.
     return [
       ["Review", "SL", "Gasket type", "Size (inch)", "Pressure rating", "Thickness", "Primary material", "Secondary / inner", "Outer / hardware", "Filler / facing / seals", "Qty", "UOM", "Series", "Remarks", "OD mm", "ID mm", "Source rows"],
-      ...(materialBreakdown ?? []).map((row) => [
+      ...visibleBreakdownIndexes.map((rowIndex) => (materialBreakdown ?? [])[rowIndex]).filter(Boolean).map((row) => [
         row.reviewed,
         row.line_no,
         row.gasket_type,
@@ -4148,9 +4475,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   }
 
   function phase2ExportRows() {
+    // Same rule as phase 1: export what the sheet currently shows.
     return [
       ["Review", "SL.NO.", "Stock type", "Stock size", "Purchase UOM", "Planned qty", "Est. purchase qty", "Available", "Reserved", "Shortage", "Suggested purchase", "Vendor", "Lead days", "Material cost", "Priority", "Source rows", "Notes", "Planner review"],
-      ...(materialPlan?.rows ?? []).map((row) => [
+      ...visiblePlanIndexes.map((rowIndex) => (materialPlan?.rows ?? [])[rowIndex]).filter(Boolean).map((row) => [
         row.reviewed,
         row.sl_no,
         row.type,
@@ -4176,6 +4504,47 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   if (!quote) {
     return (
       <div className="space-y-3">
+        {canApproveQueries && pendingApprovals.length > 0 && (
+          <Card>
+            <CardHeader className="gap-1 border-b px-3 py-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="h-4 w-4" />
+                  <CardTitle className="text-base">Approvals</CardTitle>
+                </div>
+                <Badge variant="warning">{pendingApprovals.length} pending</Badge>
+              </div>
+              <div className="text-xs text-muted-foreground">Change queries waiting for your decision. Approving sends the enquiry to the requested stage; the raising note explains why.</div>
+            </CardHeader>
+            <CardContent className="space-y-2 p-3">
+              {pendingApprovals.map(({ row, query }) => (
+                <div key={query.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-background p-2.5 text-sm">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button type="button" className="font-medium text-primary hover:underline" onClick={() => openQuote(row)}>
+                        {row.quote_no || row.customer || row.custom_label || row.id}
+                      </button>
+                      <span className="text-xs text-muted-foreground">
+                        {query.raised_by} ({roleLabels[query.raised_by_role as keyof typeof roleLabels] ?? query.raised_by_role}) wants it sent to {query.target_label || query.target_stage}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 text-xs">{query.note}</div>
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    <Button size="sm" disabled={actingQueryId === query.id} onClick={() => handleQueryAction(row.id, query.id, "approve")}>
+                      {actingQueryId === query.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                      Approve
+                    </Button>
+                    <Button variant="secondary" size="sm" disabled={actingQueryId === query.id} onClick={() => handleQueryAction(row.id, query.id, "reject")}>
+                      <X className="h-4 w-4" />
+                      Reject
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        )}
         <Card>
           <CardHeader className="gap-2 border-b px-3 py-2">
             <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
@@ -4230,6 +4599,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   </SelectContent>
                 </Select>
                 <div className="flex gap-1.5">
+                  {!isPoSection && !isMaterialSection && (
+                    <Button
+                      className="h-9"
+                      variant="secondary"
+                      onClick={downloadEnquiryRegister}
+                      disabled={registerExporting}
+                      title="Download the enquiry register — one Excel row per enquiry with a generated quotation"
+                    >
+                      {registerExporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
+                      Register
+                    </Button>
+                  )}
                   <Button className="h-9" variant="secondary" onClick={() => refreshQuotes().catch((error) => toast.error(error.message))} aria-label="Refresh quotes">
                     <RefreshCw className="h-4 w-4" />
                   </Button>
@@ -4262,7 +4643,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                             {isPoSection ? <ShoppingCart className="h-5 w-5" /> : isFinalSection ? <FileSpreadsheet className="h-5 w-5" /> : isMaterialSection ? <Layers3 className="h-5 w-5" /> : <Inbox className="h-5 w-5" />}
                           </div>
                           <div>{isPoSection ? "No accepted quotations have been moved to PO yet." : isFinalSection ? "No quotes are ready for quotation yet." : isMaterialSection ? "No enquiries are ready for material planning." : "No enquiries match the current search."}</div>
-                          {isDraftSection && canEditQuote && (
+                          {isDraftSection && canCreateEnquiry && (
                             <Button onClick={startQuote}>
                               <Plus className="h-4 w-4" />
                               New enquiry
@@ -4449,6 +4830,38 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         </div>
       )}
 
+      {/* Change queries: any team can ask for this enquiry to be re-routed (e.g.
+          back to estimation for a quantity change). Admin approval moves it; the
+          per-query history keeps the whole round trip traceable. */}
+      {(canRaiseQuery || changeQueries.length > 0) && (
+        <div className="rounded-md border bg-card p-3">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-medium">Change queries &amp; approvals</div>
+            {canRaiseQuery && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  setRaiseQueryTarget("");
+                  setRaiseQueryNote("");
+                  setRaiseQueryOpen(true);
+                }}
+              >
+                <MessageSquarePlus className="h-4 w-4" />
+                Raise query
+              </Button>
+            )}
+          </div>
+          {changeQueries.length === 0 ? (
+            <div className="text-xs text-muted-foreground">
+              No queries on this enquiry yet. Raise one to send it to another team with a note (for example a quantity change) — an admin approves it before it moves.
+            </div>
+          ) : (
+            <div className="space-y-2">{[...changeQueries].reverse().map((query) => renderQueryCard(quote.id, query))}</div>
+          )}
+        </div>
+      )}
+
       <div className={isQuotationSection ? "hidden" : "border bg-card"}>
         {!isQuotationSection && <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
           <div className="min-w-0">
@@ -4524,6 +4937,49 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               <Button onClick={saveNewContact} disabled={addingContact || !newContact.name.trim()}>
                 {addingContact ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
                 Add person
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={raiseQueryOpen} onOpenChange={setRaiseQueryOpen}>
+          <DialogContent className="max-w-lg">
+            <DialogHeader>
+              <DialogTitle>Raise a change query</DialogTitle>
+              <DialogDescription>
+                Send this enquiry to another team with a note — for example when the customer changes quantities at the pricing stage. An admin must approve the query before the enquiry moves, and every step is logged.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <Label>Send to *</Label>
+                <Select value={raiseQueryTarget || BLANK_SELECT_VALUE} onValueChange={(value) => setRaiseQueryTarget(value === BLANK_SELECT_VALUE ? "" : value)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={BLANK_SELECT_VALUE}>Select stage / team</SelectItem>
+                    {workflowSteps.map((step) => (
+                      <SelectItem key={step.id} value={step.id} disabled={step.id === currentWorkflowStep}>
+                        {step.label} ({step.team})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Note / change needed *</Label>
+                <textarea
+                  className="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+                  value={raiseQueryNote}
+                  onChange={(event) => setRaiseQueryNote(event.target.value)}
+                  placeholder="e.g. Customer changed the quantity for items 3 and 4 — please update and re-price"
+                />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="secondary" onClick={() => setRaiseQueryOpen(false)}>Cancel</Button>
+              <Button onClick={submitChangeQuery} disabled={raisingQuery || !raiseQueryTarget || !raiseQueryNote.trim()}>
+                {raisingQuery ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                Raise query
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -4713,8 +5169,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         )}
 
         {!isQuotationSection && (
-          <div className="mt-3 grid gap-2 border-t pt-3 lg:grid-cols-2 2xl:grid-cols-4">
-            <details className="rounded-md border bg-background p-2.5" open>
+          <div className="mt-3 grid gap-3 border-t pt-3 lg:grid-cols-2">
+            {/* Enquiry details spans both grid columns so its three field
+                columns stay readable inside the fixed-width dialog. */}
+            <details className="rounded-md border bg-background p-2.5 lg:col-span-2" open>
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2"><FileText className="h-4 w-4" />Enquiry details</span>
                 <Badge variant={hasCustomerSelected && quote.quote_no ? "secondary" : "outline"}>{hasCustomerSelected && quote.quote_no ? "Saved context" : "Needs context"}</Badge>
@@ -4797,10 +5255,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 <Field label="City" value={getString(quote.stage_meta?.city)} onChange={(value) => updateQuoteDraft({ stage_meta: { ...(quote.stage_meta ?? {}), city: value } })} disabled={!canAddDetails} options={citiesForCountry(getString(quote.stage_meta?.country))} />
                 <div className="space-y-1.5">
                   <Label>EPC / project company</Label>
-                  <Select value={getString(quote.stage_meta?.epc_name) || BLANK_SELECT_VALUE} onValueChange={(value) => updateQuoteDraft({ stage_meta: { ...(quote.stage_meta ?? {}), epc_name: value === BLANK_SELECT_VALUE ? "" : value } })} disabled={!canAddDetails}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent><SelectItem value={BLANK_SELECT_VALUE}>Select</SelectItem>{masterData.epc_names.map((epc) => <SelectItem key={epc} value={epc}>{epc}</SelectItem>)}</SelectContent>
-                  </Select>
+                  <Combobox
+                    value={getString(quote.stage_meta?.epc_name)}
+                    onChange={(value) => updateQuoteDraft({ stage_meta: { ...(quote.stage_meta ?? {}), epc_name: value === BLANK_SELECT_VALUE ? "" : value } })}
+                    options={epcOptions}
+                    placeholder="Select EPC / company"
+                    searchPlaceholder="Search companies…"
+                    emptyText="No companies in the customer master yet"
+                    disabled={!canAddDetails}
+                    createLabel="Add new EPC / company"
+                    onCreate={canAddDetails ? (query) => void createEpcName(query) : undefined}
+                  />
+                  <div className="text-xs text-muted-foreground">Lists the companies from the customer master. Type a new name and pick “Add” to save one that isn’t there.</div>
                 </div>
                 <div className="space-y-1.5">
                   <Label>Bidding or firm</Label>
@@ -5118,7 +5584,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                               <TableCell><Input value={getString(row.customer_sl_no)} onChange={(event) => updateManualRow(index, "customer_sl_no", event.target.value)} /></TableCell>
                               <TableCell><Input value={getString(row.customer_item_code)} onChange={(event) => updateManualRow(index, "customer_item_code", event.target.value)} /></TableCell>
                               <TableCell><textarea className="min-h-16 w-full min-w-96 resize-y rounded-md border bg-background px-2 py-1 text-xs" value={getString(row.raw_description)} onChange={(event) => updateManualRow(index, "raw_description", event.target.value)} /></TableCell>
-                              <TableCell><Input type="number" value={getString(row.quantity)} onChange={(event) => updateManualRow(index, "quantity", event.target.value)} /></TableCell>
+                              <TableCell><Input type="number" className={NO_SPINNER_CLASS} value={getString(row.quantity)} onChange={(event) => updateManualRow(index, "quantity", event.target.value)} /></TableCell>
                               <TableCell><Input value={getString(row.uom)} onChange={(event) => updateManualRow(index, "uom", event.target.value)} /></TableCell>
                               <TableCell>
                                 <Button variant="ghost" size="icon" onClick={() => setManualRows((current) => current.length === 1 ? [blankItem(1)] : current.filter((_, rowIndex) => rowIndex !== index))} title="Remove manual row">
@@ -5924,13 +6390,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     Finish planning
                   </Button>
                 )}
-                <Button variant="secondary" size="sm" onClick={() => copyRowsToClipboard("Material needed", phase1ExportRows())} disabled={!materialBreakdown?.length}>
+                <Button variant="secondary" size="sm" onClick={() => copyRowsToClipboard(materialTypeFilter === "all" ? "Material needed" : `Material needed (${materialTypeFilter})`, phase1ExportRows())} disabled={!materialBreakdown?.length}>
                   <Copy className="h-4 w-4" />
-                  Copy needed
+                  {materialTypeFilter === "all" ? "Copy needed" : `Copy ${materialTypeFilter}`}
                 </Button>
-                <Button variant="secondary" size="sm" onClick={() => downloadRowsAsCsv(`${exportFileStem("phase-1-breakdown")}.csv`, phase1ExportRows())} disabled={!materialBreakdown?.length}>
+                <Button variant="secondary" size="sm" onClick={() => downloadRowsAsCsv(`${exportFileStem(materialTypeFilter === "all" ? "phase-1-breakdown" : `phase-1-breakdown-${materialTypeFilter.toLowerCase()}`)}.csv`, phase1ExportRows())} disabled={!materialBreakdown?.length}>
                   <Download className="h-4 w-4" />
-                  CSV needed
+                  {materialTypeFilter === "all" ? "CSV needed" : `CSV ${materialTypeFilter}`}
                 </Button>
                 <Button variant="secondary" size="sm" onClick={() => copyRowsToClipboard("Purchase plan", phase2ExportRows())} disabled={!materialPlan}>
                   <Copy className="h-4 w-4" />
@@ -5963,32 +6429,57 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 <summary className="cursor-pointer text-sm font-medium">
                   <span className="inline-flex items-center gap-2"><Layers3 className="h-4 w-4" />Material needed</span>
                 </summary>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {materialTypeOptions.length > 1 && (
+                    <>
+                      <Label className="text-xs text-muted-foreground">Show material</Label>
+                      <Select value={materialTypeFilter} onValueChange={setMaterialTypeFilter}>
+                        <SelectTrigger className="h-8 w-48"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All materials</SelectItem>
+                          {materialTypeOptions.map((type) => (
+                            <SelectItem key={type} value={type}>{type}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </>
+                  )}
+                  {(materialTypeFilter !== "all" || breakdownSheetActive) && (
+                    <span className="text-xs text-muted-foreground">{visibleBreakdownIndexes.length} of {materialBreakdown.length} rows</span>
+                  )}
+                  {breakdownSheetActive && (
+                    <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => { setBreakdownSort(null); setBreakdownFilters({}); }}>
+                      <X className="h-3.5 w-3.5" />
+                      Clear filters / sort
+                    </Button>
+                  )}
+                </div>
                 <div className="mt-3 max-h-[520px] overflow-auto border bg-background">
                   <Table containerClassName="overflow-visible" className={SHEET_TABLE_CLASS}>
                     <TableHeader className={SHEET_HEADER_CLASS}>
                       <TableRow>
                         <TableHead className={SHEET_ROW_HEADER_CLASS} />
                         <TableHead className={`${SHEET_HEAD_CLASS} w-20`}>Review</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-16`}>SL</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-32`}>Type</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Size (inch)</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-32`}>Pressure rating</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Thickness</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-36`}>Primary material</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-36`}>Secondary / inner</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-36`}>Outer / hardware</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-44`}>Filler / facing / seals</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Qty</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-24`}>UOM</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-32`}>Series</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} min-w-56`}>Remarks</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>OD mm</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>ID mm</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Source rows</TableHead>
+                        <SheetHead label="SL" width="w-16" field="line_no" sort={breakdownSort} onSort={toggleBreakdownSort} filters={breakdownFilters} onFilter={setBreakdownFilter} />
+                        <SheetHead label="Type" width="w-32" field="gasket_type" sort={breakdownSort} onSort={toggleBreakdownSort} filters={breakdownFilters} onFilter={setBreakdownFilter} />
+                        <SheetHead label="Size (inch)" width="w-28" field="size_inch" sort={breakdownSort} onSort={toggleBreakdownSort} filters={breakdownFilters} onFilter={setBreakdownFilter} />
+                        <SheetHead label="Pressure rating" width="w-32" field="pressure_rating" sort={breakdownSort} onSort={toggleBreakdownSort} filters={breakdownFilters} onFilter={setBreakdownFilter} />
+                        <SheetHead label="Thickness" width="w-28" field="thickness" sort={breakdownSort} onSort={toggleBreakdownSort} filters={breakdownFilters} onFilter={setBreakdownFilter} />
+                        <SheetHead label="Primary material" width="w-36" field="winding" sort={breakdownSort} onSort={toggleBreakdownSort} filters={breakdownFilters} onFilter={setBreakdownFilter} />
+                        <SheetHead label="Secondary / inner" width="w-36" field="inner_ring" sort={breakdownSort} onSort={toggleBreakdownSort} filters={breakdownFilters} onFilter={setBreakdownFilter} />
+                        <SheetHead label="Outer / hardware" width="w-36" field="outer_ring" sort={breakdownSort} onSort={toggleBreakdownSort} filters={breakdownFilters} onFilter={setBreakdownFilter} />
+                        <SheetHead label="Filler / facing / seals" width="w-44" field="filler" sort={breakdownSort} onSort={toggleBreakdownSort} filters={breakdownFilters} onFilter={setBreakdownFilter} />
+                        <SheetHead label="Qty" width="w-28" field="qty" sort={breakdownSort} onSort={toggleBreakdownSort} filters={breakdownFilters} onFilter={setBreakdownFilter} />
+                        <SheetHead label="UOM" width="w-24" field="uom" sort={breakdownSort} onSort={toggleBreakdownSort} filters={breakdownFilters} onFilter={setBreakdownFilter} />
+                        <SheetHead label="Series" width="w-32" field="series" sort={breakdownSort} onSort={toggleBreakdownSort} filters={breakdownFilters} onFilter={setBreakdownFilter} />
+                        <SheetHead label="Remarks" width="min-w-56" field="remarks" sort={breakdownSort} onSort={toggleBreakdownSort} filters={breakdownFilters} onFilter={setBreakdownFilter} />
+                        <SheetHead label="OD mm" width="w-28" field="od_mm" sort={breakdownSort} onSort={toggleBreakdownSort} filters={breakdownFilters} onFilter={setBreakdownFilter} />
+                        <SheetHead label="ID mm" width="w-28" field="id_mm" sort={breakdownSort} onSort={toggleBreakdownSort} filters={breakdownFilters} onFilter={setBreakdownFilter} />
+                        <SheetHead label="Source rows" width="w-28" field="source_rows" sort={breakdownSort} onSort={toggleBreakdownSort} filters={breakdownFilters} onFilter={setBreakdownFilter} />
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {materialBreakdown.map((row, index) => (
+                      {visibleBreakdownIndexes.map((index) => { const row = materialBreakdown[index]; return (
                         <TableRow key={`${row.line_no}-${row.size_inch}-${row.pressure_rating}-${index}`} className="hover:bg-emerald-50/30 dark:hover:bg-emerald-950/10">
                           <TableCell className={SHEET_ROW_HEADER_CLASS}>{index + 1}</TableCell>
                           <TableCell className={`${SHEET_CELL_CLASS} text-center`}>
@@ -6016,7 +6507,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                           <TableCell className={SHEET_CELL_CLASS}><Input className={`${SHEET_INPUT_CLASS} w-24`} type="number" value={getString(row.id_mm)} onChange={(event) => updateBreakdownRow(index, { id_mm: Number(event.target.value) || null })} /></TableCell>
                           <TableCell className={SHEET_CELL_CLASS}>{row.source_rows}</TableCell>
                         </TableRow>
-                      ))}
+                      ); })}
                     </TableBody>
                   </Table>
                 </div>
@@ -6124,8 +6615,17 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 )}
 
                 <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/30 px-3 py-2 text-sm">
-                  <div className="text-muted-foreground">
-                    {canEditMaterialPhase2 && !materialPhase2Finished ? "Edit purchase-plan rows directly, then save or finish planning." : "The purchase plan is view-only for this user or status."}
+                  <div className="flex flex-wrap items-center gap-2 text-muted-foreground">
+                    <span>{canEditMaterialPhase2 && !materialPhase2Finished ? "Edit purchase-plan rows directly, then save or finish planning." : "The purchase plan is view-only for this user or status."}</span>
+                    {planSheetActive && (
+                      <>
+                        <span className="text-xs">{visiblePlanIndexes.length} of {materialPlan.rows.length} rows</span>
+                        <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => { setPlanSort(null); setPlanFilters({}); }}>
+                          <X className="h-3.5 w-3.5" />
+                          Clear filters / sort
+                        </Button>
+                      </>
+                    )}
                   </div>
                   {canEditMaterialPhase2 && !materialPhase2Finished && (
                     <Button variant="secondary" size="sm" onClick={addMaterialPhase2Row}>
@@ -6141,28 +6641,28 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       <TableRow>
                         <TableHead className={SHEET_ROW_HEADER_CLASS} />
                         <TableHead className={`${SHEET_HEAD_CLASS} w-20`}>Review</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-16`}>SL.NO.</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} min-w-72`}>Stock type</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Width</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Length</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Thk</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>UOM</TableHead>
+                        <SheetHead label="SL.NO." width="w-16" field="sl_no" sort={planSort} onSort={togglePlanSort} filters={planFilters} onFilter={setPlanFilter} />
+                        <SheetHead label="Stock type" width="min-w-72" field="type" sort={planSort} onSort={togglePlanSort} filters={planFilters} onFilter={setPlanFilter} />
+                        <SheetHead label="Width" width="w-28" field="width_mm" sort={planSort} onSort={togglePlanSort} filters={planFilters} onFilter={setPlanFilter} />
+                        <SheetHead label="Length" width="w-28" field="length_mm" sort={planSort} onSort={togglePlanSort} filters={planFilters} onFilter={setPlanFilter} />
+                        <SheetHead label="Thk" width="w-28" field="thickness_mm" sort={planSort} onSort={togglePlanSort} filters={planFilters} onFilter={setPlanFilter} />
+                        <SheetHead label="UOM" width="w-28" field="purchase_uom" sort={planSort} onSort={togglePlanSort} filters={planFilters} onFilter={setPlanFilter} />
                         <TableHead className={`${SHEET_HEAD_CLASS} w-36`}>Planned qty</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-32`}>Available</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-32`}>Reserved</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-32`}>Shortage</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-40`}>Suggested purchase</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-40`}>Vendor</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-32`}>Lead days</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-40`}>Material cost</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-36`}>Priority</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} w-28`}>Source rows</TableHead>
-                        <TableHead className={`${SHEET_HEAD_CLASS} min-w-96`}>Notes / planner review</TableHead>
+                        <SheetHead label="Available" width="w-32" field="available_qty" sort={planSort} onSort={togglePlanSort} filters={planFilters} onFilter={setPlanFilter} />
+                        <SheetHead label="Reserved" width="w-32" field="reserved_qty" sort={planSort} onSort={togglePlanSort} filters={planFilters} onFilter={setPlanFilter} />
+                        <SheetHead label="Shortage" width="w-32" field="shortage_qty" sort={planSort} onSort={togglePlanSort} filters={planFilters} onFilter={setPlanFilter} />
+                        <SheetHead label="Suggested purchase" width="w-40" field="suggested_purchase_qty" sort={planSort} onSort={togglePlanSort} filters={planFilters} onFilter={setPlanFilter} />
+                        <SheetHead label="Vendor" width="w-40" field="preferred_vendor" sort={planSort} onSort={togglePlanSort} filters={planFilters} onFilter={setPlanFilter} />
+                        <SheetHead label="Lead days" width="w-32" field="lead_time_days" sort={planSort} onSort={togglePlanSort} filters={planFilters} onFilter={setPlanFilter} />
+                        <SheetHead label="Material cost" width="w-40" field="estimated_material_cost" sort={planSort} onSort={togglePlanSort} filters={planFilters} onFilter={setPlanFilter} />
+                        <SheetHead label="Priority" width="w-36" field="production_priority" sort={planSort} onSort={togglePlanSort} filters={planFilters} onFilter={setPlanFilter} />
+                        <SheetHead label="Source rows" width="w-28" field="source_count" sort={planSort} onSort={togglePlanSort} filters={planFilters} onFilter={setPlanFilter} />
+                        <SheetHead label="Notes / planner review" width="min-w-96" field="notes" sort={planSort} onSort={togglePlanSort} filters={planFilters} onFilter={setPlanFilter} />
                         <TableHead className={`${SHEET_HEAD_CLASS} w-20`}>Delete</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {materialPlan.rows.map((row, index) => (
+                      {visiblePlanIndexes.map((index) => { const row = materialPlan.rows[index]; return (
                         <TableRow key={`${row.sl_no}-${row.type}-${index}`} className="hover:bg-emerald-50/30 dark:hover:bg-emerald-950/10">
                           <TableCell className={SHEET_ROW_HEADER_CLASS}>{index + 1}</TableCell>
                           <TableCell className={`${SHEET_CELL_CLASS} text-center`}>
@@ -6248,7 +6748,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                             )}
                           </TableCell>
                         </TableRow>
-                      ))}
+                      ); })}
                     </TableBody>
                   </Table>
                 </div>
@@ -6411,6 +6911,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       <span>
                         <span className="block font-medium">Add customer item code to quotation PDF</span>
                         <span className="block text-xs text-muted-foreground">Keep disabled when the customer code is only for internal matching.</span>
+                      </span>
+                    </label>
+                    <label className="flex items-start gap-3 text-sm">
+                      <input className="mt-1" type="checkbox" checked={Boolean(qd.include_ggpl_sl_no)} onChange={(event) => updateQd("include_ggpl_sl_no", event.target.checked)} disabled={!canEditQuotation} />
+                      <span>
+                        <span className="block font-medium">Use GGPL serial no. in quotation PDF</span>
+                        <span className="block text-xs text-muted-foreground">Prints GGPL&apos;s own serial number for the gaskets. Enable together with customer SL No. to show both columns.</span>
                       </span>
                     </label>
                   </div>

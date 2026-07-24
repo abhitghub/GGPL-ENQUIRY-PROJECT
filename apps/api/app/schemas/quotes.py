@@ -98,3 +98,17 @@ class WorkflowActionRequest(BaseModel):
     # types route to technical review). When omitted, any value already on
     # stage_meta is reused. Ignored unless ENABLE_GRANULAR_WORKFLOW is on.
     gasket_type: str | None = None
+
+
+class ChangeQueryCreateRequest(BaseModel):
+    # Workflow step id the enquiry should be sent to once the query is approved
+    # (e.g. "spec_check" to send it back to estimation for a quantity change).
+    target_stage: str
+    note: str
+
+
+class ChangeQueryActionRequest(BaseModel):
+    # "approve" | "reject" (admin decision) or "resolve" (change made, send the
+    # enquiry back to where it was when the query was approved).
+    action: str
+    note: str = ""
