@@ -476,11 +476,11 @@ def _quote_visible_to_viewer(
     if visible_workflow_steps:
         # A record with no workflow stage yet sits at the active machine's
         # default step (granular: enquiry_received, owned by estimation who
-        # creates enquiries; legacy: enquiry). Lazy import avoids a cycle.
-        from app.services.enquiry_workflow import active_default_step
+        # creates enquiries; legacy: enquiry), and retired 13-step ids read as
+        # their surviving 6-step state. Lazy import avoids a cycle.
+        from app.services.enquiry_workflow import current_workflow_step
 
-        step = str((quote.stage_meta or {}).get("workflow_stage") or "") or active_default_step()
-        return step in visible_workflow_steps
+        return current_workflow_step(quote.stage_meta) in visible_workflow_steps
     return False
 
 

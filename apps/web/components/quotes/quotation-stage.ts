@@ -1,4 +1,5 @@
 import type { Quote } from "@/lib/api";
+import { canonicalGranularStep } from "@/lib/api";
 
 // The customer-facing "Quotation stage" lifecycle (distinct from the primary
 // quote.stage pipeline and from the enquiry->quotation handoff workflow). Stored
@@ -56,7 +57,7 @@ const WORKFLOW_TO_QUOTATION_STAGE: Record<string, QuotationStageId> = {
 function workflowStageOf(quote: Quote | null): string {
   const meta = (quote?.stage_meta ?? {}) as Record<string, unknown>;
   const granular = (meta.granular_workflow ?? {}) as Record<string, unknown>;
-  return String(granular.current_stage || meta.workflow_stage || "");
+  return canonicalGranularStep(String(granular.current_stage || meta.workflow_stage || ""));
 }
 
 export function quotationStageFromData(qd: Record<string, unknown>, quote: Quote | null): QuotationStageId {

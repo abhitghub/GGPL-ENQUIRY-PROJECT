@@ -1,5 +1,5 @@
 import type { Quote } from "@/lib/api";
-import { ENQUIRY_WORKFLOW_STEPS, GRANULAR_ENQUIRY_WORKFLOW_STEPS } from "@/lib/api";
+import { ENQUIRY_WORKFLOW_STEPS, GRANULAR_WORKFLOW_STATE_INFO, canonicalGranularStep } from "@/lib/api";
 
 import { getString } from "./item-validation";
 
@@ -24,14 +24,15 @@ export const PRICING_ONWARD_WORKFLOW_STEPS = new Set([
 export function workflowStepOf(quote: Quote): string {
   const meta = (quote.stage_meta ?? {}) as Record<string, unknown>;
   const granular = (meta.granular_workflow ?? {}) as Record<string, unknown>;
-  return String(granular.current_stage || meta.workflow_stage || "");
+  // Retired 13-step ids read as the surviving 6-step state.
+  return canonicalGranularStep(String(granular.current_stage || meta.workflow_stage || ""));
 }
 
 // Human label for a quote's current enquiry->quotation workflow step (granular
 // or legacy). Empty string when the quote carries no workflow stage.
 const WORKFLOW_STEP_LABELS: Record<string, string> = Object.fromEntries([
   ...ENQUIRY_WORKFLOW_STEPS.map((step) => [step.id, step.label]),
-  ...GRANULAR_ENQUIRY_WORKFLOW_STEPS.map((step) => [step.id, step.label]),
+  ...Object.entries(GRANULAR_WORKFLOW_STATE_INFO).map(([id, info]) => [id, info.label]),
 ]);
 
 export function workflowStageLabel(quote: Quote): string {

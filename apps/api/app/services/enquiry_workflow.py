@@ -98,32 +98,42 @@ ROLE_VISIBLE_STEPS: dict[str, set[str]] = {
 
 
 # ---------------------------------------------------------------------------
-# Granular 11-stage machine (additive; active only when ENABLE_GRANULAR_WORKFLOW).
+# Granular 6-step machine (additive; active only when ENABLE_GRANULAR_WORKFLOW).
 #
-# This refines the 6-step flow above into the full business process without
-# renaming or removing any legacy step, transition, field, or role. When the
-# feature flag is off, every accessor below returns the legacy structures and
-# behaviour is byte-identical to the original engine.
+# The business flow is presented to users as 6 numbered steps; three exception
+# states (customer query open, awaiting the admin pricing formula, quotation
+# generated but not yet sent) live INSIDE a numbered step and are shown as a
+# sub-status badge on that step — "mainline" names the step they anchor to.
+# When the feature flag is off, every accessor below returns the legacy
+# structures and behaviour is byte-identical to the original engine.
 # ---------------------------------------------------------------------------
 
 GRANULAR_WORKFLOW_STEPS: list[dict[str, str]] = [
     {"id": "enquiry_received", "label": "Enquiry received", "team": "Estimation"},
-    {"id": "forwarded_to_estimation", "label": "Forwarded to estimation", "team": "Estimation"},
-    {"id": "spec_check", "label": "Spec check", "team": "Estimation"},
-    {"id": "query_raised_to_customer", "label": "Query raised to customer", "team": "Sales"},
-    {"id": "converted_to_ggpl_format", "label": "Converted to GGPL format", "team": "Estimation"},
-    {"id": "gasket_type_check", "label": "Gasket type check", "team": "Estimation"},
-    {"id": "technical_review_pending", "label": "Technical review pending", "team": "Technical review"},
-    {"id": "combined_spec_review", "label": "Combined spec review", "team": "Estimation"},
-    {"id": "sent_for_pricing", "label": "Sent for pricing", "team": "Admin"},
-    {"id": "pricing_decision", "label": "Pricing (estimation)", "team": "Estimation"},
-    {"id": "pricing_submitted", "label": "Ready to generate", "team": "Sales / Admin"},
-    {"id": "quotation_generated", "label": "Quotation generated", "team": "Sales"},
+    {"id": "spec_check", "label": "Spec check & GGPL format", "team": "Estimation"},
+    {"id": "query_raised_to_customer", "label": "Query raised to customer", "team": "Sales", "mainline": "spec_check"},
+    {"id": "technical_review_pending", "label": "Technical review", "team": "Technical review"},
+    {"id": "sent_for_pricing", "label": "Sent for pricing", "team": "Admin", "mainline": "pricing_decision"},
+    {"id": "pricing_decision", "label": "Pricing", "team": "Estimation"},
+    {"id": "pricing_submitted", "label": "Quotation generation", "team": "Sales / Admin"},
+    {"id": "quotation_generated", "label": "Quotation generated", "team": "Sales", "mainline": "pricing_submitted"},
     {"id": "quotation_sent_to_customer", "label": "Quotation sent to customer", "team": "Sales"},
 ]
 
 GRANULAR_WORKFLOW_STEP_IDS = {step["id"] for step in GRANULAR_WORKFLOW_STEPS}
 DEFAULT_GRANULAR_STEP = "enquiry_received"
+
+# The earlier 13-step machine had four extra same-team states. In-flight records
+# parked on one of them are read as the surviving state that now covers that
+# work, so nothing strands when the consolidated machine ships.
+RETIRED_GRANULAR_STEPS: dict[str, str] = {
+    "forwarded_to_estimation": "spec_check",
+    "converted_to_ggpl_format": "spec_check",
+    "gasket_type_check": "spec_check",
+    # Post-TR estimation review is gone; its only exit was submitting for
+    # pricing, so records there land in the admin pricing queue.
+    "combined_spec_review": "sent_for_pricing",
+}
 
 # Gasket types that require a technical-review pass before pricing (stage 5
 # branch). Compared case-insensitively against stage_meta["gasket_type"].
@@ -142,22 +152,16 @@ TR_REQUIRED_GASKET_TYPES: set[str] = {
 # stage_meta markers to persist).
 GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
     # Estimation creates enquiries (and assigns the sales owner), so it also
-    # owns the first handoff.
-    "forward_to_estimation": {
+    # picks each one up to start the spec work.
+    "begin_spec_check": {
         "from": {"enquiry_received"},
         "roles": {"estimation", "management"},
-        "to": "forwarded_to_estimation",
-        "with_whom": "Estimation",
-        "label": "Forward to estimation",
-    },
-    "begin_spec_check": {
-        "from": {"forwarded_to_estimation"},
-        "roles": {"estimation"},
         "to": "spec_check",
         "with_whom": "Estimation",
         "label": "Begin spec check",
     },
-    # branch A: specs incomplete -> customer query loop
+    # branch A: specs incomplete -> customer query loop (sub-status of the
+    # spec-check step; ownership flips to Sales until the answer comes back).
     "raise_customer_query": {
         "from": {"spec_check"},
         "roles": {"estimation"},
@@ -174,54 +178,25 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "with_whom": "Estimation",
         "label": "Answer customer query",
     },
-    # branch B: specs complete
-    "mark_spec_complete": {
+    # branch B: specs complete — GGPL conversion and the gasket-type check are
+    # part of Estimation's spec work, so one action closes the step and hands
+    # the enquiry to the technical review team (TR is not bypassed).
+    "send_to_technical_review": {
         "from": {"spec_check"},
         "roles": {"estimation"},
-        "to": "converted_to_ggpl_format",
-        "with_whom": "Estimation",
-        "label": "Mark spec complete",
-    },
-    "proceed_to_gasket_check": {
-        "from": {"converted_to_ggpl_format"},
-        "roles": {"estimation"},
-        "to": "gasket_type_check",
-        "with_whom": "Estimation",
-        "label": "Proceed to gasket type check",
-    },
-    # Estimation runs the gasket type check and the enquiry goes to the
-    # technical review team — TR is not bypassed.
-    "run_gasket_type_check": {
-        "from": {"gasket_type_check"},
-        "roles": {"estimation"},
         "to": "technical_review_pending",
         "with_whom": "Technical review",
-        "label": "Run gasket type check",
+        "label": "Spec complete — send for technical review",
     },
-    # Estimation may also route to technical review from the combined review
-    # (either send for pricing or send for technical review).
-    "send_to_technical_review": {
-        "from": {"combined_spec_review"},
-        "roles": {"estimation"},
-        "to": "technical_review_pending",
-        "with_whom": "Technical review",
-        "label": "Send for technical review",
-    },
-    # Only technical can view/forward an enquiry that is up for technical
-    # review — it moves it ahead to the combined spec review.
+    # Only technical can forward an enquiry that is up for technical review —
+    # done means the specs are cleared for pricing, so it goes straight to the
+    # admin pricing queue.
     "return_tr_spec": {
         "from": {"technical_review_pending"},
         "roles": {"technical"},
-        "to": "combined_spec_review",
-        "with_whom": "Estimation",
-        "label": "Technical review done — forward",
-    },
-    "submit_for_pricing": {
-        "from": {"combined_spec_review"},
-        "roles": {"estimation"},
         "to": "sent_for_pricing",
         "with_whom": "Admin",
-        "label": "Submit for pricing",
+        "label": "Technical review done — submit for pricing",
     },
     # Admin sets the pricing formula (in the enquiry notes) and hands the enquiry
     # back to estimation to price against it — admin does not price directly.
@@ -269,11 +244,7 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
 GRANULAR_ROLE_VISIBLE_STEPS: dict[str, set[str]] = {
     "estimation": {
         "enquiry_received",
-        "forwarded_to_estimation",
         "spec_check",
-        "converted_to_ggpl_format",
-        "gasket_type_check",
-        "combined_spec_review",
         # estimation prices the enquiry (admin sets the formula); it does not
         # generate the quotation — sales/admin do.
         "pricing_decision",
@@ -289,13 +260,9 @@ GRANULAR_ROLE_VISIBLE_STEPS: dict[str, set[str]] = {
 # retained everywhere for back-compat; `admin` bypasses in code regardless.
 GRANULAR_STAGE_OWNER_ROLES: dict[str, set[str]] = {
     "enquiry_received": {"estimation", "management"},
-    "forwarded_to_estimation": {"estimation", "management"},
     "spec_check": {"estimation", "management"},
     "query_raised_to_customer": {"sales", "management"},
-    "converted_to_ggpl_format": {"estimation", "management"},
-    "gasket_type_check": {"estimation", "management"},
     "technical_review_pending": {"technical", "management"},
-    "combined_spec_review": {"estimation", "management"},
     "sent_for_pricing": {"admin", "management"},
     "pricing_decision": {"estimation", "management"},
     "pricing_submitted": {"sales", "admin", "management"},
@@ -379,8 +346,14 @@ def visible_steps_for_role(role: str) -> set[str]:
     return _active_visible_steps().get(role, set())
 
 
+def canonical_workflow_step(step: str) -> str:
+    """Map a stored step id onto the current machines: retired 13-step ids read
+    as the surviving state that now covers that work."""
+    return RETIRED_GRANULAR_STEPS.get(step, step)
+
+
 def current_workflow_step(stage_meta: dict | None) -> str:
-    step = str((stage_meta or {}).get("workflow_stage") or "").strip()
+    step = canonical_workflow_step(str((stage_meta or {}).get("workflow_stage") or "").strip())
     # Accept ids from either machine so legacy records stay readable if the flag
     # is flipped on; unknown/empty falls back to the active machine's default.
     if step in WORKFLOW_STEP_IDS or step in GRANULAR_WORKFLOW_STEP_IDS:

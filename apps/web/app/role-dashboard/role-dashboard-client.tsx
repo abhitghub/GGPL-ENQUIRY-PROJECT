@@ -13,10 +13,11 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import {
   API_BASE,
   GRANULAR_ENQUIRY_WORKFLOW_ACTIONS,
-  GRANULAR_ENQUIRY_WORKFLOW_STEPS,
   GRANULAR_WORKFLOW,
+  GRANULAR_WORKFLOW_STATE_INFO,
   Quote,
   advanceEnquiryWorkflow,
+  canonicalGranularStep,
   exportEnquiryRegister,
   getCurrentAppUserRemote,
   listQuotes,
@@ -24,18 +25,14 @@ import {
 import { WORK_NOTIFICATION_EVENT } from "@/components/providers/notification-listener";
 import { getCurrentAppUser, setCurrentAppUser } from "@/lib/auth/users";
 
-// Which granular stage each role OWNS (mirrors GRANULAR_STAGE_OWNER_ROLES in
+// Which granular state each role OWNS (mirrors GRANULAR_STAGE_OWNER_ROLES in
 // apps/api/app/services/enquiry_workflow.py). A role's dashboard shows ONLY
-// enquiries currently parked at a stage it owns.
+// enquiries currently parked at a state it owns.
 const STEP_OWNER_ROLES: Record<string, string[]> = {
   enquiry_received: ["estimation"],
-  forwarded_to_estimation: ["estimation"],
   spec_check: ["estimation"],
   query_raised_to_customer: ["sales"],
-  converted_to_ggpl_format: ["estimation"],
-  gasket_type_check: ["estimation"],
   technical_review_pending: ["technical"],
-  combined_spec_review: ["estimation"],
   sent_for_pricing: ["admin"],
   pricing_decision: ["estimation"],
   pricing_submitted: ["sales", "admin"],
@@ -44,7 +41,7 @@ const STEP_OWNER_ROLES: Record<string, string[]> = {
 };
 
 const STEP_LABELS: Record<string, string> = Object.fromEntries(
-  GRANULAR_ENQUIRY_WORKFLOW_STEPS.map((step) => [step.id, step.label]),
+  Object.entries(GRANULAR_WORKFLOW_STATE_INFO).map(([id, info]) => [id, info.label]),
 );
 
 const DEFAULT_STEP = "enquiry_received";
@@ -52,7 +49,8 @@ const DEFAULT_STEP = "enquiry_received";
 function currentStep(quote: Quote): string {
   const meta = (quote.stage_meta ?? {}) as Record<string, unknown>;
   const granular = (meta.granular_workflow ?? {}) as Record<string, unknown>;
-  return String(granular.current_stage || meta.workflow_stage || DEFAULT_STEP);
+  // Retired 13-step ids read as the surviving 6-step state.
+  return canonicalGranularStep(String(granular.current_stage || meta.workflow_stage || DEFAULT_STEP));
 }
 
 // The one-line note estimation left when sending an enquiry back to sales.

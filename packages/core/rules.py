@@ -8,6 +8,27 @@ from data.reference_data import (
     normalize_size, normalize_rating, lookup_dimensions, ACCEPTED_MOC,
     lookup_rtj_ring,
 )
+from data.brand_dictionary import apply_brand_rules
+from core.formatter import NON_STANDARD, is_non_standard
+
+# GGPL escalation phrases (exact house strings — never paraphrased)
+ESC_WILL_QUOTE_SOON = 'WILL QUOTE SOON'
+ESC_RING_NO = 'KINDLY PROVIDE RING NO'
+ESC_RING_DIMS = 'AS PER ASME STANDARD RING NUMBER IS NOT AVAILABLE SO KINDLY PROVIDE DIMENSIONS'
+ESC_DRAWING = 'KINDLY PROVIDE DRAWING'
+ESC_DRAWING_DIMS = 'KINDLY PROVIDE DRAWING WITH DIMENSION'
+ESC_CLEAR_SPEC = 'KINDLY PROVIDE CLEAR SPEC'
+ESC_DATASHEET = 'KINDLY PROVIDE DATASHEET / DETAILED MATERIAL DESCRIPTION'
+ESC_DIMENSIONS = 'KINDLY PROVIDE DIMENSIONS'
+ESC_REGRET = 'REGRET'
+
+# mm pipe-OD → NPS map (W1 flange context only — Master Spec A1)
+_PIPE_OD_TO_NPS = {
+    21.3: '1/2"', 26.7: '3/4"', 33.4: '1"', 42.2: '1-1/4"', 48.3: '1-1/2"',
+    60.3: '2"', 73.0: '2-1/2"', 76.1: '2-1/2"', 88.9: '3"', 101.6: '3-1/2"',
+    114.3: '4"', 141.3: '5"', 168.3: '6"', 219.1: '8"', 273.0: '10"',
+    323.9: '12"', 355.6: '14"', 406.4: '16"', 457.0: '18"', 508.0: '20"', 610.0: '24"',
+}
 
 STATUS_READY = 'ready'
 STATUS_CHECK = 'check'
@@ -419,6 +440,7 @@ def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
     """Apply spiral wound-specific defaults and validation (mutates item in place)."""
     winding_mat = _norm_ring(item.get('sw_winding_material'))
     filler = _norm_filler(item.get('sw_filler'))
+    filler_stated = bool(filler)
     outer_ring = _norm_ring(item.get('sw_outer_ring'))
     inner_ring = _norm_ring(item.get('sw_inner_ring'))
     raw_desc_upper = (item.get('raw_description') or item.get('description') or '').upper()
@@ -499,15 +521,48 @@ def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
             item['sw_winding_material'] = winding_mat
             applied_defaults.append(f'winding material inferred from ring material: {winding_mat}')
 
-    # GGPL standard construction: unless the enquiry explicitly excludes them,
-    # SPW gaskets are quoted with an inner ring in the winding material and a
-    # CS outer (centering) ring.
+    # B16.20 inner-ring MANDATE — beats every omission rule below:
+    # CL900 NPS≥24, CL1500 NPS≥12, CL2500 NPS≥4, and ALL PTFE-filled gaskets.
+    cls_m = re.search(r'(\d+)', str(item.get('rating') or ''))
+    pressure_cls = int(cls_m.group(1)) if cls_m else 0
+    ir_mandate = (
+        'PTFE' in (filler or '').upper()
+        or (pressure_cls == 900 and size_val is not None and size_val >= 24)
+        or (pressure_cls == 1500 and size_val is not None and size_val >= 12)
+        or (pressure_cls == 2500 and size_val is not None and size_val >= 4)
+    )
+
+    # Exhaustive-list rule (Master Spec Rule F): when the enquiry enumerates the
+    # full construction (winding + filler + outer ring all customer-stated) and
+    # stays silent on the inner ring, that silence is a deliberate omission.
+    exhaustive_no_ir = bool(
+        winding_mat and filler_stated and outer_ring
+        and not inner_ring and not source_mentions_inner
+    )
+    style_hint = (item.get('sw_style_hint') or '').lower()
+
+    # GGPL standard construction: unless excluded (explicitly, by style code,
+    # or by the exhaustive-list rule), SPW gaskets are quoted with an inner
+    # ring in the winding material and a CS outer (centering) ring.
     if winding_mat:
-        if not inner_ring and not re.search(r'W/?O\.?\s+(?:INNER|IR)|WITHOUT\s+(?:INNER|IR)|NO\s+INNER', raw_desc_upper):
+        excludes_ir = bool(
+            re.search(r'W/?O\.?\s+(?:INNER|IR)|WITHOUT\s+(?:INNER|IR)|NO\s+INNER', raw_desc_upper)
+            or exhaustive_no_ir
+            or style_hint in ('or_only', 'winding')
+        )
+        if not inner_ring and (not excludes_ir or ir_mandate):
             inner_ring = winding_mat
             item['sw_inner_ring'] = inner_ring
-            applied_defaults.append(f'inner ring defaulted to winding material {winding_mat} (GGPL standard construction)')
-        if not outer_ring and not re.search(r'W/?O\.?\s+(?:OUTER|OR|CENTERING)|WITHOUT\s+(?:OUTER|OR|CENTERING)|NO\s+OUTER', raw_desc_upper):
+            if excludes_ir and ir_mandate:
+                applied_defaults.append(
+                    f'inner ring ADDED per ASME B16.20 mandate ({item.get("rating")}, PTFE/size rule) despite omission')
+            else:
+                applied_defaults.append(f'inner ring defaulted to winding material {winding_mat} (GGPL standard construction)')
+        excludes_or = bool(
+            re.search(r'W/?O\.?\s+(?:OUTER|OR|CENTERING)|WITHOUT\s+(?:OUTER|OR|CENTERING)|NO\s+OUTER', raw_desc_upper)
+            or style_hint in ('ir_only', 'winding')
+        )
+        if not outer_ring and not excludes_or:
             outer_ring = 'CS'
             item['sw_outer_ring'] = outer_ring
             applied_defaults.append('outer ring defaulted to CS (GGPL standard construction)')
@@ -516,8 +571,11 @@ def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
     # GGPL format — never use whatever string GPT-4o placed in the moc field
     if winding_mat:
         item['moc'] = _build_sw_moc(winding_mat, filler, inner_ring, outer_ring)
+        if style_hint == 'winding' and not inner_ring and not outer_ring:
+            item['moc'] += ' (WINDING ONLY)'
     elif not grade_flag_fired:
         flags.append('Missing critical field: winding material (spiral wound)')
+        item['escalation'] = ESC_DATASHEET
 
     # Default thickness to 4.5mm
     if not item.get('thickness_mm'):
@@ -538,8 +596,11 @@ def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
         item['standard'] = None
 
     # Standard: EN 1514-2 for PN-rated; B16.47 always enforced for ≥26" NPS (even if
-    # customer stated B16.20 — GGPL convention overrides customer spec for large bore)
-    if is_pn_sw:
+    # customer stated B16.20 — GGPL convention overrides customer spec for large bore).
+    # An operator-selected NON STANDARD overrides every convention here.
+    if is_non_standard(item.get('standard')):
+        pass
+    elif is_pn_sw:
         if not item.get('standard'):
             item['standard'] = 'EN 1514-2'
             applied_defaults.append('standard defaulted to EN 1514-2 (SPW on PN-rated flanges)')
@@ -811,6 +872,22 @@ def _apply_rtj_rules(item: dict, flags: list, applied_defaults: list) -> None:
         else:
             flags.append('Ring number not in lookup table — enter manually (check ASME B16.20)')
             item['ring_no'] = None
+            # Exact GGPL escalation phrases: compact-flange specs need dims;
+            # a B16.5-range size (≤24") with no table ring asks for the ring
+            # number. ≥26" falls through to the large-bore SIZE format instead.
+            raw_all = (item.get('raw_description') or item.get('description') or '').upper()
+            size_val_rtj = _size_nps_value_from_item(item)
+            _cls_rtj = re.search(r'(\d{3,4})', str(item.get('rating') or ''))
+            _cls_rtj = int(_cls_rtj.group(1)) if _cls_rtj else None
+            if re.search(r'ISO\s*27509|COMPACT\s+FLANGE|\bSP-\d+', raw_all):
+                item['escalation'] = ESC_RING_DIMS
+            elif size_val_rtj is not None and size_val_rtj <= 24:
+                # B16.5-range size with no table ring (gap sizes like 22",
+                # 2500# above 12") — per the size gate, never invent a ring
+                item['escalation'] = ESC_RING_NO
+            elif size_val_rtj is not None and size_val_rtj >= 26 and _cls_rtj not in (300, 600, 900):
+                # B16.47 rings (R93–R105) exist only for classes 300–900
+                item['escalation'] = ESC_RING_NO
 
     # Normalize flange-style API codes (API 6B, API 6BX are flange types, not gasket standards;
     # the actual gasket standard for wellhead RTJ rings is API 6A)
@@ -828,7 +905,9 @@ def _apply_rtj_rules(item: dict, flags: list, applied_defaults: list) -> None:
     explicit_api6a = item.get('standard') == 'API 6A' or bool(
         re.search(r'\bAPI\s*6\s*A\b', (item.get('raw_description') or item.get('description') or '').upper())
     )
-    if rn_upper.startswith('BX-'):
+    if is_non_standard(item.get('standard')):
+        pass  # operator marked NON STANDARD — never assign a standard tag
+    elif rn_upper.startswith('BX-'):
         item['standard'] = 'API 6A'
     elif rn_upper.startswith('RX-'):
         item['standard'] = 'API 6A' if explicit_api6a else 'NACE MR-01-75 / ISO 15156, API 6B'
@@ -1032,11 +1111,13 @@ def _apply_dji_rules(item: dict, flags: list, applied_defaults: list) -> None:
     if not item.get('dji_filler'):
         item['dji_filler'] = 'GRAPHITE'
         applied_defaults.append('DJI filler defaulted to GRAPHITE')
-    # EN 1514-4 for PN-rated flanges; no standard otherwise (DJI is OD/ID based)
-    is_pn_dji = str(item.get('rating') or '').upper().startswith('PN')
-    item['standard'] = 'EN 1514-4' if is_pn_dji else None
-    if is_pn_dji:
-        applied_defaults.append('standard set to EN 1514-4 (DJI on PN-rated flanges)')
+    # EN 1514-4 for PN-rated flanges; no standard otherwise (DJI is OD/ID based).
+    # Operator-selected NON STANDARD is kept as-is.
+    if not is_non_standard(item.get('standard')):
+        is_pn_dji = str(item.get('rating') or '').upper().startswith('PN')
+        item['standard'] = 'EN 1514-4' if is_pn_dji else None
+        if is_pn_dji:
+            applied_defaults.append('standard set to EN 1514-4 (DJI on PN-rated flanges)')
     item['rating'] = None  # DJI has no pressure class
 
 
@@ -1530,12 +1611,111 @@ def _requires_review_for_default(default: str, gasket_type: str, item: dict) -> 
     return True
 
 
+def _apply_specialty_rules(item: dict, flags: list, applied_defaults: list) -> None:
+    """Rules for the beyond-six specialty families (Master Spec v3.1)."""
+    gtype = item.get('gasket_type')
+
+    if gtype == 'ADJACENT':
+        item['escalation'] = ESC_REGRET
+        flags.append('Adjacent/non-gasket product — REGRET per GGPL policy (configurable with sales team)')
+        return
+
+    if item.get('moc'):
+        item['moc'] = str(item['moc']).strip().upper()
+
+    if gtype == 'LENS':
+        if not item.get('standard'):
+            item['standard'] = 'DIN 2696'
+        if not ((item.get('size') and item.get('rating')) or (item.get('od_mm') and item.get('id_mm'))):
+            item['escalation'] = ESC_DRAWING_DIMS
+        elif not item.get('moc'):
+            flags.append('Missing critical field: lens ring material')
+    elif gtype == 'MANHOLE':
+        if not (item.get('obround_a_mm') and item.get('obround_b_mm')):
+            item['escalation'] = ESC_DRAWING
+    elif gtype == 'ENVELOPE':
+        if not item.get('thickness_mm'):
+            item['thickness_mm'] = 3
+            applied_defaults.append('thickness defaulted to 3mm (envelope)')
+        if not item.get('standard'):
+            is_pn_env = str(item.get('rating') or '').upper().startswith('PN')
+            item['standard'] = 'EN 1514-3' if is_pn_env else 'ASME B16.21'
+            applied_defaults.append(f'standard defaulted to {item["standard"]} (envelope)')
+        if not (item.get('envelope_insert') or item.get('moc')):
+            flags.append('Missing critical field: envelope insert material')
+    elif gtype == 'CMG':
+        if not item.get('thickness_mm'):
+            item['thickness_mm'] = 3
+            applied_defaults.append('thickness defaulted to 3mm (corrugated metal gasket)')
+    elif gtype == 'LIP_SEAL':
+        if not (item.get('od_mm') and item.get('id_mm')):
+            item['escalation'] = ESC_DRAWING
+    elif gtype == 'DIAPHRAGM':
+        if not item.get('od_mm'):
+            item['escalation'] = ESC_DRAWING_DIMS
+    elif gtype == 'SHEET':
+        if not item.get('moc'):
+            item['escalation'] = ESC_DATASHEET
+        elif not (item.get('sheet_length_mm') and item.get('sheet_width_mm')):
+            item['escalation'] = ESC_CLEAR_SPEC
+
+
+def _apply_class_gap_rules(item: dict, flags: list, applied_defaults: list) -> None:
+    """ASME class gaps: flanges that do not exist resolve deterministically.
+    No CL400 at NPS 1/2–3 (use 600); no CL900 at NPS 1/2–2-1/2 (use 1500);
+    no CL2500 at NPS ≥14. Dual classes (CL900/CL1500) resolve via the gaps.
+    """
+    rating = str(item.get('rating') or '')
+    if not rating or rating.upper().startswith('PN'):
+        return
+    nps = _size_nps_value_from_item(item)
+    if nps is None:
+        return
+    dual = re.fullmatch(r'(\d{3,4})/(\d{3,4})#?', rating.strip())
+    if dual:
+        a, b = int(dual.group(1)), int(dual.group(2))
+        viable = [c for c in (a, b) if not (
+            (c == 400 and nps <= 3) or (c == 900 and nps <= 2.5) or (c == 2500 and nps >= 14)
+        )]
+        if len(viable) == 1:
+            item['rating'] = f'{viable[0]}#'
+            item['rating_norm'] = item['rating']
+            applied_defaults.append(
+                f'{rating} stated — no class {a if viable[0] == b else b} flange at {item.get("size")}, resolved to {viable[0]}#')
+            _add_item_deviation(item, flags,
+                                f'{rating} STATED — RESOLVED TO {viable[0]}# (CLASS GAP RULE)')
+        return
+    m = re.fullmatch(r'(\d{3,4})#?', rating.strip())
+    if not m:
+        return
+    cls = int(m.group(1))
+    if cls == 400 and nps <= 3:
+        item['rating'] = '600#'
+        item['rating_norm'] = '600#'
+        applied_defaults.append('class 400 does not exist at NPS 1/2–3 — 600# gasket dims apply')
+        _add_item_deviation(item, flags, 'CLASS 400 STATED — NO CL400 FLANGE AT THIS SIZE, 600# GASKET DIMS APPLY')
+    elif cls == 2500 and nps >= 14:
+        flags.append('Class 2500 does not exist at NPS ≥14 (ASME B16.5) — confirm flange spec')
+
+
+def _add_item_deviation(item: dict, flags: list, note: str) -> None:
+    notes = item.setdefault('deviation_notes', [])
+    if note not in notes:
+        notes.append(note)
+        flags.append(f'DEVIATION: {note}')
+
+
 def apply_rules(item: dict) -> dict:
     """
     Normalize, apply defaults, validate, and assign status + flags.
     Returns updated item dict.
     """
     _sanitize_llm_nulls(item)
+    # Operator-selected NON STANDARD: canonicalize early so it stays a truthy
+    # value — every `if not item.get('standard')` default is naturally skipped
+    # and the formatter suppresses the tag in the description.
+    if is_non_standard(item.get('standard')):
+        item['standard'] = NON_STANDARD
     _recover_compact_size_rating(item)
     _recover_common_fields_from_description(item)
     flags = []
@@ -1572,6 +1752,20 @@ def apply_rules(item: dict) -> dict:
 
     is_pn = raw_rating and str(raw_rating).upper().startswith('PN')
     is_asme = raw_rating and '#' in str(raw_rating)
+
+    # mm pipe-OD in a W1 (ANSI class) context maps to NPS (Master Spec A1):
+    # e.g. "76.1 mm" + 150# → 2-1/2"
+    if raw_size and is_asme:
+        _od_m = re.match(r'^(\d+(?:\.\d+)?)\s*MM$', str(raw_size).strip().upper())
+        if _od_m:
+            _od_val = float(_od_m.group(1))
+            for _pipe_od, _nps in _PIPE_OD_TO_NPS.items():
+                if abs(_od_val - _pipe_od) <= 0.3:
+                    item['size'] = _nps
+                    item['size_norm'] = _nps
+                    size_norm = _nps
+                    applied_defaults.append(f'{_od_val}MM pipe OD mapped to NPS {_nps} (ANSI class context)')
+                    break
 
     gasket_type = item.get('gasket_type', 'SOFT_CUT')
     raw_desc = (
@@ -1627,6 +1821,12 @@ def apply_rules(item: dict) -> dict:
         gasket_type = 'SOFT_CUT'
         item['gasket_type'] = 'SOFT_CUT'
 
+    # Brand & trade-name translation (three-bucket policy, Master Spec v3.2)
+    apply_brand_rules(item, flags, applied_defaults)
+
+    # ASME class-gap resolution (nonexistent flange classes)
+    _apply_class_gap_rules(item, flags, applied_defaults)
+
     _remove_face_tokens_from_material_fields(item)
 
     if gasket_type == 'SPIRAL_WOUND':
@@ -1646,6 +1846,10 @@ def apply_rules(item: dict) -> dict:
         item['dimensions'] = None
     elif gasket_type == 'O_RING':
         _apply_oring_rules(item, flags, applied_defaults)
+    elif gasket_type in ('LENS', 'MANHOLE', 'ENVELOPE', 'CMG', 'METAL_CLAD', 'SOLID_METAL',
+                         'LIP_SEAL', 'DIAPHRAGM', 'EYELET', 'SHEET', 'ADJACENT'):
+        _apply_specialty_rules(item, flags, applied_defaults)
+        item['dimensions'] = None
     elif gasket_type not in ('SOFT_CUT', 'SHEET_GASKET', 'CORRUGATED', 'PLUG_GASKET'):
         # Unrecognised gasket type — pass through but flag for manual review
         flags.append(
@@ -1745,6 +1949,22 @@ def apply_rules(item: dict) -> dict:
     if item.get('uom') == 'M':
         flags.append('UoM is meters (sheet supply) — confirm if individual gaskets or sheet supply')
 
+    # --- Obsolete standards cited (API 601 / API 605 / MSS SP-44) ---
+    _raw_all_std = (item.get('raw_description') or item.get('description') or '').upper()
+    if re.search(r'\bAPI\s*60[15]\b|\bMSS\s*SP[-\s]?44\b', _raw_all_std):
+        _add_item_deviation(
+            item, flags,
+            f'OBSOLETE STANDARD CITED (API 601/605 / MSS SP-44) — SUPERSEDED; '
+            f'QUOTED TO {item.get("standard") or "CURRENT ASME STANDARD"}')
+
+    # --- Explicit NACE certification demand → 'NACE MR0175,' before the standard ---
+    if gasket_type in ('SPIRAL_WOUND', 'SOFT_CUT', 'KAMM', 'SHEET_GASKET', 'CMG'):
+        if re.search(r'NACE[^.\n]{0,40}?(?:\bYES\b|REQUIRED|CERTIF)|Q[AS]C?ERT[^\n]{0,40}NACE', _raw_all_std):
+            _std_now = item.get('standard')
+            if _std_now and 'NACE' not in str(_std_now).upper() and not is_non_standard(_std_now):
+                item['standard'] = f'NACE MR0175, {_std_now}'
+                applied_defaults.append('NACE MR0175 certification demanded — inserted before the standard')
+
     # --- Critical field validation — varies by type ---
     if gasket_type == 'RTJ':
         # Ring number uniquely identifies size+rating — if present, size and rating are not required
@@ -1767,6 +1987,10 @@ def apply_rules(item: dict) -> dict:
         crit = ['id_mm', 'thickness_mm', 'moc']
     elif gasket_type == 'SPIRAL_WOUND' and item.get('size_type') == 'OD_ID':
         crit = ['od_mm', 'id_mm', 'moc']
+    elif gasket_type in ('LENS', 'MANHOLE', 'ENVELOPE', 'CMG', 'METAL_CLAD', 'SOLID_METAL',
+                         'LIP_SEAL', 'DIAPHRAGM', 'EYELET', 'SHEET', 'ADJACENT'):
+        # Specialty families are governed by their escalation rules
+        crit = []
     elif item.get('size_type') == 'OD_ID':
         # Any gasket type with OD/ID dimensions — size (NPS) and rating are not applicable
         crit = ['od_mm', 'id_mm', 'moc']
@@ -1791,13 +2015,21 @@ def apply_rules(item: dict) -> dict:
         if _requires_review_for_default(default, gasket_type, item)
     ]
 
-    if missing_critical or any('ambiguous' in f.lower() or 'missing critical' in f.lower() for f in flags):
+    if item.get('escalation'):
+        # Escalation phrase IS the GGPL description; status reflects the ask
+        item['status'] = STATUS_REGRET if item['escalation'] == ESC_REGRET else STATUS_MISSING
+        item['applied_defaults'] = applied_defaults
+    elif missing_critical or any('ambiguous' in f.lower() or 'missing critical' in f.lower() for f in flags):
         item['status'] = STATUS_MISSING
     elif review_defaults or flags:
         item['status'] = STATUS_CHECK
         item['applied_defaults'] = applied_defaults
     else:
         item['status'] = STATUS_READY
+
+    # Per-line deviation channel (brand translations, standard overrides, ...)
+    if item.get('deviation_notes'):
+        item['deviation'] = ' | '.join(item['deviation_notes'])
 
     item['flags'] = flags
     return item

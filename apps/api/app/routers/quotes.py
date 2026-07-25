@@ -35,6 +35,7 @@ from app.services.enquiry_workflow import (
     active_steps,
     active_transitions,
     can_act_on_step,
+    canonical_workflow_step,
     current_workflow_step,
     visible_steps_for_role,
 )
@@ -884,6 +885,9 @@ def _jump_workflow_stage(stage_meta: dict, dest: str, user: CurrentUser, action:
     jump is recorded in the same granular history_log the regular advance
     endpoint writes, so the audit trail stays in one place."""
     origin = current_workflow_step(stage_meta)
+    # Change-queries stored before the 6-step consolidation may target a
+    # retired 13-step id — land on the state that replaced it.
+    dest = canonical_workflow_step(dest)
     _, team = _step_label_and_team(dest)
     stage_meta["workflow_stage"] = dest
     if team:
