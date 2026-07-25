@@ -407,7 +407,10 @@ def _set_b1647_standard(item: dict, flags: list, applied_defaults: list) -> None
         item['standard'] = 'ASME B16.47 (SERIES-B)'
         item['series'] = 'B'
         return
-    item['standard'] = 'ASME B16.47'
+    # GGPL default when series unstated: quote Series B (MSS SP-44 lineage,
+    # the common Indian-market case) and flag for confirmation.
+    item['standard'] = 'ASME B16.47 (SERIES-B)'
+    item['series'] = 'B'
     if _B1647_FLAG not in flags:
         flags.append(_B1647_FLAG)  # Contains "missing critical" → triggers STATUS_MISSING
 
@@ -440,12 +443,11 @@ def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
 
     size_val = _size_nps_value(item.get('size_norm'))
 
-    # A specific SS grade is only propagated to generic "SS" components when it
-    # is stated on a *ring*. A grade on the winding alone is NOT pushed onto the
-    # rings: a generic "SS inner/outer ring" is a deliberate (cheaper) customer
-    # spec, not an omission, so e.g. "SS317L winding ... SS inner & outer ring"
-    # keeps the rings as SS. When a ring does carry the grade (e.g. an explicit
-    # "outer ring SS316"), the generic winding and sibling ring adopt it.
+    # A specific SS grade stated on a ring is adopted by the generic "SS"
+    # winding and sibling ring; per GGPL quoting convention the reverse also
+    # holds — a generic "SS inner/outer ring" beside a graded winding is
+    # quoted as the winding grade (e.g. "AISI 316 ... SS INNER RING" →
+    # "SS316 INNER RING").
     ring_ss_grades = {
         value for value in (inner_ring, outer_ring)
         if isinstance(value, str) and re.fullmatch(r'SS\d{3}[A-Z]?', value)
@@ -461,43 +463,24 @@ def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
         if outer_ring == 'SS':
             outer_ring = ss_grade
             applied_defaults.append(f'generic SS outer ring resolved to {ss_grade} from same SPW row')
+    if isinstance(winding_mat, str) and re.fullmatch(r'SS\d{3}[A-Z]?(?:/SS\d{3}[A-Z]?)?', winding_mat):
+        if inner_ring == 'SS':
+            inner_ring = winding_mat
+            applied_defaults.append(f'generic SS inner ring resolved to winding grade {winding_mat}')
+        if outer_ring == 'SS':
+            outer_ring = winding_mat
+            applied_defaults.append(f'generic SS outer ring resolved to winding grade {winding_mat}')
 
     item['sw_winding_material'] = winding_mat or None
     item['sw_outer_ring'] = outer_ring or None
     item['sw_inner_ring'] = inner_ring or None
     item['sw_filler'] = filler
 
-    # Outer ring is mandatory for spiral wound gaskets
-    if not outer_ring:
-        flags.append('Missing critical field: outer ring (mandatory for spiral wound gaskets — e.g. CS, SS304)')
-
-    # Inner ring mandatory rules (ASME B16.20)
     is_pn_sw = str(item.get('rating') or '').upper().startswith('PN')
-    cls_m = re.search(r'(\d+)', str(item.get('rating') or ''))
-    pressure_cls = int(cls_m.group(1)) if cls_m else 0
-    inner_mandatory = False
-    inner_reason = ''
-    if 'PTFE' in (filler or '').upper():
-        inner_mandatory = True
-        inner_reason = 'PTFE-filled SPW always requires inner ring (ASME B16.20)'
-    elif pressure_cls == 2500 and size_val is not None and size_val >= 4:
-        inner_mandatory = True
-        inner_reason = 'Inner ring mandatory: 2500# NPS ≥ 4" (ASME B16.20)'
-    elif pressure_cls == 1500 and size_val is not None and size_val >= 12:
-        inner_mandatory = True
-        inner_reason = 'Inner ring mandatory: 1500# NPS ≥ 12" (ASME B16.20)'
-    elif pressure_cls == 900 and size_val is not None and size_val >= 24:
-        inner_mandatory = True
-        inner_reason = 'Inner ring mandatory: 900# NPS ≥ 24" (ASME B16.20)'
 
     source_mentions_inner = bool(re.search(r'\bINNER\s+R(?:I|L)?NG\b|\bI\.?R\.?\b|\bIR\b', raw_desc_upper))
-    if not inner_ring:
-        if inner_mandatory:
-            flags.append(f'Missing critical field: inner ring — {inner_reason}')
-        elif source_mentions_inner:
-            flags.append('Missing critical field: inner ring (mentioned in source but not extracted)')
-        else:
-            flags.append('Inner ring not specified — confirm if required for this service')
+    if not inner_ring and source_mentions_inner:
+        flags.append('Missing critical field: inner ring (mentioned in source but not extracted)')
 
     # Handle "SS" without grade — ambiguous, cannot build valid MOC
     grade_flag_fired = False
@@ -516,6 +499,19 @@ def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
             item['sw_winding_material'] = winding_mat
             applied_defaults.append(f'winding material inferred from ring material: {winding_mat}')
 
+    # GGPL standard construction: unless the enquiry explicitly excludes them,
+    # SPW gaskets are quoted with an inner ring in the winding material and a
+    # CS outer (centering) ring.
+    if winding_mat:
+        if not inner_ring and not re.search(r'W/?O\.?\s+(?:INNER|IR)|WITHOUT\s+(?:INNER|IR)|NO\s+INNER', raw_desc_upper):
+            inner_ring = winding_mat
+            item['sw_inner_ring'] = inner_ring
+            applied_defaults.append(f'inner ring defaulted to winding material {winding_mat} (GGPL standard construction)')
+        if not outer_ring and not re.search(r'W/?O\.?\s+(?:OUTER|OR|CENTERING)|WITHOUT\s+(?:OUTER|OR|CENTERING)|NO\s+OUTER', raw_desc_upper):
+            outer_ring = 'CS'
+            item['sw_outer_ring'] = outer_ring
+            applied_defaults.append('outer ring defaulted to CS (GGPL standard construction)')
+
     # Always rebuild MOC from structured component fields to ensure consistent
     # GGPL format — never use whatever string GPT-4o placed in the moc field
     if winding_mat:
@@ -527,6 +523,10 @@ def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
     if not item.get('thickness_mm'):
         item['thickness_mm'] = 4.5
         applied_defaults.append('thickness defaulted to 4.5mm (spiral wound)')
+
+    # Echo LOW STRESS construction note when the enquiry states it
+    if not item.get('special') and re.search(r'LOW\s+STRESS', raw_desc_upper):
+        item['special'] = 'LOW STRESS'
 
     # No face type for spiral wound
     item['face_type'] = None
@@ -569,17 +569,18 @@ _RTJ_HARDNESS_DEFAULTS = {
     'SS347': 160, 'SS347H': 160,
     # SS400-series ferritic/martensitic (harder)
     'SS410': 170, 'SS410S': 150,
-    # Nickel alloys (ASME B16.20 / API 6A max BHN values)
+    # Nickel alloys (GGPL RTJ hardness master table)
     'MONEL 400': 130, 'MONEL 800': 150,
-    'INCONEL 600': 160,                          # Alloy 600 (UNS N06600)
+    'INCONEL 600': 180,                          # Alloy 600 (UNS N06600)
     'INCONEL 625': 210,                          # Alloy 625 (UNS N06625) — GGPL standard
     'INCONEL 718': 160,
-    'HASTELLOY C276': 200,                       # UNS N10276
-    'HASTELLOY C22': 200,
+    'HASTELLOY B2': 230,                         # UNS N10001
+    'HASTELLOY C276': 210,                       # UNS N10276
+    'HASTELLOY C22': 210,
     'ALLOY 20': 160,
-    'INCOLOY 825': 160,                          # Alloy 825 (UNS N08825)
-    'INCOLOY 800': 160,                          # Alloy 800 (UNS N08800)
-    '6MO': 200,                                  # UNS S31254 (6% Mo super austenitic)
+    'INCOLOY 825': 195, 'ALLOY 825': 195,        # Alloy 825 (UNS N08825)
+    'INCOLOY 800': 180,                          # Alloy 800 (UNS N08800)
+    '6MO': 230,                                  # UNS S31254 (6% Mo super austenitic)
     # Chrome-moly (ASME B16.20 Table 1 / API 6A) — all 130 BHN max
     'F5': 130,                                   # 4–6% Cr, 0.5% Mo
     '4-6% CR 0.5% MO': 130,
@@ -588,20 +589,20 @@ _RTJ_HARDNESS_DEFAULTS = {
     'F22': 130,                                  # 2-1/4% Cr, 1% Mo
     'F91': 130,                                  # 9% Cr, 1% Mo, V (Grade 91)
     # UNS designations
-    'UNS N06600': 160,  # Inconel 600
-    'UNS N08825': 160,  # Incoloy 825
-    'UNS N08800': 160,  # Incoloy 800
+    'UNS N06600': 180,  # Inconel 600
+    'UNS N08825': 195,  # Incoloy 825
+    'UNS N08800': 180,  # Incoloy 800
     'UNS G10100': 120,  # Low carbon steel
     'UNS S31600': 160,  # SS316
     'UNS S31603': 160,  # SS316L
     'UNS S30400': 160,  # SS304
-    'UNS N06625': 160,  # Inconel 625
-    'UNS S31254': 200,  # 6Mo
+    'UNS N06625': 210,  # Inconel 625
+    'UNS S31254': 230,  # 6Mo / 254 SMO
     # Titanium
     'TITANIUM GR.2': 215, 'TITANIUM GR.12': 215,
-    # Duplex / super duplex — 22 HRC max = ~250 BHN (ASME B16.20 Annex A)
-    'UNS S31803': 250, 'UNS S32205': 250,        # Duplex 2205
-    'UNS S32750': 250, 'UNS S32760': 250,        # Super Duplex
+    # Duplex / super duplex (GGPL RTJ hardness master table)
+    'UNS S31803': 235, 'UNS S32205': 230,        # Duplex 2205
+    'UNS S32750': 240, 'UNS S32760': 240,        # Super Duplex
     # Non-ferrous
     'CU-NI 70/30': 100, 'BRASS': 80, 'BRONZE': 80, 'ALUMINIUM': 35,
 }
@@ -632,6 +633,9 @@ _RTJ_MOC_ALIASES = {
     'SS310': 'SS310', 'SS 310': 'SS310', 'SS310S': 'SS310S', 'SS 310S': 'SS310S',
     'SS316': 'SS316', 'SS 316': 'SS316', '316SS': 'SS316', '316 SS': 'SS316', 'AISI 316': 'SS316',
     'UNS S31600': 'SS316', 'S31600': 'SS316',
+    'STAINLESS STEEL 316': 'SS316', 'STAINLESS STEEL 316L': 'SS316L',
+    'STAINLESS STEEL 304': 'SS304', 'STAINLESS STEEL 304L': 'SS304L',
+    'STAINLESS STEEL 321': 'SS321', 'STAINLESS STEEL 347': 'SS347',
     'SS316L': 'SS316L', 'SS 316L': 'SS316L', '316L': 'SS316L',
     'SS316H': 'SS316H', 'SS 316H': 'SS316H', '316H': 'SS316H',
     'SS317': 'SS317', 'SS317L': 'SS317L',
@@ -648,6 +652,7 @@ _RTJ_MOC_ALIASES = {
     'INCONEL': 'INCONEL 625', 'INCONEL 625': 'INCONEL 625', 'INCONEL625': 'INCONEL 625',
     'INC 625': 'INCONEL 625', 'INC625': 'INCONEL 625',
     'INCOLOY 825': 'INCOLOY 825', 'INCOLOY825': 'INCOLOY 825', 'INCOLY 825': 'INCOLOY 825',
+    'ALLOY 825': 'INCOLOY 825',
     'INCOLOY': 'INCOLOY 825',   # bare "Incoloy" is most commonly 825 in RTJ context
     'INCOLOY 800': 'INCOLOY 800', 'INCOLOY800': 'INCOLOY 800', 'INCOLY 800': 'INCOLOY 800',
     'HASTELLOY C276': 'HASTELLOY C276', 'HAST ALLOY C276': 'HASTELLOY C276', 'C276': 'HASTELLOY C276',
@@ -683,7 +688,8 @@ _RTJ_MOC_ALIASES = {
 _RTJ_MOC_PATTERN = (
     r'SOFT\s+IRON|G10100|UNS\s+G10100|S30400|UNS\s+S30400|S31600|UNS\s+S31600|'
     r'UNS\s*N\s*0\d{4}|INCOLOY\s*825|INCOLY\s*825|ALLOY\s*825|INCONEL\s*625|UNS\s*S\s*3\d{4}|'
-    r'SS[-\s]*316L?|316L?SS|SS[-\s]*304L?|304L?SS|F\d{1,2}|'
+    r'STAINLESS\s+STEEL\s+3\d{2}L?|'
+    r'SS[-\s]*316L?|316L?SS|SS[-\s]*304L?|304L?SS|SS[-\s]*321|SS[-\s]*347|F\d{1,2}|'
     r'LOW\s+CARBON\s+STEEL|LCS|LTCS|MONEL\s*400|HASTELLOY\s*C[-\s]*276'
 )
 
@@ -703,8 +709,6 @@ def _recover_rtj_fields_from_description(item: dict) -> None:
             item['rtj_groove_type'] = 'OCTAGONAL'
         elif re.search(r'\bOVAL\b|ELLIPTICAL|TYPE\s*R\b', raw_desc):
             item['rtj_groove_type'] = 'OVAL'
-        elif re.search(r'\bBX\b', raw_desc):
-            item['rtj_groove_type'] = 'BX'
 
     if not item.get('standard'):
         if re.search(r'\bAPI\s*6\s*A\b', raw_desc):
@@ -743,7 +747,8 @@ def _apply_rtj_rules(item: dict, flags: list, applied_defaults: list) -> None:
         item['rtj_groove_type'] = _groove_norm.get(
             item['rtj_groove_type'].upper(), item['rtj_groove_type'].upper()
         )
-    elif not str(item.get('ring_no') or '').upper().startswith(('RX-', 'BX-')):
+    elif not str(item.get('ring_no') or '').upper().startswith('RX-'):
+        # BX rings are also quoted with the OCTAGONAL groove label per GGPL convention
         item['rtj_groove_type'] = 'OCTAGONAL'
         applied_defaults.append('groove type defaulted to OCTAGONAL')
 
@@ -814,15 +819,25 @@ def _apply_rtj_rules(item: dict, flags: list, applied_defaults: list) -> None:
     if cited_std_upper in ('API 6BX', 'API 6B', 'API 6 BX', 'API 6 B'):
         item['standard'] = 'API 6A'
 
-    # Set standard based on ring prefix, rating, or bore size
+    # Set standard based on ring prefix, rating, or bore size.
+    # GGPL convention: BX (wellhead) rings are quoted to API 6A; R-series
+    # rings are quoted to ASME B16.20 even when the enquiry cites an API
+    # flange (API 3000/5000 etc. describe the flange, not the gasket).
     rn_upper = (item.get('ring_no') or '').upper()
     rating = item.get('rating') or ''
-    if rating.startswith('API ') or item.get('standard') == 'API 6A':
+    explicit_api6a = item.get('standard') == 'API 6A' or bool(
+        re.search(r'\bAPI\s*6\s*A\b', (item.get('raw_description') or item.get('description') or '').upper())
+    )
+    if rn_upper.startswith('BX-'):
         item['standard'] = 'API 6A'
     elif rn_upper.startswith('RX-'):
-        item['standard'] = 'NACE MR-01-75 / ISO 15156, API 6B'
-    elif rn_upper.startswith('BX-'):
-        item['standard'] = 'ASME B16.20'
+        item['standard'] = 'API 6A' if explicit_api6a else 'NACE MR-01-75 / ISO 15156, API 6B'
+    elif rn_upper.startswith('R-'):
+        # An explicitly cited API 6A standard is honoured; a mere API flange
+        # rating (API 3000/5000) is not — R-series rings quote to B16.20.
+        item['standard'] = 'API 6A' if explicit_api6a else 'ASME B16.20'
+    elif rating.startswith('API ') or item.get('standard') == 'API 6A':
+        item['standard'] = 'API 6A'
     else:
         size_val = _size_nps_value_from_item(item)
         if size_val is not None and size_val >= 26:
@@ -1226,6 +1241,13 @@ def _apply_isk_rules(item: dict, flags: list, applied_defaults: list) -> None:
 
     gtype = item.get('gasket_type', 'ISK')
 
+    # For STYLE-CS kits the cited B16.5 flange standard is replaced by the
+    # gasket standard B16.20; other styles echo it as "TO SUIT ASME B16.5".
+    _style_now = (item.get('isk_style') or '').upper()
+    if (item.get('standard') or '').upper() in ('ASME B16.5', 'B16.5') and _style_now in (
+            'CS', 'STYLE-CS', 'VCS', 'STYLE-VCS'):
+        item['standard'] = 'ASME B16.20'
+
     # TYPE-E = full face (FF) by definition; TYPE-F/D = raised face (RF) always
     # VCS is equivalent to STYLE-CS (RF by default)
     isk_style_raw = (item.get('isk_style') or '').upper()
@@ -1495,6 +1517,16 @@ def _requires_review_for_default(default: str, gasket_type: str, item: dict) -> 
         and item.get('moc')
     ):
         return False
+    # GGPL standard-construction conventions — deliberate house rules, not
+    # guesses that need a human check.
+    _CONVENTION_PREFIXES = (
+        'generic SS inner ring resolved to winding grade',
+        'generic SS outer ring resolved to winding grade',
+        'inner ring defaulted to winding material',
+        'outer ring defaulted to CS',
+    )
+    if gasket_type == 'SPIRAL_WOUND' and default.startswith(_CONVENTION_PREFIXES):
+        return False
     return True
 
 
@@ -1555,10 +1587,12 @@ def apply_rules(item: dict) -> dict:
         gasket_type = 'DJI'
         item['gasket_type'] = 'DJI'
     elif gasket_type == 'SOFT_CUT' and re.search(
-        r'\b(?:SPIRAL|SPRIAL|SPRIRAL|SPIRIAL|SPLRAL|SPRLAL|SPIRRAL|SPRRAL|SPRL)\s*[-\s]*(?:W(?:OU)?ND\w*|WIND\w*)\b|\bSPW\b',
+        r'\b(?:SPIRAL|SPRIAL|SPRIRAL|SPIRIAL|SPLRAL|SPRLAL|SPIRRAL|SPRRAL|SPRL|SPL)\s*[-\s]*(?:W(?:OU)?ND\w*|WIND\w*)\b|\bSPW\b',
         raw_desc,
-    ):
-        # LLM missed/misclassified — description text is unambiguous
+    ) and 'INSERT' not in str(item.get('moc') or '').upper():
+        # LLM missed/misclassified — description text is unambiguous.
+        # (Reinforced-graphite-with-insert rows keep their SOFT_CUT family
+        # classification even though the enquiry says "spiral wound".)
         gasket_type = 'SPIRAL_WOUND'
         item['gasket_type'] = 'SPIRAL_WOUND'
     elif gasket_type == 'SOFT_CUT' and _looks_like_oring(raw_desc):

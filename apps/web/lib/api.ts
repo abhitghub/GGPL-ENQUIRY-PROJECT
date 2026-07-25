@@ -470,6 +470,17 @@ export async function exportQuote(id: string, type: "pdf" | "xlsx"): Promise<Sig
   );
 }
 
+// Full record of one enquiry as Excel: every context field, all line items,
+// and the workflow history.
+export async function exportEnquiryDetails(id: string): Promise<SignedUrl> {
+  return parse<SignedUrl>(
+    await apiFetch(`${API_BASE}/api/v1/quotes/${id}/exports/details`, {
+      method: "POST",
+      headers: headers(),
+    }),
+  );
+}
+
 // Excel register of every enquiry whose quotation has been generated, for
 // colleagues to browse past enquiries (customer, quote type, project, value).
 export async function exportEnquiryRegister(): Promise<SignedUrl> {
@@ -657,6 +668,51 @@ export async function listOutlookThreadMessages(params: { mailboxUser: string; c
 
 export async function getDashboardMetrics(): Promise<DashboardMetrics> {
   return parse<DashboardMetrics>(await apiFetch(`${API_BASE}/api/v1/dashboard/metrics`, { headers: headers() }));
+}
+
+// One persisted work notification as returned by GET /api/v1/notifications —
+// the same shape the SSE stream pushes live (see notification-listener.tsx).
+export type WorkUpdate = {
+  id: string;
+  kind: string;
+  quote_id: string;
+  customer: string;
+  project_ref: string;
+  stage: string;
+  stage_label: string;
+  title: string;
+  message: string;
+  by: string;
+  at: string;
+};
+
+export type AssignedWorkItem = {
+  quote_id: string;
+  quote_no: string;
+  customer: string;
+  project_ref: string;
+  stage: QuoteStage;
+  workflow_stage: string;
+  workflow_label: string;
+  team: string;
+  owner_name: string;
+  n_items: number;
+  updated_at: string;
+  assigned_via: "owner" | "team";
+};
+
+export type UpdatesTarget = { user_id: string; name: string; role: string };
+
+function updatesQuery(userId: string): string {
+  return userId ? `?${new URLSearchParams({ user: userId }).toString()}` : "";
+}
+
+export async function listWorkUpdates(userId = ""): Promise<{ target: UpdatesTarget; items: WorkUpdate[] }> {
+  return parse(await apiFetch(`${API_BASE}/api/v1/notifications${updatesQuery(userId)}`, { headers: headers() }));
+}
+
+export async function listAssignedWork(userId = ""): Promise<{ target: UpdatesTarget; items: AssignedWorkItem[] }> {
+  return parse(await apiFetch(`${API_BASE}/api/v1/notifications/assigned${updatesQuery(userId)}`, { headers: headers() }));
 }
 
 export async function convertUnits(

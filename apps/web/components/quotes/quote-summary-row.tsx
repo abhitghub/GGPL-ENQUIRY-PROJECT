@@ -1,8 +1,9 @@
 "use client";
 
-import { ArrowRight, Trash2 } from "lucide-react";
+import { ArrowRight, FileSpreadsheet, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 
-import { Quote } from "@/lib/api";
+import { API_BASE, Quote, exportEnquiryDetails } from "@/lib/api";
 import type { AppUser } from "@/lib/auth/users";
 import { resolveAppUserName } from "@/lib/auth/users";
 import { Badge } from "@/components/ui/badge";
@@ -92,6 +93,24 @@ export function QuoteSummaryRow({
       <TableCell className="py-1.5 text-sm text-muted-foreground">{new Date(quote.updated_at).toLocaleString("en-GB", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</TableCell>
       <TableCell className="py-1.5 text-right">
         <div className="flex justify-end gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            title="Download full enquiry details (Excel)"
+            aria-label={`Download details for ${quote.customer || quote.quote_no || quote.id}`}
+            onClick={async (event) => {
+              event.stopPropagation();
+              try {
+                const response = await exportEnquiryDetails(quote.id);
+                const url = response.signed_url.startsWith("http") ? response.signed_url : `${API_BASE}${response.signed_url}`;
+                window.open(url, "_blank");
+              } catch (error) {
+                toast.error(error instanceof Error ? error.message : "Could not download enquiry details");
+              }
+            }}
+          >
+            <FileSpreadsheet className="h-4 w-4" />
+          </Button>
           <Button
             variant="ghost"
             size="sm"

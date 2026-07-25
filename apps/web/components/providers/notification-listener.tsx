@@ -26,6 +26,30 @@ export type WorkNotification = {
 // screen (e.g. the role dashboard) can refresh its data without its own stream.
 export const WORK_NOTIFICATION_EVENT = "ggpl:work-notification";
 
+// Per-browser "last opened the Updates page" marker: the sidebar badge counts
+// feed items newer than this, and the Updates page bumps it on view.
+export const UPDATES_SEEN_KEY = "ggpl:updates-seen-at";
+export const UPDATES_SEEN_EVENT = "ggpl:updates-seen";
+
+export function updatesSeenAt(): number {
+  if (typeof window === "undefined") return 0;
+  try {
+    return Date.parse(window.localStorage.getItem(UPDATES_SEEN_KEY) || "") || 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function markUpdatesSeen() {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(UPDATES_SEEN_KEY, new Date().toISOString());
+  } catch {
+    // Private-mode storage failures just mean the badge stays until reload.
+  }
+  window.dispatchEvent(new Event(UPDATES_SEEN_EVENT));
+}
+
 // Mirrors PRICING_SCREEN_STEPS in role-dashboard-client.tsx: from pricing
 // onward the work happens on the Quotations screen.
 const PRICING_SCREEN_STEPS = new Set([
@@ -36,7 +60,7 @@ const PRICING_SCREEN_STEPS = new Set([
   "quotation_sent_to_customer",
 ]);
 
-function hrefFor(notification: WorkNotification): string {
+export function workNotificationHref(notification: Pick<WorkNotification, "quote_id" | "stage">): string {
   if (!notification.quote_id) return "/role-dashboard";
   return PRICING_SCREEN_STEPS.has(notification.stage)
     ? `/quotes/final?quote=${notification.quote_id}`
@@ -78,7 +102,7 @@ export function NotificationListener() {
       if (!notification?.id || seen.current.has(notification.id)) return;
       seen.current.add(notification.id);
       window.dispatchEvent(new CustomEvent(WORK_NOTIFICATION_EVENT, { detail: notification }));
-      const href = hrefFor(notification);
+      const href = workNotificationHref(notification);
       toast.info(notification.title, {
         id: notification.id,
         description: notification.message,

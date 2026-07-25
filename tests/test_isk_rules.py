@@ -39,8 +39,10 @@ def test_isk_fcs_rules_recover_style_size_rating_set_components_and_flange_stand
         assert item["isk_sleeve_material"] == "GRE G10/G11"
         assert item["isk_insulating_washer"] == "GRE G10/G11"
         assert item["isk_washer_material"] == "HARDENED DIELECTRIC COATED SS316"
+        # Customer Data ground truth quotes the style label bare — the TYPE F/RF
+        # context lives in the face/standard tail, not on the style label.
         assert item["ggpl_description"] == (
-            f"SIZE: {expected_size} X 600#, INSULATING GASKET KIT, STYLE-FCS (TYPE F - RF), "
+            f"SIZE: {expected_size} X 600#, INSULATING GASKET KIT, STYLE-FCS, "
             "(SET: G10/G11 GASKET WITH SS316 6.2 MM THK, PTFE PRIMARY SEAL, MICA SECONDARY SEAL, "
             "GRE G10/G11 WASHER & SLEEVES, HARDENED DIELECTRIC COATED 316 METALLIC WASHER 3 MM THK), "
             "RF, ASME B16.5"

@@ -132,6 +132,15 @@ def test_enquiry_detail_workbook_and_drive_package(tmp_path, monkeypatch):
     for sheet in ["Enquiry", "Line Items", "Workflow History"]:
         assert sheet in workbook_xml
 
+    # The portal endpoint serves the same workbook via a signed download URL.
+    exported = client.post(f"/api/v1/quotes/{enquiry_id}/exports/details", headers=headers)
+    assert exported.status_code == 200
+    body = exported.json()
+    assert body["filename"].endswith("Enquiry Details.xlsx")
+    downloaded = client.get(body["signed_url"])
+    assert downloaded.status_code == 200
+    assert "Detail Test Co" in _shared_strings(downloaded.content)
+
     # Drive folder mode: the package writes one folder per enquiry with the
     # details workbook inside (no quotation Excel yet — nothing generated).
     monkeypatch.setenv("GDRIVE_EXPORT_ENABLED", "true")

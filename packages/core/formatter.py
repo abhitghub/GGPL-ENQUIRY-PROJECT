@@ -155,9 +155,9 @@ def _fmt_rtj(item: dict) -> str:
         parts.append(standard)
         return ' ,'.join(parts)
 
-    # RX/BX rings are pressure-energized profiles; oval/octagonal groove labels
-    # apply to R-series rings and should not be printed for RX/BX ring numbers.
-    if ring_no.upper().startswith(('RX-', 'BX-')):
+    # RX rings are pressure-energized profiles; the groove label is not
+    # printed for them. BX rings are quoted like R-series (with RTJ + groove).
+    if ring_no.upper().startswith('RX-'):
         parts = [f'SIZE : {ring_no}', moc]
         if hardness_str:
             parts.append(hardness_str)
@@ -257,19 +257,21 @@ def _fmt_kamm(item: dict) -> str:
     rating_str = _fmt_rating(rating)
     thk_str = f' X {_fmt_num(thk)}MM THK' if thk else ''
 
-    # GROOOVED METAL GASKET format: integral outer ring OR named outer ring (non-pre-formatted)
-    use_grooved = (is_integral or outer_ring) and kamm_core and 'KAMMPROFILE' not in kamm_core
-    if use_grooved:
-        moc_part = f'KAMMPROFILE {kamm_core} GROOOVED METAL GASKET WITH {covering} COVERING LAYER ON BOTH SIDES'
+    # GGPL house format when structured core material is known:
+    #   SIZE : {size} X {rating} X {thk}MM THK, KAMMPROFILE {core} GASKET WITH
+    #   {covering} LAYER ON BOTH SIDES WITH INTEGRAL OUTERRING, {standard}
+    # An explicitly named outer ring replaces the integral-outerring suffix.
+    if kamm_core and 'KAMMPROFILE' not in kamm_core:
+        moc_part = f'KAMMPROFILE {kamm_core} GASKET WITH {covering} LAYER ON BOTH SIDES'
         if inner_ring and outer_ring:
-            ring_part = f'{inner_ring} INNER RING & {outer_ring} OUTER RING'
+            suffix = f' + {inner_ring} INNER RING & {outer_ring} OUTER RING'
+        elif outer_ring and outer_ring != kamm_core:
+            suffix = f' + {outer_ring} OUTER RING'
         elif is_integral and outer_ring:
-            ring_part = f'INTEGRAL {outer_ring} OUTER RING'
-        elif is_integral:
-            ring_part = 'INTEGRAL OUTER RING'
+            suffix = f' + INTEGRAL {outer_ring} OUTER RING'
         else:
-            ring_part = f'{outer_ring} OUTER RING'
-        parts = [f'SIZE : {size_str} X {rating_str}{thk_str}', moc_part, ring_part]
+            suffix = ' WITH INTEGRAL OUTERRING'
+        parts = [f'SIZE : {size_str} X {rating_str}{thk_str}', f'{moc_part}{suffix}']
         _append_special_part(parts, item.get('special'))
         if standard:
             parts.append(standard)
@@ -388,11 +390,41 @@ def _fmt_oring(item: dict) -> str:
     return ', '.join(parts)
 
 
+def _isk_echo(item: dict) -> str | None:
+    """GGPL quotes ISK enquiries that spell out their own component list by
+    echoing that list after a normalised SIZE prefix.
+
+    e.g. '8", GSKT INSULATION 150# RF, GASKET GRE (G10), W/316SS CORE, ...'
+       → 'SIZE: 8" X 150#, INSULATING GASKET, GRE (G10), W/316SS CORE, ...'
+    """
+    import re as _re
+    size = item.get('size')
+    rating = item.get('rating')
+    if not (size and rating):
+        return None
+    desc = item.get('raw_description') or item.get('description') or ''
+    up = _re.sub(r'\s+', ' ', str(desc).upper()).strip()
+    prefix = f'SIZE: {_fmt_size(size, "ISK")} X {_fmt_rating(rating)}'
+    # Family 1: "..., GASKET GRE (G10), W/316SS CORE, ... SLEEVES AND WASHER"
+    m = _re.search(r'[,\s](GASKET\s+GRE\b.*)$', up)
+    if m and _re.search(r'CORE|SLEEVE|WASHER', m.group(1)):
+        tail = _re.sub(r'\s*-\s*H2S\s+RATED\s*$', '', m.group(1)).strip(' .,')
+        return f'{prefix}, INSULATING {tail}'
+    # Family 2: "ISOLATION KIT RF CL150 Steel Washer (Material: ...), ..."
+    m = _re.search(r'ISOLATION\s+KIT\s+(?:RF\s+|FF\s+)?(?:CL\s*\d+#?\s*)?(.*\(MATERIAL.*)$', up)
+    if m:
+        return f'{prefix}, ISOLATION KIT {m.group(1).strip(" .,")}'
+    return None
+
+
 def _fmt_isk(item: dict) -> str:
     size = item.get('size')
     rating = item.get('rating')
     if not (size and rating):
         return ''
+    echo = _isk_echo(item)
+    if echo:
+        return echo
     gtype = item.get('gasket_type', 'ISK')
     size_str = _fmt_size(size, gtype)
     rating_str = _fmt_rating(rating)
@@ -431,10 +463,9 @@ def _fmt_isk(item: dict) -> str:
             or item.get('isk_sleeve_material') or item.get('isk_insulating_washer')
         )
         set_content = _style_cs_set(item) if has_components else (special or '')
-        # If ISK type is TYPE-F, add the "(TYPE F - RF)" qualifier on the style label
-        isk_type = (item.get('isk_type') or '').upper()
-        style_label = 'STYLE-CS (TYPE F - RF)' if 'TYPE-F' in isk_type else 'STYLE-CS'
-        out = f'SIZE: {size_str} X {rating_str}, INSULATING GASKET KIT, {style_label}, (SET: {set_content})'
+        # GGPL quotes the style label bare — the TYPE F/RF context lives in
+        # the face/standard tail, not on the style label.
+        out = f'SIZE: {size_str} X {rating_str}, INSULATING GASKET KIT, STYLE-CS, (SET: {set_content})'
         tail_parts = []
         if face_type:
             tail_parts.append(face_type)
@@ -449,10 +480,7 @@ def _fmt_isk(item: dict) -> str:
     # STYLE-N and equivalent parenthesized styles (FCS, TYPE-D):
     # "SIZE: S X R, INSULATING GASKET KIT ({style}) spec, face (fire_safety)"
     if isk_style in ('STYLE-N', 'FCS', 'TYPE-D'):
-        isk_type = (item.get('isk_type') or '').upper()
         style_label = 'STYLE-FCS' if isk_style == 'FCS' else isk_style
-        if isk_style == 'FCS' and 'TYPE-F' in isk_type:
-            style_label += ' (TYPE F - RF)'
         out = f'{base}, INSULATING GASKET KIT, {style_label}'
         # Customer SET blocks are already the most faithful kit description.
         # Use split component fields only when no complete SET/spec was supplied.
@@ -693,16 +721,11 @@ def _fmt_size(size: str, gtype: str) -> str:
             if mf:
                 return f'{mf.group(1)}-{mf.group(2)}/{mf.group(3)}"'
         else:
-            # Mixed fraction with space or hyphen: "1 1/4"" or "1-1/4"" → "1.25""
+            # Mixed and simple fractions are echoed as the customer wrote them
+            # ("1 1/2\"", "3/4\"") — GGPL keeps the enquiry's own size style.
             mf = _re.match(r'^(\d+)[\s\-]+(\d+)/(\d+)"$', s)
             if mf:
-                val = int(mf.group(1)) + int(mf.group(2)) / int(mf.group(3))
-                return f'{_fmt_num(val)}"'
-        # Simple fraction: "3/4"" → "0.75""
-        sf = _re.match(r'^(\d+)/(\d+)"$', s)
-        if sf:
-            val = int(sf.group(1)) / int(sf.group(2))
-            return f'{_fmt_num(val)}"'
+                return f'{mf.group(1)} {mf.group(2)}/{mf.group(3)}"'
         # Sub-1" decimal → standard fractional name: "0.875"" → "7/8""
         dec = _re.match(r'^(0\.\d+)"$', s)
         if dec:
@@ -719,13 +742,17 @@ def _fmt_size(size: str, gtype: str) -> str:
     # DN prefix: "DN 100" / "DN25" → "DN 100" / "DN 25"
     m = _re.match(r'^DN\s*(\d+(?:\.\d+)?)$', s, _re.IGNORECASE)
     if m:
-        return f'DN {int(float(m.group(1)))}'
+        # GGPL prints DN sizes number-first: "25 DN"
+        return f'{int(float(m.group(1)))} DN'
     # NB suffix: "100 NB" / "25NB" → "100 NB" / "25 NB"
     m = _re.match(r'^(\d+(?:\.\d+)?)\s*NB$', s, _re.IGNORECASE)
     if m:
         return f'{int(float(m.group(1)))} NB'
-    # Strip NPS / INCH / IN label and append inch symbol
+    # Strip NPS / INCH / IN label and append inch symbol; re-enter so bare
+    # fractions ("1/2") get the same normalisation as quoted ones ("1/2\"")
     bare = _re.sub(r'\bNPS\b|\bINCH(ES)?\b|\bIN\b', '', s, flags=_re.IGNORECASE).strip()
+    if _re.match(r'^(?:\d+[\s\-]+)?\d+/\d+$', bare):
+        return _fmt_size(f'{bare}"', gtype)
     return f'{bare}"'
 
 

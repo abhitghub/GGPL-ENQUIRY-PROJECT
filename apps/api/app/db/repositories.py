@@ -155,6 +155,60 @@ app_settings_table = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
+notifications_table = Table(
+    "work_notifications",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("org_id", uuid_type, index=True),
+    Column("kind", Text, nullable=False, default=""),
+    Column("quote_id", Text, nullable=False, default=""),
+    Column("customer", Text, nullable=False, default=""),
+    Column("project_ref", Text, nullable=False, default=""),
+    Column("stage", Text, nullable=False, default=""),
+    Column("stage_label", Text, nullable=False, default=""),
+    Column("title", Text, nullable=False, default=""),
+    Column("message", Text, nullable=False, default=""),
+    Column("actor_id", Text, nullable=False, default=""),
+    Column("actor_name", Text, nullable=False, default=""),
+    Column("target_roles", json_type, nullable=False, default=list),
+    Column("target_user_ids", json_type, nullable=False, default=list),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+# The Updates feed is a recent-activity view, not an audit log: keep only the
+# newest rows per org so the store cannot grow unboundedly.
+MAX_NOTIFICATIONS_PER_ORG = 500
+
+NOTIFICATION_EVENT_FIELDS = ("id", "kind", "quote_id", "customer", "project_ref", "stage", "stage_label", "title", "message")
+
+
+def _notification_row(org_id: str, event: dict[str, Any], *, roles: list[str], user_ids: list[str], actor_id: str) -> dict[str, Any]:
+    row = {field: str(event.get(field) or "") for field in NOTIFICATION_EVENT_FIELDS}
+    row["org_id"] = org_id
+    row["actor_id"] = str(actor_id or "")
+    row["actor_name"] = str(event.get("by") or "")
+    row["target_roles"] = [str(role) for role in roles]
+    row["target_user_ids"] = [str(user) for user in user_ids]
+    row["created_at"] = str(event.get("at") or _now().isoformat())
+    return row
+
+
+def _notification_matches(row: dict[str, Any], *, user_id: str, role: str) -> bool:
+    """Whether a stored notification was targeted at this user: directly, or
+    via their role — never their own actions."""
+    if str(row.get("actor_id") or "") == user_id:
+        return False
+    return user_id in (row.get("target_user_ids") or []) or role in (row.get("target_roles") or [])
+
+
+def _notification_public(row: dict[str, Any]) -> dict[str, Any]:
+    """Shape a stored row like the SSE event the browser already understands."""
+    return {
+        **{field: str(row.get(field) or "") for field in NOTIFICATION_EVENT_FIELDS},
+        "by": str(row.get("actor_name") or row.get("actor_id") or ""),
+        "at": _json_datetime(row.get("created_at") or ""),
+    }
+
 
 # Seed one login per team so admins can sign in immediately and then create/
 # rename real users in Settings > Users. Passwords are dev bootstrap defaults
@@ -443,6 +497,7 @@ class LocalJsonRepository:
             "doc_sessions": {},
             "app_users": {},
             "app_settings": {},
+            "notifications": {},
         }
         self._load()
 
@@ -452,7 +507,7 @@ class LocalJsonRepository:
         try:
             self._state.update(json.loads(self._path.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError):
-            self._state = {"quotes": {}, "jobs": {}, "exports": {}, "doc_sessions": {}, "app_users": {}, "app_settings": {}}
+            self._state = {"quotes": {}, "jobs": {}, "exports": {}, "doc_sessions": {}, "app_users": {}, "app_settings": {}, "notifications": {}}
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -678,6 +733,31 @@ class LocalJsonRepository:
             self._state.setdefault("app_settings", {})[f"{org_id}:access"] = data
             self._save()
             return _access_settings_with_defaults(deepcopy(data))
+
+    def add_notification(self, org_id: str, event: dict[str, Any], *, roles: list[str], user_ids: list[str], actor_id: str) -> None:
+        row = _notification_row(org_id, event, roles=roles, user_ids=user_ids, actor_id=actor_id)
+        with self._lock:
+            store = self._state.setdefault("notifications", {})
+            store[row["id"]] = row
+            org_rows = sorted(
+                (item for item in store.values() if item.get("org_id") == org_id),
+                key=lambda item: str(item.get("created_at") or ""),
+                reverse=True,
+            )
+            for stale in org_rows[MAX_NOTIFICATIONS_PER_ORG:]:
+                store.pop(str(stale.get("id")), None)
+            self._save()
+
+    def list_notifications(self, org_id: str, *, user_id: str, role: str, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = [
+                deepcopy(row)
+                for row in self._state.setdefault("notifications", {}).values()
+                if row.get("org_id") == org_id
+            ]
+        rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        matched = [_notification_public(row) for row in rows if _notification_matches(row, user_id=user_id, role=role)]
+        return matched[: max(1, limit)]
 
     def get_customer_settings(self, org_id: str) -> CustomerSettings:
         with self._lock:
@@ -989,6 +1069,7 @@ class PostgresRepository:
                     """
                 ))
                 conn.execute(text("create index if not exists app_users_org_email_idx on app_users (org_id, email)"))
+                conn.execute(text("create index if not exists work_notifications_org_created_idx on work_notifications (org_id, created_at desc)"))
 
     def _quote_from_row(self, row: Any) -> QuoteRead:
         data = dict(row._mapping if hasattr(row, "_mapping") else row)
@@ -1321,6 +1402,40 @@ class PostgresRepository:
                     )
                 )
         return _access_settings_with_defaults(value)
+
+    def add_notification(self, org_id: str, event: dict[str, Any], *, roles: list[str], user_ids: list[str], actor_id: str) -> None:
+        row = _notification_row(org_id, event, roles=roles, user_ids=user_ids, actor_id=actor_id)
+        org_uuid = _tenant_uuid(org_id)
+        row["org_id"] = org_uuid
+        row["created_at"] = _parse_dt(row["created_at"])
+        with self._engine.begin() as conn:
+            conn.execute(insert(notifications_table).values(**row))
+            cutoff = conn.execute(
+                select(notifications_table.c.created_at)
+                .where(notifications_table.c.org_id == org_uuid)
+                .order_by(notifications_table.c.created_at.desc())
+                .offset(MAX_NOTIFICATIONS_PER_ORG)
+                .limit(1)
+            ).scalar_one_or_none()
+            if cutoff is not None:
+                conn.execute(
+                    delete(notifications_table).where(
+                        notifications_table.c.org_id == org_uuid,
+                        notifications_table.c.created_at <= cutoff,
+                    )
+                )
+
+    def list_notifications(self, org_id: str, *, user_id: str, role: str, limit: int = 100) -> list[dict[str, Any]]:
+        stmt = (
+            select(notifications_table)
+            .where(notifications_table.c.org_id == _tenant_uuid(org_id))
+            .order_by(notifications_table.c.created_at.desc())
+            .limit(MAX_NOTIFICATIONS_PER_ORG)
+        )
+        with self._engine.begin() as conn:
+            rows = [dict(row._mapping) for row in conn.execute(stmt)]
+        matched = [_notification_public(row) for row in rows if _notification_matches(row, user_id=user_id, role=role)]
+        return matched[: max(1, limit)]
 
     def get_customer_settings(self, org_id: str) -> CustomerSettings:
         org_uuid = _tenant_uuid(org_id)

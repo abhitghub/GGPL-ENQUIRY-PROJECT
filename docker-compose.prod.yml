@@ -106,14 +106,16 @@ services:
     restart: unless-stopped
     environment:
       PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    # NOTE: keep every continuation line at the SAME indentation — YAML '>' only
+    # folds equally-indented lines into one; a deeper-indented line keeps its
+    # newline and breaks the sh -c string.
     command: >
       sh -c 'while true; do
-        mkdir -p /gdrive/db-backups &&
-        pg_dump -h postgres -U postgres -d gasket_quote -F c
-          -f /gdrive/db-backups/gasket_quote-$$(date +%Y-%m-%d).dump &&
-        echo "[db-backup] saved gasket_quote-$$(date +%Y-%m-%d).dump" &&
-        ls -1t /gdrive/db-backups/gasket_quote-*.dump 2>/dev/null | tail -n +15 | xargs -r rm --;
-        sleep 86400;
+      mkdir -p /gdrive/db-backups;
+      pg_dump -h postgres -U postgres -d gasket_quote -F c -f "/gdrive/db-backups/gasket_quote-$$(date +%Y-%m-%d).dump"
+      && echo "[db-backup] saved gasket_quote-$$(date +%Y-%m-%d).dump";
+      ls -1t /gdrive/db-backups/gasket_quote-*.dump 2>/dev/null | tail -n +15 | xargs -r rm --;
+      sleep 86400;
       done'
     volumes:
       - ${GDRIVE_HOST_DIR:-./gdrive-out}:/gdrive

@@ -2,9 +2,10 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { BarChart3, Calculator, CheckCircle2, ChevronDown, FileCheck2, FileQuestion, FileSearch, FileText, Layers3, LayoutDashboard, Menu, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings, Truck } from "lucide-react";
+import { BarChart3, Bell, Calculator, CheckCircle2, ChevronDown, FileCheck2, FileQuestion, FileSearch, FileText, Layers3, LayoutDashboard, Menu, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings, Truck } from "lucide-react";
 
 import { ThemeToggle } from "@/components/app-shell/theme-toggle";
+import { UpdatesBadge } from "@/components/app-shell/updates-badge";
 import { UserMenu } from "@/components/app-shell/user-menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -79,6 +80,7 @@ const navSections: NavSection[] = [
     title: "Start",
     items: [
       { href: "/dashboard", label: "My work", icon: LayoutDashboard, capability: "view_dashboard" },
+      { href: "/updates", label: "Updates", icon: Bell, capability: "view_dashboard" },
     ],
   },
   {
@@ -177,7 +179,7 @@ function SidebarNav({ activePath, collapsed = false }: { activePath: string; col
                 key={`${section.title}-${item.href}-${item.label}`}
                 href={item.href}
                 className={cn(
-                  "flex items-start gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+                  "relative flex items-start gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
                   collapsed && "justify-center px-2",
                   active && "bg-muted text-foreground hover:bg-muted",
                 )}
@@ -185,6 +187,7 @@ function SidebarNav({ activePath, collapsed = false }: { activePath: string; col
               >
                 <Icon className="mt-0.5 h-4 w-4 shrink-0" />
                 {!collapsed && <span className="min-w-0 truncate">{item.label}</span>}
+                {item.href === "/updates" ? <UpdatesBadge collapsed={collapsed} /> : null}
               </Link>
             );
           })}
