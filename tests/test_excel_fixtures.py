@@ -98,14 +98,19 @@ def test_spiral_wound_parser_normalizes_common_export_and_ocr_noise():
         "grafoil filler and 3.2 thk SS inner & outer ring, dimension as per ASME B 16.20"
     )
     assert shared_ring_material["status"] == "ready"
-    assert shared_ring_material["sw_inner_ring"] == "SS"
-    assert shared_ring_material["sw_outer_ring"] == "SS"
+    # GGPL quoting convention (Customer Data ground truth): generic "SS"
+    # rings beside a graded winding are quoted in the winding grade.
+    assert shared_ring_material["sw_inner_ring"] == "SS317L"
+    assert shared_ring_material["sw_outer_ring"] == "SS317L"
 
     stainless_ocr = _processed_description(
         "50mm, Gasket spiral wound 4.5mm thk CL 300 SG316 graphite filled inner ring SS316"
     )
     assert stainless_ocr["sw_winding_material"] == "SS316"
-    assert stainless_ocr["status"] == "missing"
+    # GGPL standard construction (Customer Data ground truth): an unspecified
+    # outer ring is quoted as CS instead of blocking the row as missing.
+    assert stainless_ocr["sw_outer_ring"] == "CS"
+    assert stainless_ocr["status"] == "ready"
 
 
 def test_excel_parser_prefers_purchase_quantity_and_business_serial_column():

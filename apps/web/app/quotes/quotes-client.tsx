@@ -109,6 +109,7 @@ import { buildQuotePricingSummary } from "@/components/quotes/pricing-utils";
 import { evaluateQuoteQuality } from "@/components/quotes/quality-utils";
 import { itemMatchesSmartFilter, quoteDueState, quoteHasClarification, quoteIsHighRisk, quoteIsHighValue } from "@/components/quotes/queue-utils";
 import { PricingGrid } from "@/components/quotes/pricing-grid";
+import { PriceBreakupPanel } from "@/components/quotes/price-breakup";
 import { QuoteSummaryRow } from "@/components/quotes/quote-summary-row";
 import { QUOTATION_STAGES, QUOTATION_STAGE_INDEX, QuotationStageId, quotationStageBadgeVariant, quotationStageFromData } from "@/components/quotes/quotation-stage";
 import { appendActivity } from "@/components/quotes/activity-utils";
@@ -6962,6 +6963,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       </div>
                     )}
                   </div>
+
+                  <PriceBreakupPanel items={items} lines={pricingSummary.lines} currency={currency} />
 
                   <div className="rounded-md border bg-background p-3">
                     <div className="mb-3 flex items-center gap-2 text-sm font-medium"><SlidersHorizontal className="h-4 w-4" />Commercial controls</div>

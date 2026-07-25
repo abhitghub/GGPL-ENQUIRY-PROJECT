@@ -12,9 +12,9 @@ forwards events onto each subscriber's event loop with call_soon_threadsafe.
 If the deployment ever scales to multiple workers/nodes, replace the fan-out
 with Redis pub/sub (REDIS_URL is already in config).
 
-Missed-while-offline is intentionally not persisted: the role dashboard is
-itself the durable queue — anything still waiting on a role shows up there on
-the next login. These events only make the arrival real-time.
+Every published event is also persisted (work_notifications via the repo) so
+the Updates page can show the full history — including anything that arrived
+while the user was offline. The SSE fan-out only makes the arrival real-time.
 """
 
 from __future__ import annotations
@@ -145,6 +145,30 @@ def _describe(quote: "QuoteRead") -> str:
     return f"{customer} ({ref})" if ref else customer
 
 
+def _persist(
+    org_id: str,
+    event: dict,
+    *,
+    roles: set[str] | None = None,
+    user_ids: set[str] | None = None,
+    actor_id: str = "",
+) -> None:
+    """Store the event so the Updates page can list it later. Best-effort: a
+    storage failure must not stop the real-time fan-out or the request."""
+    try:
+        from app.db import repo
+
+        repo.add_notification(
+            org_id,
+            event,
+            roles=sorted(roles or set()),
+            user_ids=sorted({user for user in (user_ids or set()) if user}),
+            actor_id=actor_id,
+        )
+    except Exception:  # pragma: no cover - defensive: never break the request
+        logger.exception("Failed to persist work notification")
+
+
 def notify_stage_change(actor: "CurrentUser", quote: "QuoteRead", dest_step: str, *, kind: str = "workflow") -> None:
     """A quote landed on a new workflow step: tell everyone whose role owns
     that step (except the person who moved it) that work is waiting on them.
@@ -153,6 +177,7 @@ def notify_stage_change(actor: "CurrentUser", quote: "QuoteRead", dest_step: str
         event = _base_event(kind, quote, actor, dest_step)
         event["title"] = "New work in your queue"
         event["message"] = f"{_describe(quote)} is now at '{event['stage_label']}' — waiting on your team."
+        _persist(actor.org_id, event, roles=stage_owner_roles(dest_step), actor_id=actor.user_id)
         hub.publish(
             actor.org_id,
             event,
@@ -173,6 +198,7 @@ def notify_assignment(actor: "CurrentUser", quote: "QuoteRead", owner_id: str) -
         event = _base_event("assignment", quote, actor, stage)
         event["title"] = "Enquiry assigned to you"
         event["message"] = f"{event['by']} assigned {_describe(quote)} to you."
+        _persist(actor.org_id, event, user_ids={owner_id}, actor_id=actor.user_id)
         hub.publish(actor.org_id, event, user_ids={owner_id}, exclude_user_ids={actor.user_id})
     except Exception:  # pragma: no cover - defensive: never break the request
         logger.exception("Failed to publish assignment notification")
@@ -185,6 +211,7 @@ def notify_change_query(actor: "CurrentUser", quote: "QuoteRead", target_label: 
         event = _base_event("query", quote, actor, stage)
         event["title"] = "Change query awaiting approval"
         event["message"] = f"{event['by']} raised a change query on {_describe(quote)} (to {target_label})."
+        _persist(actor.org_id, event, roles=QUERY_APPROVER_ROLES, actor_id=actor.user_id)
         hub.publish(actor.org_id, event, roles=QUERY_APPROVER_ROLES, exclude_user_ids={actor.user_id})
     except Exception:  # pragma: no cover - defensive: never break the request
         logger.exception("Failed to publish change-query notification")

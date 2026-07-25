@@ -24,7 +24,11 @@ from app.schemas.quotes import (
     WorkflowActionRequest,
 )
 from app.services.approved_quote_cache import cache_final_approved_quote
-from app.services.enquiry_register import REGISTER_FILENAME, build_enquiry_register_xlsx
+from app.services.enquiry_register import (
+    REGISTER_FILENAME,
+    build_enquiry_detail_xlsx,
+    build_enquiry_register_xlsx,
+)
 from app.services.enquiry_workflow import (
     TR_REQUIRED_GASKET_TYPES,
     active_step_ids,
@@ -639,6 +643,35 @@ def export_xlsx(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         quote_id=quote_id,
         export_type="xlsx",
+    )
+    return SignedUrlResponse(
+        signed_url=str(request.app.url_path_for("download_export", token=token)),
+        filename=filename,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@router.post("/quotes/{quote_id}/exports/details", response_model=SignedUrlResponse)
+def export_enquiry_details(
+    quote_id: str,
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+) -> SignedUrlResponse:
+    """The full record of one enquiry as Excel — every context field, all line
+    items, and the workflow history — so colleagues can pull the complete
+    picture straight from the portal, without access to the Drive folder."""
+    quote = _quote_or_404(user, quote_id)
+    linked_id = str((quote.stage_meta or {}).get("linked_quote_id") or "").strip()
+    linked = repo.get_quote(user.org_id, linked_id) if linked_id else None
+    content = build_enquiry_detail_xlsx(quote, linked)
+    filename = f"{(quote.quote_no or 'enquiry').replace('/', '-')} - Enquiry Details.xlsx"
+    token = repo.save_export(
+        user.org_id,
+        content,
+        filename,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        quote_id=quote_id,
+        export_type="enquiry_details",
     )
     return SignedUrlResponse(
         signed_url=str(request.app.url_path_for("download_export", token=token)),

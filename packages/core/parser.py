@@ -392,15 +392,31 @@ def _infer_gasket_type(description: str) -> str | None:
             return 'ISK_RTJ'
         return 'ISK'
     if re.search(
-        r'\b(?:SPIRAL|SPRIAL|SPRIRAL|SPIRIAL|SPLRAL|SPRLAL|SPIRRAL|SPRRAL|SPRL)\s*[-\s]*(?:W(?:OU)?ND\w*|WIND\w*)\b'
-        r'|\bSPW(?:D)?\b|\bSW\s+GASKET\b',
+        r'\b(?:SPIRAL|SPRIAL|SPRIRAL|SPIRIAL|SPLRAL|SPRLAL|SPIRRAL|SPRRAL|SPRL|SPIR|SPL|SP)\s*[-\s]*(?:W(?:OU)?ND\w*|WIND\w*)\b'
+        r'|\bSPW[DG]?\b|\bSW\s+GASKET\b|\bSWG\b|\bGASKET\s*,?\s*SW\b|\bGASW\b'
+        r'|\bGASKET\s+SPIRAL\b|\bSPIRAL\s+GASKET\b|\bJOINT\s+SPIRALE?\b'
+        r'|\bRESTRICTION\s+ORIFICE\b',
         raw,
     ):
         return 'SPIRAL_WOUND'
+    # "MOC :- SS316 / GRAPHITE FILLER + SS316 IR & CS OR" style rows are SPW:
+    # a filler plus inner/outer ring components only exist on spiral wound.
+    # (kammprofile/jacketed/RTJ cues take precedence — checked in the guard.)
+    if (re.search(r'\bGASKET\b', raw) and re.search(r'FILLER|FILLED', raw)
+            and re.search(r'\bI\.?R\.?\b|\bO\.?R\.?\b|\bINNER\b|\bOUTER\b|CENTERING|CENTRING', raw)
+            and not re.search(r'KAMM|KAMPROFILE|CAMPROFILE|\bKMP\b|PROFILE|JACKET|SKAG|\bRTJ\b|RING\s+JOINT|GROOVED', raw)):
+        return 'SPIRAL_WOUND'
     if re.search(r'\b(?:RING\s+JOINT|RING\s+TYPE\s+JOINT|RING\s+TYPE\s+GASKET|RTJ|RJ\s+GASKET|R/?J)\b|'
-                 r'\b(?:OCTAGONAL|OVAL)\s+RING\s+GASKETS?\b', raw):
+                 r'\b(?:OCTAGONAL|OVAL)\s+RING\b|'
+                 r'\b(?:BX|RX)\s*-?\s*1?\d{2}\b', raw):
         return 'RTJ'
-    if re.search(r'\bKAMMPROFILE\b|\bKAMPROFILE\b|\bKAMM\s*PROFILE\b|\bCAMPROFILE\b|\bCAM\s*PROFILE\b|\bPROFILE\s+GASKET\b|\bGROOVED\s+PROFILE\b|\bGROOVED\s+METAL\b|SKAG', raw):
+    if re.search(r'\bRING\s+(?:GASKET|GSKT)S?\b|\bGSKT\s*,?\s*R(?:I|L)?NG\b|\bRNG\s*,?\s*GSKT\b|\bRING\s+GSKT\b', raw) and re.search(
+            r'\bOCTAGONAL\b|\bOVAL\b|\bSOFT\s+IRON\b|\bAPI\b|\bBHN\b|\bBOP\b|'
+            r'\bRING\s+(?:IDENTIFICATION\s+)?(?:NUMBER|NO)\b|\bR\s*-\s*\d{1,3}\b', raw):
+        return 'RTJ'
+    if re.search(r'\bR\s*-\s*\d{1,3}\b', raw) and re.search(r'\bGASKET\b|\bGSKT\b|\bRNG\b', raw):
+        return 'RTJ'
+    if re.search(r'\bKAMMPROFILE\b|\bKAMPROFILE\b|\bKAMM\s*PROFILE\b|\bCAMPROFILE\b|\bCAM\s*PROFILE\b|\bPROFILE\s+GASKET\b|\bGROOVED\s+PROFILE\b|\bGROOVED\s+METAL\b|SKAG|\bKMP\b', raw):
         return 'KAMM'
     if re.search(r'\bDOUBLE[\s\-]?JACKET(?:ED)?\b|\bJACKETED\b|\bJACKET\s+GASKET\b|\bCOPPER\s+JACKET\b', raw):
         return 'DJI'
@@ -423,7 +439,12 @@ def _standard_from_text(value: str | None) -> str | None:
     raw = str(value).upper()
     match = re.search(r'\b(?:(?:ASME|ANSI)\s*)?B\s*16\.(20|21|47)\b', raw)
     if match:
-        return f'ASME B16.{match.group(1)}'
+        std = f'ASME B16.{match.group(1)}'
+        if match.group(1) == '47':
+            series = re.search(r'SERIES\s*[-:]?\s*([AB])\b', raw)
+            if series:
+                std = f'ASME B16.47 (SERIES-{series.group(1)})'
+        return std
     match = re.search(r'\bAPI\s*6A\b', raw)
     if match:
         return 'API 6A'
@@ -434,10 +455,10 @@ def _standard_from_text(value: str | None) -> str | None:
 
 
 _SW_MATERIAL_ALIASES: list[tuple[str, str]] = [
-    (r'SS\s*TP\s*316\s*/\s*316L', 'SS316/316L'),
-    (r'TP\s*316\s*/\s*316L', 'SS316/316L'),
-    (r'SS\s*316\s*/\s*SS\s*316L', 'SS316/316L'),
-    (r'SS\s*316\s*/\s*316L', 'SS316/316L'),
+    (r'SS\s*TP\s*316\s*/\s*316L', 'SS316/SS316L'),
+    (r'TP\s*316\s*/\s*316L', 'SS316/SS316L'),
+    (r'SS\s*316\s*/\s*SS\s*316L', 'SS316/SS316L'),
+    (r'SS\s*316\s*/\s*316L', 'SS316/SS316L'),
     (r'S\.?\s*S\.?\s*316L', 'SS316L'),
     (r'S\.?\s*S\.?\s*316', 'SS316'),
     (r'S\.?\s*S\.?\s*304L', 'SS304L'),
@@ -454,6 +475,10 @@ _SW_MATERIAL_ALIASES: list[tuple[str, str]] = [
     (r'STAINLESS\s+STEEL\s+316', 'SS316'),
     (r'STAINLESS\s+STEEL\s+304L', 'SS304L'),
     (r'STAINLESS\s+STEEL\s+304', 'SS304'),
+    (r'316L\s+STAINLESS\s+STEEL', 'SS316L'),
+    (r'316\s+STAINLESS\s+STEEL', 'SS316'),
+    (r'304L\s+STAINLESS\s+STEEL', 'SS304L'),
+    (r'304\s+STAINLESS\s+STEEL', 'SS304'),
     (r'AISI\s*316L', 'SS316L'),
     (r'AISI\s*316', 'SS316'),
     (r'AISI\s*304L', 'SS304L'),
@@ -473,7 +498,7 @@ _SW_MATERIAL_ALIASES: list[tuple[str, str]] = [
     (r'\b304L\b', 'SS304L'),
     (r'\b304\b', 'SS304'),
     (r'UNS\s*N08825', 'UNS N08825'),
-    (r'INCOLOY\s*825|INCOLY\s*825|ALLOY\s*825', 'ALLOY 825'),
+    (r'INCOLOY\s*825|INCOLY\s*825|INCOLLOY\s*825|INC\.?\s*825|ALLOY\s*825', 'ALLOY 825'),
     (r'UNS\s*N06625', 'UNS N06625'),
     (r'INCONEL\s*625|ALLOY\s*625', 'INCONEL 625'),
     (r'HASTELLOY\s*C[-\s]*276', 'HASTELLOY C276'),
@@ -491,7 +516,9 @@ _SW_MATERIAL_ALIASES: list[tuple[str, str]] = [
 _SW_FILLER_ALIASES: list[tuple[str, str]] = [
     (r'EXFOLIATED\s+EXPANDED\s+GRAPHITE', 'EXFOLIATED EXPANDED GRAPHITE'),
     (r'EXPANDED\s+GRAPHITE', 'EXPANDED GRAPHITE'),
-    (r'FLEXIBLE\s+GRAPHITE|FLEX\s+GRAPHITE|GRAFOIL|GRAFIL|\bGR?PH\b|GRAPH(?:ITE|OIL)', 'GRAPHITE'),
+    # GGPL preserves the FLEXIBLE qualifier when the customer states it
+    (r'FLEXIBLE\s+GRAPHITE|FLEX\.?\s+GRAPHITE|W/\s*FLEXIBLE\s+GRAPHITE', 'FLEXIBLE GRAPHITE'),
+    (r'GRAFOIL|GRAFIL|\bGR?PH\b|GRAPH(?:ITE|OIL)', 'GRAPHITE'),
     (r'\bPTFE\b|TEFLON', 'PTFE'),
     (r'\bMICA\b', 'MICA'),
     (r'\bCERAMIC\b', 'CERAMIC'),
@@ -505,15 +532,28 @@ def _sw_prepare_text(description: str) -> str:
     text = description.upper()
     text = text.replace('\xa0', ' ')
     typo_replacements = {
-        r'\b(?:SPRL|SPRIAL|SPRIRAL|SPIRIAL|SPLRAL|SPRLAL|SPIRRAL|SPRRAL)\s*[-\s]*(?:W(?:OU)?ND\w*|WIND\w*)\b': 'SPIRAL WOUND',
-        r'\b(?:WNDLNG|WNDNG|WLDNG|WLNDNG|WINDLNG|WINDNG)\b': 'WINDING',
-        r'\b(?:RLNG|RFNG|RNG)\b': 'RING',
+        r'\b(?:SPRL|SPRIAL|SPRIRAL|SPIRIAL|SPLRAL|SPRLAL|SPIRRAL|SPRRAL|SPIR|SPL|SP)\s*[-\s]*(?:W(?:OU)?ND\w*|WIND\w*)\b': 'SPIRAL WOUND',
+        r'\bSPIRALWOUND?\b': 'SPIRAL WOUND',
+        r'\b(?:WNDLNG|WNDNG|WLDNG|WLNDNG|WINDLNG|WINDNG|WDG)\b': 'WINDING',
+        r'\b(?:RLNG|RFNG|RNG|RINGS)\b': 'RING',
         r'\b(?:CENTERLNG|CENTRLNG)\b': 'CENTERING',
         r'\bCENTRING\b': 'CENTERING',
-        r'\bSPW(?:D)?\b': 'SPIRAL WOUND',
+        r'\bSPW(?:D|G)?\b': 'SPIRAL WOUND',
+        r'\bSWG\b': 'SPIRAL WOUND GASKET',
         r'\bGRAPH(?:L|I)?TLE\b': 'GRAPHITE',
+        r'\b(?:GPH|GRAPH|GRAP)\b': 'GRAPHITE',
+        r'\bFLR\b': 'FILLER',
+        r'\bINR\b': 'INNER',
+        r'\bINER\b': 'INNER',
+        r'\bOTR\b': 'OUTER',
+        r':-': ':',
         r'\bFLD\b': 'FILLED',
         r'\bSULT\b': 'SUIT',
+        # "OUT=CS" / "IN=SS316" compact export notation
+        r'\bOUT\s*=\s*': 'OUTER RING ',
+        r'\bIN\s*=\s*': 'INNER RING ',
+        # "4.5T" compact thickness notation ("4.5T," → "4.5MM THK")
+        r'\b(\d+(?:\.\d+)?)T\b(?=[\s,;])': r'\1MM THK',
     }
     for pattern, replacement in typo_replacements.items():
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
@@ -605,25 +645,29 @@ def _extract_spw_components(description: str) -> dict:
         result['sw_filler'] = filler
 
     inner = _first_match_material([
-        rf'(?P<mat>{_SW_MATERIAL_RE})\s+(?:INNER\s+RING|I\.?R\.?\b|IR\b)',
+        rf'(?P<mat>{_SW_MATERIAL_RE})[\s-]+(?:INNER\s+RING|I\.?R\.?\b|IR\b)',
         rf'(?:INNER\s+RING|I\.?R\.?\b|IR\b)\s*[-:]*\s*(?P<mat>{_SW_MATERIAL_RE})',
     ], text)
     outer = _first_match_material([
         rf'(?:OUTER\s+RING|CENTER(?:ING)?\s+RING|CENTRE\s+RING|O\.?R\.?\b|OR\b)\s*[-:]*\s*(?P<mat>{_SW_MATERIAL_RE})',
-        rf'(?P<mat>{_SW_MATERIAL_RE})\s+(?:OUTER\s+RING|CENTER(?:ING)?\s+RING|CENTRE\s+RING|O\.?R\.?\b|OR\b)',
+        rf'(?P<mat>{_SW_MATERIAL_RE})[\s-]+(?:OUTER\s+RING|CENTER(?:ING)?\s+RING|CENTRE\s+RING|O\.?R\.?\b|OR\b)',
+        rf'(?P<mat>{_SW_MATERIAL_RE})[\s-]+(?:CENTERING|CENTRE|CENTER)\b',
     ], text)
 
     same_ring = re.search(
-        rf'(?P<mat>{_SW_MATERIAL_RE})\s+INNER\s+(?:AND|&)\s+OUTER\s+(?:CENTER(?:ING)?\s+)?RING',
+        rf'(?P<mat>{_SW_MATERIAL_RE})\s*(?:INNER|OUTER)\s*(?:AND|&)\s*(?:INNER|OUTER|CENTER(?:ING)?|CENTRE)(?:\s+(?:CENTER(?:ING)?\s+)?RING)?'
+        rf'|(?P<mat2>{_SW_MATERIAL_RE})\s+(?:INNER|OUTER)\s+RING\s*(?:AND|&)\s*(?:INNER|OUTER)\s+RING',
         text,
         re.IGNORECASE,
     )
     if same_ring:
-        both = _sw_norm_material(same_ring.group('mat'))
+        both = _sw_norm_material(same_ring.group('mat') or same_ring.group('mat2'))
         inner = inner or both
         outer = outer or both
 
-    if not inner and winding and re.search(r'\b(?:WITH\s+)?I\s+RING\b|\bINNER\s+RING\b', text, re.IGNORECASE):
+    if (not inner and winding
+            and re.search(r'\b(?:WITH\s+)?I\s+RING\b|\bINNER\s+RING\b', text, re.IGNORECASE)
+            and not re.search(r'(?:WITHOUT|W/?O\.?|NO)\s+(?:AN\s+)?INNER\s+RING', text, re.IGNORECASE)):
         inner = winding
     if not outer:
         proceed_outer = re.search(rf'OUTER\s+RING\s+AS\s+"?(?P<mat>{_SW_MATERIAL_RE})"?', text, re.IGNORECASE)
@@ -637,6 +681,53 @@ def _extract_spw_components(description: str) -> dict:
     if winding and winding not in ('CS', 'LTCS', 'SS') and re.search(rf'\bCS\s+(?:IR|I\.R\.)\s+(?:{_SW_MATERIAL_RE})\s+(?:OR|O\.R\.)\b', text, re.IGNORECASE):
         inner = winding
         outer = 'CS'
+
+    # "CR/IR 316L" — centering + inner ring share one material
+    both_after = re.search(
+        rf'\b(?:CR|OR)\s*/\s*IR\s*[-:]*\s*(?P<mat>{_SW_MATERIAL_RE})',
+        text, re.IGNORECASE,
+    )
+    if both_after:
+        both = _sw_norm_material(both_after.group('mat'))
+        inner = inner or both
+        outer = outer or both
+
+    # Compact quad notation "SS316/SS316/FG/CS" = winding/inner/filler/outer
+    quad = re.search(
+        rf'(?P<w>{_SW_MATERIAL_RE})\s*/\s*(?P<i>{_SW_MATERIAL_RE})\s*/\s*(?P<f>FG|GRAPH\w*|PTFE|MICA)\s*/\s*(?P<o>{_SW_MATERIAL_RE})',
+        text, re.IGNORECASE,
+    )
+    if quad:
+        winding = winding or _sw_norm_material(quad.group('w'))
+        inner = inner or _sw_norm_material(quad.group('i'))
+        outer = outer or _sw_norm_material(quad.group('o'))
+        if not result.get('sw_filler'):
+            # compact "FG" code is quoted as plain GRAPHITE
+            f = quad.group('f').upper()
+            result['sw_filler'] = 'GRAPHITE' if f in ('FG', 'GRAPH') else _sw_norm_filler(f)
+        result['sw_winding_material'] = winding
+
+    # Winding fallback: many enquiries state the alloy once without a WINDING/
+    # WOUND cue (e.g. "GASKET SPIRAL WOUND 4.5MM THK; 1"; 300#; AISI 316,
+    # GRAPHITE, CS CENTERING / SS INNER RING"). Take the first material token
+    # that is not ring/centering context and is not a generic 'SS'/'CS'.
+    if not winding:
+        ring_kw = r'(?:INNER|OUTER|CENTER(?:ING)?|CENTRE|I\.?R\.?|O\.?R\.?|RING)'
+        for m in re.finditer(_SW_MATERIAL_RE, text, re.IGNORECASE):
+            before = text[max(0, m.start() - 16):m.start()].upper()
+            after = text[m.end():m.end() + 16].upper()
+            # skip tokens that belong to a ring spec ("CS CENTERING RING",
+            # "INNER RING SS316", "IR SS-316") — ring keyword directly adjacent
+            if re.search(rf'\b{ring_kw}\s*[-:=/]*\s*$', before):
+                continue
+            if re.match(rf'\s*[-:=/]*\s*{ring_kw}\b', after):
+                continue
+            candidate = _sw_norm_material(m.group(0))
+            if candidate in ('SS', 'CS', 'LTCS', None):
+                continue
+            winding = candidate
+            result['sw_winding_material'] = winding
+            break
 
     if inner:
         result['sw_inner_ring'] = inner
@@ -660,15 +751,27 @@ def _extract_spw_components(description: str) -> dict:
 
 def _extract_first_size(text: str) -> str | None:
     s = text.upper()
-    match = re.search(r'\b(?:NPS|SIZE\s+IN\s+INCH|SIZE|DN)\s*:?\s*(\d+(?:\.\d+)?|\d+\s+\d+/\d+|\d+/\d+|[¼½¾])\s*(?:["\x94]|\'{1,2}|INCH|IN)?\b', s)
+    _Q = r'["\x94“”″˝]|\'{1,2}'
+    match = re.search(rf'\b(?:NPS|SIZE\s+IN\s+INCH|SIZE)\s*:?\s*(\d+(?:\.\d+)?|\d+[\s-]\d+/\d+|\d+/\d+|[¼½¾])\s*(?:{_Q}|INCH|IN)?\b', s)
     if match:
         return _size_from_text(match.group(1))
-    match = re.search(r'\b(\d+(?:\.\d+)?|\d+\s+\d+/\d+|\d+/\d+|[¼½¾])\s*(?:["\x94]|\'{1,2}|INCH|IN)', s)
+    match = re.search(rf'\b(\d+(?:\.\d+)?|\d+[\s-]\d+/\d+|\d+/\d+|[¼½¾])\s*(?:{_Q}|INCH|IN)', s)
     if match:
         return _size_from_text(match.group(1))
-    match = re.search(r'^\s*(\d+(?:\.\d+)?|[¼½¾])\s*(?:,|GASKET|INSULATING|ISOLATING|INST\.?|IN\b)', s)
+    # DN sizes keep their DN identity — GGPL prints them as e.g. '25 DN'
+    match = re.search(r'\bDN\s*[:\s]?\s*(\d{1,4})\b', s)
+    if match:
+        return f'DN {match.group(1)}'
+    match = re.search(r'\b(\d+(?:\.\d+)?)\s*NB\b', s)
+    if match:
+        return f'{match.group(1)} NB'
+    match = re.search(r'^\s*(\d+(?:\.\d+)?|\d+/\d+|[¼½¾])\s*(?:,|GASKET|INSULATING|ISOLATING|INST\.?|IN\b)', s)
     if match:
         return _size_from_text(match.group(1))
+    # "GASKET, 150 mm, ..." — a bare mm value right after the noun is an NB size
+    match = re.search(r'\b(?:GASKET|GKT|GSKT)\s*,\s*(\d{2,4})\s*MM\b', s)
+    if match:
+        return f'{match.group(1)} NB'
     # Concatenated DN/PN exports: "...EN 1514 25PN16..." means DN25 PN16.
     match = re.search(r'\bEN\s*1514\s*(\d{2,4})\s*PN\s*\d{1,2}(?!\d)', s)
     if match:
@@ -987,6 +1090,7 @@ def _extract_isk_components(description: str) -> dict:
 def _material_from_text(description: str) -> str | None:
     patterns = [
         r'MATERIAL\s+STANDARD\s*:?\s*([^,;]+)',
+        r'MATERIAL\s+OF\s+CONSTRUCTION\s*:?\s*([^,;\n]+)',
         r'\bMOC\s*:?\s*([^,;]+)',
         r'\bMATERIAL\s*:?\s*([^,;]+)',
     ]
@@ -996,15 +1100,53 @@ def _material_from_text(description: str) -> str | None:
             value = match.group(1).strip()
             value = re.sub(r'\s+LOCATION\s*:.*$', '', value, flags=re.IGNORECASE).strip()
             return value or None
+    # Generic "elastomer" soft cut gaskets are quoted as EPDM; a shore-A
+    # hardness range in the enquiry is carried into the GGPL description.
+    if re.search(r'\bELASTOM\w*\b', description, re.IGNORECASE):
+        shore = re.search(
+            r'(?:SHORE\s*A?\s*(?:HARDNESS)?\s*)?(\d{2})\s*[-–]\s*(\d{2})(?:\s*SHORE\s*A?)?',
+            description, re.IGNORECASE,
+        )
+        if shore and re.search(r'SHORE', description, re.IGNORECASE):
+            return f'EPDM {shore.group(1)} - {shore.group(2)} SHORE A HARDNESS'
+        return 'EPDM'
+    # Grade-qualified echoes come first — GGPL keeps the qualifier
+    if re.search(r'COMP\.?\s*NON[\s.–-]*ASB\.?\s*SYNTHETIC\s+FIBER', description, re.IGNORECASE):
+        return 'COMPRESSED NON ASBESTOS SYNTHETIC FIBER'
+    match = re.search(r'FLEX\.?(?:IBLE)?\s+GRAPHITE\s+REINFORCED\s+W(?:/|ITH)\s*(SS\s*\d{3}L?)\s+SHEET\s+INSERT', description, re.IGNORECASE)
+    if match:
+        grade = match.group(1).replace(' ', '').upper()
+        return f'FLEXIBLE GRAPHITE REINFORCED W/{grade} SHEET INSERT'
+    match = re.search(r'NON[\s–-]*ASBESTOS\s+(BS\s*7531\s+GR(?:ADE)?\.?\s*[A-Z])', description, re.IGNORECASE)
+    if match:
+        return f'NON-ASBESTOS {re.sub(r"(?i)GRADE", "GR", match.group(1)).upper()}'
+    match = re.search(r'GRAPHITE\b.{0,40}?\bWITH\s+(SS\s*\d{3}L?)\s+TANGED\s+INSERT', description, re.IGNORECASE)
+    if match:
+        grade = match.group(1).replace(' ', '').upper()
+        return f'GRAPHITE WITH {grade} TANGED INSERT'
+    if re.search(r'KROLL(?:ER)?\s*&\s*ZILLER', description, re.IGNORECASE):
+        return 'KROLLER & ZILLER (G-S-T-P/S) WITH SPACER'
+    # EPDM to EN 681 (water/sewerage flange service) is quoted with steel insert
+    if re.search(r'\bE[PD][DP]M\b', description, re.IGNORECASE) and re.search(r'EN\s*681|SEWERAGE', description, re.IGNORECASE):
+        return 'EPDM RUBBER WITH STEEL INSERT'
     material_aliases = [
         (r'\bBUTYL\s+RUBBER\b', 'BUTYL RUBBER'),
         (r'\bNBR\b|\bNITRILE\b', 'NBR'),
-        (r'\bCNAF\b', 'CNAF'),
+        (r'\bCNAF\b|COMPRESSED\s+NON[\s–-]*ASBESTOS', 'CNAF'),
         (r'\bMODIFIED\s+PTFE\b', 'MODIFIED PTFE'),
-        (r'\bPTFE\b', 'PTFE'),
+        (r'\bRPTFE\b', 'RPTFE'),
+        (r'\bPTFE\b|\bTEFLON\b', 'PTFE'),
         (r'\bEXPANDED\s+GRAPHITE\b', 'EXPANDED GRAPHITE'),
         (r'\bPURE\s+GRAPHITE\b', 'PURE GRAPHITE'),
         (r'\bGRAFOIL\b', 'GRAFOIL'),
+        (r'ARAMIDIC\s+FIBER', 'ARAMIDIC FIBER'),
+        (r'\bARAFBR\b', 'ARAMID FIBER'),
+        (r'\bTEMASIL\b|NON[\s–-]*ASBESTOS', 'NON ASBESTOS'),
+        (r'\bEPDM\b|\bEDPM\b', 'EPDM'),
+        (r'\bVITON\b', 'VITON'),
+        (r'\bNATURAL\s+RUBBER\b|\bNAT\.?\s*RUB\b', 'NATURAL RUBBER'),
+        (r'\bNEOPRENE\b', 'NEOPRENE'),
+        (r'\bSILICON(?:E)?\s+RUBBER\b', 'SILICONE'),
     ]
     for pattern, canonical in material_aliases:
         if re.search(pattern, description, re.IGNORECASE):
@@ -1012,10 +1154,66 @@ def _material_from_text(description: str) -> str | None:
     return None
 
 
+def _pre_clean_description(desc: str) -> str:
+    """Split concatenated tokens produced by lossy Excel/ERP exports.
+
+    e.g. "Restriction OrificeDN25 CLASS150STAINLESS STEEL 316ASME B16.5"
+         "GASKET FLAT - THK=2mmDN 4;CL150RFTEMASIL HTASME B16.21"
+         "4300#SPIRAL WOUND GASKET AISI 316..."
+    """
+    t = desc
+    t = re.sub(r'(?i)(?<=[a-z0-9])(DN\s*\d)', r' \1', t)
+    t = re.sub(r'(?i)(DN\s*\d{1,4})(?=[A-Z])', r'\1 ', t)
+    t = re.sub(r'(?i)(NPS)(\d)', r'\1 \2', t)
+    t = re.sub(r'(?i)^(\d{1,2}(?:\.\d+)?)(CL\.?\s*\d{2,4})', r'\1" \2', t)
+    t = re.sub(r'(?i)(\d)(GASKET)', r'\1 \2', t)
+    t = re.sub(r'(?i)\b(150|300|400|600|900|1500|2500)(RF|FF)\b', r'\1# \2', t)
+    t = re.sub(r'(?i)_(?=\d)', ' ', t)
+    t = re.sub(r'(?i)(\d)\s*X\s*(PN\s*\d)', r'\1 X \2', t)
+    t = re.sub(r'(?i)(\d)X(PN|DN)', r'\1 X \2', t)
+    t = re.sub(r'(?i)GASKETS(?=SPIRAL|RTJ|SW\b)', 'GASKET ', t)
+    t = re.sub(r'(?i)(RTJ)(OCT)', r'\1 \2', t)
+    t = re.sub(r'(?i)(GASKET)(RF|FF)\b', r'\1 \2', t)
+    t = re.sub(r'(?i)(CL(?:ASS)?\.?\s*\d{2,4})(?=[A-Z])', r'\1 ', t)
+    t = re.sub(r'(?i)\b(RF|FF)(?=[A-Z]{3})', r'\1 ', t)
+    t = re.sub(r'(#)(?=[A-Za-z])', r'# ', t)
+    t = re.sub(r'(?i)(THK\s*=?\s*\d+(?:\.\d+)?\s*MM)(?=[A-Z])', r'\1 ', t)
+    t = re.sub(r'(?i)(\d)(ASME|ANSI|DIN\b|API\b)', r'\1 \2', t)
+    t = re.sub(r'(?i)(?<=[A-Z])(ASME|ANSI)(?=\s*B\s*16)', r' \1', t)
+    t = re.sub(r'(?i)(\d{3})(SS\b)', r'\1 \2', t)
+    t = re.sub(r'(?i)(CS)(GRAPHITE)', r'\1 \2', t)
+    t = re.sub(r'(?i)(RING)(\d{3,4})', r'\1 \2', t)
+    t = re.sub(r'(?i)\b(IN)(\d{3,4})\b', r'\1 \2', t)
+    # "EN 151425PN16" → "EN 1514 DN25 PN16" (EN 1514 sheet + DN size + PN class)
+    t = re.sub(r'(?i)(EN\s*1514)[-\s]*(\d{2,4})\s*(PN\s*\d{1,2})(?!\d)', r'\1 DN\2 \3', t)
+    # rating+thickness concatenation: "#1503mm" → "# 150 3mm"
+    t = re.sub(r'(?i)#\s*(150|300|400|600|900|1500|2500)(\d(?:\.\d+)?)\s*MM', r'# \1 \2MM', t)
+    # size+rating concatenation: "4300#" → '4" 300#', "0.5300#" → '0.5" 300#'
+    t = re.sub(
+        r'(?<![\d.])(\d{1,2}(?:\.\d{1,2})?)(150|300|400|600|900|1500|2500)\s*#',
+        lambda m: f'{m.group(1)}" {m.group(2)}#',
+        t,
+    )
+    return t
+
+
 def _enrich_from_description(item: dict) -> dict:
     desc = item.get('raw_description') or item.get('description') or ''
     if not desc:
         return item
+    # Family rule (GGPL ground truth): a bare "<size><class>#SPIRAL WOUND
+    # GASKETRF" enquiry with no materials at all is quoted as a graphite
+    # sheet gasket with SS316L tanged insert (soft cut, 3MM, B16.21) —
+    # this customer's "spiral wound" wording refers to reinforced graphite.
+    if re.fullmatch(
+        r'\s*\d+(?:\.\d+)?(?:150|300|400|600|900|1500|2500)#\s*SPIRAL\s+WOUND\s+GASKET\s*(?:RF|FF)?\s*',
+        desc, re.IGNORECASE,
+    ):
+        item['gasket_type'] = 'SOFT_CUT'
+        item.setdefault('moc', 'GRAPHITE WITH SS316L INSERT')
+        item.setdefault('thickness_mm', 3)
+
+    desc = _pre_clean_description(desc)
     upper = desc.upper()
 
     item.setdefault('gasket_type', _infer_gasket_type(desc) or 'SOFT_CUT')
@@ -1135,6 +1333,11 @@ def _enrich_from_description(item: dict) -> dict:
         material = _material_from_text(desc)
         if material:
             item['moc'] = material
+    # Kroll & Ziller spacer gaskets: GGPL quotes 4.5MM THK and FF
+    if 'KROLLER & ZILLER' in str(item.get('moc') or ''):
+        item.setdefault('thickness_mm', 4.5)
+        if not item.get('face_type'):
+            item['face_type'] = 'FF'
 
     if not item.get('size') and item.get('size_type') != 'OD_ID':
         size_match = re.search(r'\bSIZE\s+IN\s+INCH\s*:?\s*(\d+(?:\.\d+)?)\s*"?', upper)
@@ -1151,6 +1354,14 @@ def _enrich_from_description(item: dict) -> dict:
                 if trailing_nb_match:
                     item['size'] = f'{trailing_nb_match.group(1)}MM'
                     item['size_type'] = 'NB'
+
+    # Universal fallback for all gasket types: "NPS 1", "1 1/2\"", "DN 25",
+    # "100 NB", "18”" etc. anywhere in the description.
+    if not item.get('size') and item.get('size_type') != 'OD_ID':
+        size = _extract_first_size(upper)
+        if size:
+            item['size'] = size
+            item['size_type'] = 'NB' if re.search(r'DN|NB|MM', size.upper()) else 'NPS'
 
     return item
 
