@@ -16,8 +16,35 @@ Formats by type:
 """
 
 
+# Operator-selected sentinel for the `standard` field: the item is non-standard,
+# so no ASME/API/EN/DIN tag may be shown in the description or defaulted back in.
+NON_STANDARD = 'NON STANDARD'
+_NON_STANDARD_TOKENS = {'NON STANDARD', 'NON-STANDARD', 'NONSTANDARD', 'NON STD', 'NON-STD'}
+
+
+def is_non_standard(value) -> bool:
+    return str(value or '').strip().upper() in _NON_STANDARD_TOKENS
+
+
+def _display_standard(item: dict, default: str | None = None) -> str | None:
+    """Standard to print in the description. NON STANDARD suppresses the tag
+    entirely, including any per-type default."""
+    raw = item.get('standard')
+    if is_non_standard(raw):
+        return None
+    return raw or default
+
+
 def format_description(item: dict) -> str:
-    """Build GGPL description. Returns empty string if critical fields missing."""
+    """Build GGPL description. Returns empty string if critical fields missing.
+
+    When the rules engine set an escalation (exact house phrases like
+    'KINDLY PROVIDE RING NO' / 'REGRET'), that phrase IS the description.
+    """
+    escalation = item.get('escalation')
+    if escalation:
+        return escalation
+
     gtype = item.get('gasket_type', 'SOFT_CUT')
     special = item.get('special')
 
@@ -36,11 +63,41 @@ def format_description(item: dict) -> str:
     if gtype == 'O_RING':
         return _fmt_oring(item)
 
+    if gtype == 'LENS':
+        return _fmt_lens(item)
+
+    if gtype == 'MANHOLE':
+        return _fmt_manhole(item)
+
+    if gtype == 'ENVELOPE':
+        return _fmt_envelope(item)
+
+    if gtype == 'CMG':
+        return _fmt_cmg(item)
+
+    if gtype == 'METAL_CLAD':
+        return _fmt_metal_clad(item)
+
+    if gtype == 'SOLID_METAL':
+        return _fmt_solid_metal(item)
+
+    if gtype == 'LIP_SEAL':
+        return _fmt_lip_seal(item)
+
+    if gtype == 'DIAPHRAGM':
+        return _fmt_diaphragm(item)
+
+    if gtype == 'EYELET':
+        return _fmt_eyelet(item)
+
+    if gtype == 'SHEET':
+        return _fmt_sheet_supply(item)
+
     # --- SOFT_CUT and SPIRAL_WOUND ---
     moc = item.get('moc')
     thickness = item.get('thickness_mm')
     face = item.get('face_type')
-    standard = item.get('standard')
+    standard = _display_standard(item)
 
     if item.get('size_type') == 'OD_ID':
         od = item.get('od_mm')
@@ -50,7 +107,12 @@ def format_description(item: dict) -> str:
         size_part = f'SIZE : OD {_fmt_num(od)}MM X ID {_fmt_num(id_)}MM'
         if thickness:
             size_part += f' X {_fmt_num(thickness)}MM THK'
-        od_id_parts = [size_part, moc]
+        od_id_construction = {
+            'SHEET_GASKET': 'SHEET GASKET',
+            'CORRUGATED': 'CORRUGATED GASKET',
+            'PLUG_GASKET': 'PLUG GASKET',
+        }.get(gtype)
+        od_id_parts = [size_part, f'{moc} {od_id_construction}' if od_id_construction else moc]
         if special:
             od_id_parts.append(special)
         if standard:
@@ -133,7 +195,7 @@ def _fmt_rtj(item: dict) -> str:
     groove = item.get('rtj_groove_type') or 'OCT'
     hardness_spec = item.get('rtj_hardness_spec')
     bhn = item.get('rtj_hardness_bhn')
-    standard = item.get('standard') or 'ASME B16.20'
+    standard = _display_standard(item, 'ASME B16.20')
     special = item.get('special')
 
     if not moc:
@@ -152,7 +214,8 @@ def _fmt_rtj(item: dict) -> str:
         if hardness_str:
             parts.append(hardness_str)
         _append_special_part(parts, special)
-        parts.append(standard)
+        if standard:
+            parts.append(standard)
         return ' ,'.join(parts)
 
     # RX rings are pressure-energized profiles; the groove label is not
@@ -162,14 +225,16 @@ def _fmt_rtj(item: dict) -> str:
         if hardness_str:
             parts.append(hardness_str)
         _append_special_part(parts, special)
-        parts.append(standard)
+        if standard:
+            parts.append(standard)
         return ' ,'.join(parts)
 
     parts = [f'SIZE : {ring_no}', 'RTJ', groove, moc]
     if hardness_str:
         parts.append(hardness_str)
     _append_special_part(parts, special)
-    parts.append(standard)
+    if standard:
+        parts.append(standard)
     return ' ,'.join(parts)
 
 
@@ -206,7 +271,7 @@ def _fmt_kamm(item: dict) -> str:
     surface = (item.get('kamm_surface_material') or item.get('kamm_covering_layer') or '').strip().upper()
     size = item.get('size')
     rating = item.get('rating')
-    standard = item.get('standard')
+    standard = _display_standard(item)
     thk = item.get('thickness_mm')
     core_thk = item.get('kamm_core_thk')
     integral = item.get('kamm_integral_outer_ring')
@@ -376,18 +441,202 @@ def _fmt_dji(item: dict) -> str:
 
 
 def _fmt_oring(item: dict) -> str:
-    id_mm = item.get('id_mm')
-    cs_mm = item.get('thickness_mm')
+    """O-rings & cords per the GGPL master spec:
+      SIZE: [{OD}MM OD X ]{ID}MM ID X {CS}MM THK, [HIGH PRESSURE ]{MAT} O-RING
+      cord: SIZE: {CS}MM CS X {L}MTR LENGTH, {MAT} O-RING CORD
+    Ring dia >600MM or CS >12MM → append (VULCANIZED / ENDLESS JOINED).
+    """
     moc = item.get('moc')
+    cs_mm = item.get('thickness_mm')
+    if item.get('oring_cord_length_mtr'):
+        if not (cs_mm and moc):
+            return ''
+        return f'SIZE: {_fmt_num(cs_mm)}MM CS X {_fmt_num(item["oring_cord_length_mtr"])}MTR LENGTH, {moc} O-RING CORD'
+
+    id_mm = item.get('id_mm')
     if not (id_mm and cs_mm and moc):
         return ''
+    od_mm = item.get('od_mm')
+    size = f'SIZE: {_fmt_num(od_mm)}MM OD X ' if od_mm else 'SIZE: '
+    size += f'{_fmt_num(id_mm)}MM ID X {_fmt_num(cs_mm)}MM THK'
+    hp = 'HIGH PRESSURE ' if item.get('oring_high_pressure') else ''
+    out = f'{size}, {hp}{moc} O-RING'
+    if item.get('special'):
+        out = _with_special(out, item['special'])
+    if float(id_mm) > 600 or float(cs_mm) > 12:
+        out += ' (VULCANIZED / ENDLESS JOINED)'
+    return out
 
-    parts = [f'SIZE : ID {_fmt_num(id_mm)}MM X C/S {_fmt_num(cs_mm)}MM', 'O-RING', moc]
-    pressure = item.get('pressure_rating')
-    if pressure:
-        parts.append(f'PRESSURE RATING: {pressure}')
-    _append_special_part(parts, item.get('special'))
-    return ', '.join(parts)
+
+def _fmt_lens(item: dict) -> str:
+    """LENS ring gasket — DIN 2696, or dims + drawing."""
+    moc = item.get('moc')
+    if not moc:
+        return ''
+    dn = item.get('size')
+    pn = item.get('rating')
+    if dn and pn:
+        dn_str = str(dn).upper().replace(' ', '')
+        pn_str = str(pn).upper().replace(' ', '')
+        out = f'SIZE: {dn_str} X {pn_str}, LENS RING GASKET, {moc}'
+        lens_std = _display_standard(item, 'DIN 2696')
+        if lens_std:
+            out += f', {lens_std}'
+        return out
+    od, id_, h = item.get('od_mm'), item.get('id_mm'), item.get('thickness_mm')
+    if od and id_:
+        h_str = f' X {_fmt_num(h)}MM' if h else ''
+        return f'SIZE: {_fmt_num(od)}MM OD X {_fmt_num(id_)}MM ID{h_str}, LENS RING GASKET, {moc} (AS PER DRAWING)'
+    return ''
+
+
+def _fmt_manhole(item: dict) -> str:
+    """Manhole/handhole obround gaskets (soft/graphite or spiral MC/MCR)."""
+    a, b = item.get('obround_a_mm'), item.get('obround_b_mm')
+    thk = item.get('thickness_mm')
+    moc = item.get('moc')
+    if not (a and b):
+        return ''
+    hi, lo = (max(float(a), float(b)), min(float(a), float(b)))
+    dims = f'SIZE: {_fmt_num(hi)}MM X {_fmt_num(lo)}MM OBROUND'
+    winding = item.get('sw_winding_material')
+    if winding:
+        filler = item.get('sw_filler') or 'GRAPHITE'
+        style = item.get('manhole_style') or 'MC'
+        out = f'{dims}, {winding} SPIRAL WOUND MANHOLE GASKET (STYLE {style}) WITH {filler} FILLER'
+        if item.get('sw_outer_ring'):
+            out += f' + {item["sw_outer_ring"]} CENTERING RING'
+        return out
+    if not moc:
+        return ''
+    thk_str = f' X {_fmt_num(thk)}MM THK' if thk else ''
+    return f'{dims}{thk_str}, {moc} MANHOLE GASKET'
+
+
+def _fmt_envelope(item: dict) -> str:
+    """PTFE envelope gasket with soft insert — B16.21 (W1) / EN 1514-3 (W2)."""
+    insert = item.get('envelope_insert') or item.get('moc')
+    size, rating, thk = item.get('size'), item.get('rating'), item.get('thickness_mm')
+    if not (size and rating and insert):
+        return ''
+    standard = _display_standard(item, 'ASME B16.21')
+    thk_str = f' X {_fmt_num(thk)}MM THK' if thk else ''
+    out = (f'SIZE: {_fmt_size(size, "ENVELOPE")} X {_fmt_rating(rating)}{thk_str}, '
+           f'PTFE ENVELOPE GASKET WITH {insert} INSERT')
+    if standard:
+        out += f', {standard}'
+    return out
+
+
+def _fmt_cmg(item: dict) -> str:
+    """Corrugated metal gasket with soft facing layers."""
+    core = item.get('moc') or item.get('sw_winding_material')
+    if not core:
+        return ''
+    facing = item.get('cmg_facing') or 'GRAPHITE'
+    body = f'{core} CORRUGATED METAL GASKET WITH {facing} FACING LAYERS'
+    if item.get('cmg_plain'):
+        body = f'{core} CORRUGATED METAL GASKET (PLAIN)'
+    thk = item.get('thickness_mm')
+    thk_str = f' X {_fmt_num(thk)}MM THK' if thk else ''
+    if item.get('size_type') == 'OD_ID' and item.get('od_mm') and item.get('id_mm'):
+        out = f'SIZE: {_fmt_num(item["od_mm"])}MM OD X {_fmt_num(item["id_mm"])}MM ID{thk_str}, {body}'
+        return _with_special(out, item.get('special'))
+    size, rating = item.get('size'), item.get('rating')
+    if not (size and rating):
+        return ''
+    out = f'SIZE: {_fmt_size(size, "CMG")} X {_fmt_rating(rating)}{thk_str}, {body}'
+    cmg_std = _display_standard(item)
+    if cmg_std:
+        out += f', {cmg_std}'
+    return out
+
+
+def _fmt_metal_clad(item: dict) -> str:
+    od, id_, thk = item.get('od_mm'), item.get('id_mm'), item.get('thickness_mm')
+    metal = item.get('moc')
+    if not (od and id_ and metal):
+        return ''
+    filler = item.get('dji_filler') or 'GRAPHITE'
+    thk_str = f' X {_fmt_num(thk)}MM THK' if thk else ''
+    out = f'SIZE: {_fmt_num(od)}MM OD X {_fmt_num(id_)}MM ID{thk_str}, {metal} CLAD GASKET WITH {filler} CORE'
+    return _with_special(out, item.get('special'))
+
+
+def _fmt_solid_metal(item: dict) -> str:
+    moc = item.get('moc')
+    thk = item.get('thickness_mm')
+    if not moc:
+        return ''
+    hardness = item.get('rtj_hardness_spec')
+    thk_str = f' X {_fmt_num(thk)}MM THK' if thk else ''
+    if item.get('size_type') == 'OD_ID' and item.get('od_mm') and item.get('id_mm'):
+        out = f'SIZE: {_fmt_num(item["od_mm"])}MM OD X {_fmt_num(item["id_mm"])}MM ID{thk_str}, SOLID {moc} FLAT RING GASKET'
+    else:
+        size, rating = item.get('size'), item.get('rating')
+        if not (size and rating):
+            return ''
+        out = f'SIZE: {_fmt_size(size, "SOLID_METAL")} X {_fmt_rating(rating)}{thk_str}, SOLID {moc} FLAT RING GASKET'
+    if hardness:
+        out += f', {hardness}'
+    return _with_special(out, item.get('special'))
+
+
+def _fmt_lip_seal(item: dict) -> str:
+    od, id_, thk = item.get('od_mm'), item.get('id_mm'), item.get('thickness_mm')
+    moc = item.get('moc') or 'PTFE'
+    if not (od and id_):
+        return ''
+    energised = 'SPRING ENERGISED ' if item.get('spring_energised') else ''
+    thk_str = f' X {_fmt_num(thk)}MM THK' if thk else ''
+    return f'SIZE: {_fmt_num(od)}MM OD X {_fmt_num(id_)}MM ID{thk_str}, {moc} {energised}LIP SEAL (AS PER DRAWING)'
+
+
+def _fmt_diaphragm(item: dict) -> str:
+    od = item.get('od_mm')
+    moc = item.get('moc')
+    if not (od and moc):
+        return ''
+    thk = item.get('thickness_mm')
+    thk_str = f' X {_fmt_num(thk)}MM THK' if thk else ''
+    fabric = ' WITH FABRIC REINFORCEMENT' if item.get('fabric_reinforced') else ''
+    return f'SIZE: {_fmt_num(od)}MM OD{thk_str}, {moc} DIAPHRAGM{fabric} (AS PER DRAWING)'
+
+
+def _fmt_eyelet(item: dict) -> str:
+    moc = item.get('moc') or 'CNAF'
+    eyelet = item.get('eyelet_material') or 'SS316'
+    thk = item.get('thickness_mm')
+    thk_str = f' X {_fmt_num(thk)}MM THK' if thk else ''
+    if item.get('size_type') == 'OD_ID' and item.get('od_mm') and item.get('id_mm'):
+        return (f'SIZE: {_fmt_num(item["od_mm"])}MM OD X {_fmt_num(item["id_mm"])}MM ID{thk_str}, '
+                f'{moc} GASKET WITH {eyelet} INNER EYELET')
+    size, rating = item.get('size'), item.get('rating')
+    if not (size and rating):
+        return ''
+    out = (f'SIZE: {_fmt_size(size, "EYELET")} X {_fmt_rating(rating)}{thk_str}, '
+           f'{moc} GASKET WITH {eyelet} INNER EYELET')
+    eyelet_std = _display_standard(item, 'ASME B16.21')
+    if eyelet_std:
+        out += f', {eyelet_std}'
+    return out
+
+
+def _fmt_sheet_supply(item: dict) -> str:
+    """Raw sheet/roll supply: SIZE: {L}MM LENGTH X {W}MM WIDTH X {t}MM THK, {MATERIAL} SHEET."""
+    length, width = item.get('sheet_length_mm'), item.get('sheet_width_mm')
+    thk = item.get('thickness_mm')
+    moc = item.get('moc')
+    if not (length and width and moc):
+        return ''
+    def _dim(v):
+        # metre form only when the enquiry itself was in metres
+        if item.get('sheet_unit') == 'MTR':
+            return f'{_fmt_num(float(v) / 1000)}MTR'
+        return f'{_fmt_num(v)}MM'
+    thk_str = f' X {_fmt_num(thk)}MM THK' if thk else ''
+    form = 'ROLL' if item.get('sheet_is_roll') else 'SHEET'
+    return f'SIZE: {_dim(length)} LENGTH X {_dim(width)} WIDTH{thk_str}, {moc} {form}'
 
 
 def _isk_echo(item: dict) -> str | None:
@@ -431,7 +680,7 @@ def _fmt_isk(item: dict) -> str:
     special = (item.get('special') or '').strip()
     isk_style = (item.get('isk_style') or '').strip().upper()
     face_type = item.get('face_type') or ''
-    standard = item.get('standard') or ''
+    standard = _display_standard(item) or ''
     fire_safety = '' if item.get('isk_fire_safety_defaulted') else (item.get('isk_fire_safety') or '').strip().upper()
     # Normalize to always use hyphen: "NON FIRE SAFE" → "NON-FIRE SAFE"
     fire_safety = fire_safety.replace('NON FIRE SAFE', 'NON-FIRE SAFE')
@@ -443,7 +692,10 @@ def _fmt_isk(item: dict) -> str:
         style = isk_style or 'STYLE-N'
         spec = f'({special})' if special else ''
         sep = ' ' if spec else ''
-        std_str = f'TO SUIT {standard} (TYPE-RTJ)' if standard else 'TO SUIT ASME B16.5 (TYPE-RTJ)'
+        if is_non_standard(item.get('standard')):
+            std_str = ''
+        else:
+            std_str = f'TO SUIT {standard} (TYPE-RTJ)' if standard else 'TO SUIT ASME B16.5 (TYPE-RTJ)'
         return f'SIZE: {size_str} X {rating_str}, ISK {style} (TYPE F - RF) {spec}{sep}{std_str}'.strip()
 
     base = f'SIZE: {size_str} X {rating_str}'

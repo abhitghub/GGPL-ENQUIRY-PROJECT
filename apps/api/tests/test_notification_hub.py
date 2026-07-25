@@ -68,7 +68,7 @@ def test_notify_stage_change_reaches_destination_role(granular_workflow):
             assert event["kind"] == "workflow"
             assert event["quote_id"] == "q1"
             assert event["stage"] == "technical_review_pending"
-            assert event["stage_label"] == "Technical review pending"
+            assert event["stage_label"] == "Technical review"
             assert "ACME" in event["message"]
         finally:
             hub.unsubscribe(subscriber)

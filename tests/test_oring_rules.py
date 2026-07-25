@@ -15,18 +15,20 @@ def _processed_oring(description: str) -> dict:
 
 
 def test_oring_rules_recover_id_cross_section_material_and_pressure():
+    # Master Spec v3.1 template: SIZE: {ID}MM ID X {CS}MM THK, {MAT} O-RING —
+    # pressure bar ratings stay in the side-fields, never in the GGPL string.
     cases = [
         (
             "O-RING,MATERIAL:VITON,SIZE:ID 14 X THK 3 MM,PRESSURE RATING:250 BAR,",
             14,
             3,
-            "SIZE : ID 14MM X C/S 3MM, O-RING, VITON, PRESSURE RATING: 250 BAR",
+            "SIZE: 14MM ID X 3MM THK, VITON O-RING",
         ),
         (
             "O-RING,MATERIAL:VITON,SIZE:ID 12 X THK 2 MM,PRESSURE RATING:250 BAR,",
             12,
             2,
-            "SIZE : ID 12MM X C/S 2MM, O-RING, VITON, PRESSURE RATING: 250 BAR",
+            "SIZE: 12MM ID X 2MM THK, VITON O-RING",
         ),
     ]
 
@@ -54,7 +56,7 @@ def test_oring_rules_normalize_common_material_and_size_variants():
             3,
             "VITON",
             "250 BAR",
-            "SIZE : ID 14MM X C/S 3MM, O-RING, VITON, PRESSURE RATING: 250 BAR",
+            "SIZE: 14MM ID X 3MM THK, VITON O-RING",
         ),
         (
             "SIZE: 12MM ID X 2MM THK, VITON O-RING",
@@ -62,7 +64,7 @@ def test_oring_rules_normalize_common_material_and_size_variants():
             2,
             "VITON",
             None,
-            "SIZE : ID 12MM X C/S 2MM, O-RING, VITON",
+            "SIZE: 12MM ID X 2MM THK, VITON O-RING",
         ),
         (
             "O RING MATERIAL: NBR SIZE: ID 18MM X C/S 4MM PRESSURE: 10 BAR",
@@ -70,7 +72,7 @@ def test_oring_rules_normalize_common_material_and_size_variants():
             4,
             "NITRILE BUTADIENE RUBBER",
             "10 BAR",
-            "SIZE : ID 18MM X C/S 4MM, O-RING, NITRILE BUTADIENE RUBBER, PRESSURE RATING: 10 BAR",
+            "SIZE: 18MM ID X 4MM THK, NITRILE BUTADIENE RUBBER O-RING",
         ),
         (
             "SIZE: 25MM ID X 5MM, EPDM O-RING",
@@ -78,7 +80,7 @@ def test_oring_rules_normalize_common_material_and_size_variants():
             5,
             "EPDM",
             None,
-            "SIZE : ID 25MM X C/S 5MM, O-RING, EPDM",
+            "SIZE: 25MM ID X 5MM THK, EPDM O-RING",
         ),
     ]
 

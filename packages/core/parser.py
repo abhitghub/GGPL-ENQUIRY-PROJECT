@@ -340,8 +340,10 @@ def _rating_from_text(value: str | None) -> str | None:
         return None
     raw = str(value).strip().upper()
     raw = re.sub(r'(PN)\s*(\d+)', r'\1 \2', raw)
-    pn = re.search(r'\bPN\s*-?\s*(\d{1,2})(?!\d)', raw)
-    if pn:
+    # PN classes run 2.5–100 for flanges and up to PN400 for lens rings.
+    # "PN:{1-9}" adjacent to drawing/part context is a PART number (Rule O).
+    pn = re.search(r'\bPN\s*-?\s*(\d{1,3})(?!\d)', raw)
+    if pn and not (len(pn.group(1)) == 1 and re.search(r'DRAWING|PART|\bDIA\b', raw)):
         return f'PN {pn.group(1)}'
     lb = re.search(r'\b(150|300|400|600|900|1500|2500)\s*LB\b', raw)
     if lb:
@@ -382,6 +384,22 @@ def _infer_gasket_type(description: str) -> str | None:
     raw = description.upper()
     raw = re.sub(r'(?i)(GASKET)(?=(SKAG|CAM|KAMM|DOUBLE|COPPER|\d))', r'\1 ', raw)
     raw = re.sub(r'(?i)(\d)(INST\.?\s+KIT|INSULATING|IN\s+GASKET)', r'\1 \2', raw)
+    # Adjacent (non-gasket) products — quoted as REGRET per GGPL policy
+    if re.search(
+        r'SPECTACLE\s+BLIND|SPADE\s*(?:&|AND)\s*SPACER|PADDLE\s+BLANK|'
+        r'EXPANSION\s+JOINT|BELLOW(?:S)?\b|THERMAL\s+INSULATION|INSULATION\s+(?:MATERIAL|CLOTH|ROPE)|'
+        r'GLAND\s+PACKING|BRAIDED\s+PACKING', raw,
+    ):
+        return 'ADJACENT'
+    if re.search(r'\bSTUD(?:\s+BOLT)?S?\b', raw) and re.search(r'\bNUTS?\b|ASTM\s+A19[34]', raw) \
+            and not re.search(r'\bGASKET\b|\bGSKT\b|\bISK\b|INSULAT', raw):
+        return 'ADJACENT'
+    if re.search(r'\bLENS\s+(?:RING|GASKET)\b|\bLENTICULAR\b', raw):
+        return 'LENS'
+    if re.search(r'\bMAN\s?HOLE\b|\bHAND\s?HOLE\b', raw) and re.search(r'\bGASKET\b|\bGSKT\b', raw):
+        return 'MANHOLE'
+    if re.search(r'\bENVELOPE\s+GASKET\b|PTFE\s+ENVELOPE', raw):
+        return 'ENVELOPE'
     if re.search(
         r'INSULAT(?:ING|ION)|\bNSULATING\b|\bISK\b|\bFLANGE\s+ISOLATION\b|'
         r'\bFLANGE\s+INSULATION\s+KIT\b|\bFLANGE\s+ISOLAT(?:ING|ION)\s+KIT\b|'
@@ -416,16 +434,33 @@ def _infer_gasket_type(description: str) -> str | None:
         return 'RTJ'
     if re.search(r'\bR\s*-\s*\d{1,3}\b', raw) and re.search(r'\bGASKET\b|\bGSKT\b|\bRNG\b', raw):
         return 'RTJ'
-    if re.search(r'\bKAMMPROFILE\b|\bKAMPROFILE\b|\bKAMM\s*PROFILE\b|\bCAMPROFILE\b|\bCAM\s*PROFILE\b|\bPROFILE\s+GASKET\b|\bGROOVED\s+PROFILE\b|\bGROOVED\s+METAL\b|SKAG|\bKMP\b', raw):
+    if re.search(r'\bKAMMPROFILE\b|\bKAMPROFILE\b|\bKAMM\s*PROFILE\b|\bCAMPROFILE\b|\bCAM\s*PROFILE\b|\bPROFILE\s+GASKET\b|\bGROOVED\s+PROFILE\b|\bGROOVED\s+METAL\b|SKAG|\bKMP\b|\bSERRATED\b', raw):
         return 'KAMM'
     if re.search(r'\bDOUBLE[\s\-]?JACKET(?:ED)?\b|\bJACKETED\b|\bJACKET\s+GASKET\b|\bCOPPER\s+JACKET\b', raw):
         return 'DJI'
     if re.search(r'\bPLUG\s+GASKET\b|\bPLUG\s+TYPE\s+GASKET\b', raw):
         return 'PLUG_GASKET'
-    if re.search(r'\bCORRUGATED(?:\s+METAL(?:LIC)?)?\s+GASKET\b|\bCORRUGATED\s+GASKET\b', raw):
-        return 'CORRUGATED'
+    # Standalone corrugated gasket = corrugated metal gasket (CMG family);
+    # "corrugated type ... filler" inside a DJ text stays DJI (checked above)
+    if re.search(r'\bCORRUGATED(?:\s+METAL(?:LIC)?)?\s+GASKET\b|\bCORRUGATED\s+GASKET\b|\bCMG\b', raw):
+        return 'CMG'
+    if re.search(r'\bMETAL\s+CLAD(?:DED)?\b|\bCLAD\s+GASKET\b', raw) and 'DOUBLE' not in raw:
+        return 'METAL_CLAD'
+    if re.search(r'\bSOLID\s+METAL\b|\bMETAL\s+FLAT\s+RING\b', raw):
+        return 'SOLID_METAL'
+    if re.search(r'\bLIP\s+SEAL\b', raw):
+        return 'LIP_SEAL'
+    if re.search(r'\bDIAPHRAG?M\b|\bDIAPHRAM\b', raw):
+        return 'DIAPHRAGM'
+    if re.search(r'\bEYELET', raw):
+        return 'EYELET'
     if re.search(r'\bSHEET\s+GASKET\b|\bGASKET\s+SHEET\b', raw):
         return 'SHEET_GASKET'
+    # Raw sheet/roll supply: SHEET/ROLL wording + L×W dims, no flange class
+    if re.search(r'\bSHEETS?\b|\bROLLS?\b|JOINTING\s+SHEET', raw) \
+            and re.search(r'\d\s*(?:MTR|M|MM)?\s*[X×]\s*\d', raw) \
+            and not re.search(r'\b(?:150|300|400|600|900|1500|2500)\s*#|\bCL(?:ASS)?\.?\s*\d|\bPN\s*\d', raw):
+        return 'SHEET'
     if re.search(r'\bGASKET\b.*\bO\.?D\.?\s*\d+.*\bI\.?D\.?\s*\d+', raw, re.IGNORECASE) and re.search(r'\bDRAWING\b|\bPOSITION\b|\bASBESTOS\s+FREE\b', raw):
         return 'DJI'
     if _looks_like_gasket(description):
@@ -448,6 +483,13 @@ def _standard_from_text(value: str | None) -> str | None:
     match = re.search(r'\bAPI\s*6A\b', raw)
     if match:
         return 'API 6A'
+    # Obsolete standards → successors (deviation note added by the rules engine)
+    if re.search(r'\bAPI\s*601\b', raw):
+        return 'ASME B16.20'
+    if re.search(r'\bAPI\s*605\b', raw):
+        return 'ASME B16.47 (SERIES-B)'
+    if re.search(r'\bMSS\s*SP[-\s]?44\b', raw):
+        return 'ASME B16.47 (SERIES-A)'
     match = re.search(r'\bEN\s*1514[-\s]*(\d+)\b', raw)
     if match:
         return f'EN 1514-{match.group(1)}'
@@ -1197,6 +1239,134 @@ def _pre_clean_description(desc: str) -> str:
     return t
 
 
+def _first_metal(text: str) -> str | None:
+    """First metal/alloy token in the text that is not ring context."""
+    ring_kw = r'(?:INNER|OUTER|CENTER(?:ING)?|CENTRE|RING)'
+    for m in re.finditer(_SW_MATERIAL_RE, text, re.IGNORECASE):
+        before = text[max(0, m.start() - 14):m.start()].upper()
+        after = text[m.end():m.end() + 14].upper()
+        if re.search(rf'\b{ring_kw}\s*[-:=/]*\s*$', before) or re.match(rf'\s*[-:=/]*\s*{ring_kw}\b', after):
+            continue
+        candidate = _sw_norm_material(m.group(0))
+        if candidate not in ('SS', None):
+            return candidate
+    return None
+
+
+def _enrich_specialty(item: dict, desc: str, upper: str) -> None:
+    """Field extraction for the beyond-six specialty families (v3.1 supplement)."""
+    gtype = item.get('gasket_type')
+
+    if gtype == 'SHEET':
+        m = re.search(
+            r'(\d+(?:\.\d+)?)\s*(MTR|M\b|MM)?\s*[X×]\s*(\d+(?:\.\d+)?)\s*(MTR|M\b|MM)?'
+            r'(?:\s*[X×]\s*(\d+(?:\.\d+)?)\s*(?:MM)?)?',
+            upper,
+        )
+        if m:
+            def _mm(v: str, unit: str | None) -> float:
+                val = float(v)
+                unit = (unit or '').strip()
+                return val * 1000 if unit in ('M', 'MTR') else val
+            if (m.group(2) or '').strip() in ('M', 'MTR') or (m.group(4) or '').strip() in ('M', 'MTR'):
+                item['sheet_unit'] = 'MTR'
+            item.setdefault('sheet_length_mm', _mm(m.group(1), m.group(2)))
+            item.setdefault('sheet_width_mm', _mm(m.group(3), m.group(4)))
+            if m.group(5) and not item.get('thickness_mm'):
+                item['thickness_mm'] = float(m.group(5))
+        if 'ROLL' in upper:
+            item['sheet_is_roll'] = True
+        if not item.get('moc'):
+            item['moc'] = _material_from_text(desc) or _first_metal(upper)
+        return
+
+    if gtype == 'MANHOLE':
+        m = re.search(r'(\d{2,4}(?:\.\d+)?)\s*[X×]\s*(\d{2,4}(?:\.\d+)?)', upper)
+        if m:
+            item.setdefault('obround_a_mm', float(m.group(1)))
+            item.setdefault('obround_b_mm', float(m.group(2)))
+        if re.search(r'\bMCR\b', upper):
+            item['manhole_style'] = 'MCR'
+        elif re.search(r'\bMC\b', upper):
+            item['manhole_style'] = 'MC'
+        if re.search(r'SPIRAL|\bSPW\b|\bSWG\b', upper):
+            comp = _extract_spw_components(desc)
+            for key in ('sw_winding_material', 'sw_filler', 'sw_outer_ring'):
+                if comp.get(key) and not item.get(key):
+                    item[key] = comp[key]
+        if not item.get('moc'):
+            item['moc'] = _material_from_text(desc) or ('GRAPHITE' if 'GRAPH' in upper else None)
+        return
+
+    if gtype == 'ENVELOPE':
+        m = re.search(r'WITH\s+([A-Z0-9/ ]{2,30}?)\s+INSERT', upper)
+        if m:
+            item.setdefault('envelope_insert', m.group(1).strip())
+        elif not item.get('envelope_insert'):
+            mat = _material_from_text(desc)
+            if mat and 'PTFE' not in mat.upper():
+                item['envelope_insert'] = mat
+        return
+
+    if gtype == 'LENS':
+        if not item.get('moc'):
+            if '1.4571' in upper:
+                item['moc'] = 'SS316TI'
+            else:
+                item['moc'] = _first_metal(upper) or ('SOFT IRON' if 'SOFT IRON' in upper else None)
+        return
+
+    # OD/ID-dimensioned families
+    od, id_, thk, _swapped = _extract_od_id_thk(upper)
+    if od and id_:
+        item.setdefault('od_mm', od)
+        item.setdefault('id_mm', id_)
+        item['size_type'] = 'OD_ID'
+    if thk and not item.get('thickness_mm'):
+        item['thickness_mm'] = thk
+
+    if gtype == 'CMG':
+        if 'PTFE' in upper and 'FACING' in upper:
+            item['cmg_facing'] = 'PTFE'
+        if re.search(r'\bPLAIN\b', upper):
+            item['cmg_plain'] = True
+        if not item.get('moc'):
+            item['moc'] = _first_metal(upper)
+    elif gtype in ('METAL_CLAD', 'SOLID_METAL', 'PLUG_GASKET'):
+        if not item.get('od_mm') or not item.get('id_mm'):
+            m = re.search(r'\bOD\s*[:\s]?\s*(\d{1,4}(?:\.\d+)?)\b.{0,20}?\bID\s*[:\s]?\s*(\d{1,4}(?:\.\d+)?)\b', upper)
+            if m:
+                item['od_mm'] = float(m.group(1))
+                item['id_mm'] = float(m.group(2))
+                item['size_type'] = 'OD_ID'
+        if not item.get('moc'):
+            # the gasket itself is a ring here, so no ring-context exclusion
+            m_metal = re.search(_SW_MATERIAL_RE, upper, re.IGNORECASE)
+            item['moc'] = ('SOFT IRON' if 'SOFT IRON' in upper else None) \
+                or (_sw_norm_material(m_metal.group(0)) if m_metal else None) \
+                or _material_from_text(desc)
+    elif gtype == 'LIP_SEAL':
+        if re.search(r'SPRING\s+ENERG', upper):
+            item['spring_energised'] = True
+        if not item.get('moc'):
+            item['moc'] = _material_from_text(desc) or 'PTFE'
+    elif gtype == 'DIAPHRAGM':
+        if not item.get('od_mm'):
+            m = re.search(r'\bOD\s*[:\s]?\s*(\d{2,4}(?:\.\d+)?)', upper)
+            if m:
+                item['od_mm'] = float(m.group(1))
+        if re.search(r'FABRIC|CLOTH|NYLON|POLYESTER', upper):
+            item['fabric_reinforced'] = True
+        if not item.get('moc'):
+            item['moc'] = _material_from_text(desc)
+    elif gtype == 'EYELET':
+        m = re.search(r'(SS\s*\d{3}L?|COPPER|BRASS)\s+(?:INNER\s+)?EYELET|EYELET\w*\s+(SS\s*\d{3}L?|COPPER|BRASS)', upper)
+        if m:
+            item['eyelet_material'] = (m.group(1) or m.group(2)).replace(' ', '')
+        if not item.get('moc'):
+            item['moc'] = _material_from_text(desc)
+
+
 def _enrich_from_description(item: dict) -> dict:
     desc = item.get('raw_description') or item.get('description') or ''
     if not desc:
@@ -1328,6 +1498,11 @@ def _enrich_from_description(item: dict) -> dict:
             item['sw_inner_ring'] = 'SS'
         if not item.get('sw_outer_ring') and re.search(r'\bSS\s+INNER\s+AND\s+OUTER\s+CENTERING\s+RING\b', upper):
             item['sw_outer_ring'] = 'SS'
+
+    if item.get('gasket_type') in (
+            'LENS', 'MANHOLE', 'ENVELOPE', 'CMG', 'METAL_CLAD', 'SOLID_METAL',
+            'LIP_SEAL', 'DIAPHRAGM', 'EYELET', 'SHEET', 'PLUG_GASKET'):
+        _enrich_specialty(item, desc, upper)
 
     if item.get('gasket_type') == 'SOFT_CUT' and not item.get('moc'):
         material = _material_from_text(desc)

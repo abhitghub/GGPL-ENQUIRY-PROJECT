@@ -517,36 +517,64 @@ export const ENQUIRY_WORKFLOW_ACTIONS = [
 // keeps using the legacy 6-step constants above and behaves exactly as before.
 export const GRANULAR_WORKFLOW = process.env.NEXT_PUBLIC_ENABLE_GRANULAR_WORKFLOW === "true";
 
-// Granular 11-stage machine (mirrors app/services/enquiry_workflow.py). Additive:
-// the legacy ENQUIRY_WORKFLOW_STEPS/_ACTIONS above are left untouched.
+// Granular 6-step machine (mirrors app/services/enquiry_workflow.py). Additive:
+// the legacy ENQUIRY_WORKFLOW_STEPS/_ACTIONS above are left untouched. The
+// numbered progress bar shows these six mainline steps; the three exception
+// states in GRANULAR_WORKFLOW_SUBSTATES render as a badge on their step.
 export const GRANULAR_ENQUIRY_WORKFLOW_STEPS = [
   { id: "enquiry_received", label: "Enquiry received", team: "Estimation" },
-  { id: "forwarded_to_estimation", label: "Forwarded to estimation", team: "Estimation" },
-  { id: "spec_check", label: "Spec check", team: "Estimation" },
-  { id: "query_raised_to_customer", label: "Query raised to customer", team: "Sales" },
-  { id: "converted_to_ggpl_format", label: "Converted to GGPL format", team: "Estimation" },
-  { id: "gasket_type_check", label: "Gasket type check", team: "Estimation" },
-  { id: "technical_review_pending", label: "Technical review pending", team: "Technical review" },
-  { id: "combined_spec_review", label: "Combined spec review", team: "Estimation" },
-  // (tr_spec_returned removed — technical review is now an optional non-blocking check)
-  { id: "sent_for_pricing", label: "Sent for pricing", team: "Admin" },
-  { id: "pricing_decision", label: "Pricing (estimation)", team: "Estimation" },
-  { id: "pricing_submitted", label: "Ready to generate", team: "Sales / Admin" },
-  { id: "quotation_generated", label: "Quotation generated", team: "Sales" },
-  { id: "quotation_sent_to_customer", label: "Quotation sent to customer", team: "Sales" },
+  { id: "spec_check", label: "Spec check & GGPL format", team: "Estimation" },
+  { id: "technical_review_pending", label: "Technical review", team: "Technical review" },
+  { id: "pricing_decision", label: "Pricing", team: "Admin → Estimation" },
+  { id: "pricing_submitted", label: "Quotation generation", team: "Sales / Admin" },
+  { id: "quotation_sent_to_customer", label: "Sent to customer", team: "Sales" },
 ] as const;
 
+// Exception states that live INSIDE a mainline step: who currently holds the
+// enquiry and the sub-status badge to show on the anchoring step.
+export const GRANULAR_WORKFLOW_SUBSTATES: Record<string, { mainline: string; label: string; team: string; badge: string }> = {
+  query_raised_to_customer: { mainline: "spec_check", label: "Query raised to customer", team: "Sales", badge: "Waiting on customer" },
+  sent_for_pricing: { mainline: "pricing_decision", label: "Sent for pricing", team: "Admin", badge: "Awaiting pricing formula" },
+  quotation_generated: { mainline: "pricing_submitted", label: "Quotation generated", team: "Sales", badge: "Generated — ready to send" },
+};
+
+// Retired 13-step ids -> the surviving state that now covers that work
+// (mirrors RETIRED_GRANULAR_STEPS on the API) so in-flight records keep
+// rendering after the consolidation.
+export const RETIRED_GRANULAR_STEPS: Record<string, string> = {
+  forwarded_to_estimation: "spec_check",
+  converted_to_ggpl_format: "spec_check",
+  gasket_type_check: "spec_check",
+  combined_spec_review: "sent_for_pricing",
+};
+
+export function canonicalGranularStep(raw: string): string {
+  return RETIRED_GRANULAR_STEPS[raw] ?? raw;
+}
+
+export function isGranularWorkflowState(raw: string): boolean {
+  const step = canonicalGranularStep(raw);
+  return GRANULAR_ENQUIRY_WORKFLOW_STEPS.some((item) => item.id === step) || step in GRANULAR_WORKFLOW_SUBSTATES;
+}
+
+// The mainline step a state anchors to — substates map onto their parent step.
+export function granularMainlineStep(raw: string): string {
+  const step = canonicalGranularStep(raw);
+  return GRANULAR_WORKFLOW_SUBSTATES[step]?.mainline ?? step;
+}
+
+// Human label + owning team for any granular state (mainline or substate).
+export const GRANULAR_WORKFLOW_STATE_INFO: Record<string, { label: string; team: string }> = {
+  ...Object.fromEntries(GRANULAR_ENQUIRY_WORKFLOW_STEPS.map((step) => [step.id, { label: step.label, team: step.team }])),
+  ...Object.fromEntries(Object.entries(GRANULAR_WORKFLOW_SUBSTATES).map(([id, info]) => [id, { label: info.label, team: info.team }])),
+};
+
 export const GRANULAR_ENQUIRY_WORKFLOW_ACTIONS = [
-  { action: "forward_to_estimation", from: ["enquiry_received"], roles: ["estimation", "management"], label: "Forward to estimation" },
-  { action: "begin_spec_check", from: ["forwarded_to_estimation"], roles: ["estimation"], label: "Begin spec check" },
+  { action: "begin_spec_check", from: ["enquiry_received"], roles: ["estimation", "management"], label: "Begin spec check" },
   { action: "raise_customer_query", from: ["spec_check"], roles: ["estimation"], label: "Raise query to customer" },
   { action: "answer_customer_query", from: ["query_raised_to_customer"], roles: ["sales", "management"], label: "Answer customer query" },
-  { action: "mark_spec_complete", from: ["spec_check"], roles: ["estimation"], label: "Mark spec complete" },
-  { action: "proceed_to_gasket_check", from: ["converted_to_ggpl_format"], roles: ["estimation"], label: "Proceed to gasket type check" },
-  { action: "run_gasket_type_check", from: ["gasket_type_check"], roles: ["estimation"], label: "Run gasket type check" },
-  { action: "send_to_technical_review", from: ["combined_spec_review"], roles: ["estimation"], label: "Send for technical review" },
-  { action: "return_tr_spec", from: ["technical_review_pending"], roles: ["technical"], label: "Technical review done — forward" },
-  { action: "submit_for_pricing", from: ["combined_spec_review"], roles: ["estimation"], label: "Submit for pricing" },
+  { action: "send_to_technical_review", from: ["spec_check"], roles: ["estimation"], label: "Spec complete — send for technical review" },
+  { action: "return_tr_spec", from: ["technical_review_pending"], roles: ["technical"], label: "Technical review done — submit for pricing" },
   { action: "open_pricing", from: ["sent_for_pricing"], roles: ["admin", "management"], label: "Set pricing formula & send to estimation" },
   { action: "submit_priced_quotation", from: ["pricing_decision"], roles: ["estimation", "management"], label: "Submit priced quotation" },
   // Domestic/international is derived from the enquiry's quote type — not asked again.

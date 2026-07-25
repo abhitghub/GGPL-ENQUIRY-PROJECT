@@ -1,10 +1,12 @@
-"""Side-by-side tests for the granular 11-stage enquiry workflow.
+"""Side-by-side tests for the consolidated 6-step enquiry workflow.
 
 Verifies that:
-- With ENABLE_GRANULAR_WORKFLOW off, the original 6-step handoff is unchanged.
-- With the flag on, the full 11-stage machine drives the happy path, the
-  spec-check customer-query loop, and the gasket-type conditional branch to
-  technical review — with API-layer RBAC blocking out-of-role actions.
+- With ENABLE_GRANULAR_WORKFLOW off, the original legacy handoff is unchanged.
+- With the flag on, the 6-step machine drives the happy path, the spec-check
+  customer-query loop, and the mandatory technical-review gate — with
+  API-layer RBAC blocking out-of-role actions.
+- Records parked on retired 13-step ids read as the surviving state, so
+  in-flight enquiries keep moving after the consolidation.
 - Role ownership agrees between the two machines at equivalent checkpoints.
 
 Auth is via X-Org-Id / X-User-Id headers (LOGIN_ENABLED=false, set in conftest).
@@ -88,7 +90,7 @@ def _stage(resp) -> str:
 
 
 def test_legacy_path_unchanged():
-    """Flag off: the original 6-step flow behaves exactly as before, and
+    """Flag off: the original legacy flow behaves exactly as before, and
     wrong-role transitions are rejected at the API layer."""
     get_settings.cache_clear()  # ensure no leaked flag from another test
     client = TestClient(app)
@@ -105,28 +107,26 @@ def test_legacy_path_unchanged():
     assert _stage(_act(client, org, "shashnam", qid, "send_for_final_review")) == "estimation_final_review"
     assert _stage(_act(client, org, "estimation", qid, "send_final_to_sales")) == "sales_final"
     # A granular action must not exist when the flag is off.
-    _act(client, org, "sales", qid, "forward_to_estimation", expect=400)
+    _act(client, org, "sales", qid, "begin_spec_check", expect=400)
 
 
 def test_granular_happy_path(granular):
-    """Full 11-stage path with a non-specific gasket (skips technical review),
-    domestic pricing, and a growing audit history_log."""
+    """Full 6-step path: estimation does the spec work in one step, technical
+    review is a mandatory gate, admin sets the pricing formula, estimation
+    prices, sales generates and sends — with a growing audit history_log."""
     client = TestClient(app)
     org = f"org-gw-happy-{uuid.uuid4().hex}"
     qid = _create_enquiry(client, org)
 
-    # Estimation creates and forwards the enquiry; sales may not act here.
-    _act_blocked(client, org, "sales", qid, "forward_to_estimation")
-    assert _stage(_act(client, org, "estimation", qid, "forward_to_estimation")) == "forwarded_to_estimation"
+    # Estimation picks up the enquiry; sales may not act here.
+    _act_blocked(client, org, "sales", qid, "begin_spec_check")
     assert _stage(_act(client, org, "estimation", qid, "begin_spec_check")) == "spec_check"
-    assert _stage(_act(client, org, "estimation", qid, "mark_spec_complete")) == "converted_to_ggpl_format"
-    assert _stage(_act(client, org, "estimation", qid, "proceed_to_gasket_check")) == "gasket_type_check"
-    # Gasket type check routes to the technical review team (no bypass); only
-    # technical forwards it ahead to the combined review.
-    tr = _act(client, org, "estimation", qid, "run_gasket_type_check", gasket_type="soft_cut")
+    # One action closes the spec work (GGPL conversion + gasket check included)
+    # and hands the enquiry to the technical review team.
+    tr = _act(client, org, "estimation", qid, "send_to_technical_review", gasket_type="soft_cut")
     assert _stage(tr) == "technical_review_pending"
-    assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "combined_spec_review"
-    assert _stage(_act(client, org, "estimation", qid, "submit_for_pricing")) == "sent_for_pricing"
+    # Technical review done -> straight into the admin pricing queue.
+    assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "sent_for_pricing"
     # Admin sets the pricing formula and hands it back to estimation to price.
     assert _stage(_act(client, org, "shashnam", qid, "open_pricing")) == "pricing_decision"
     # Estimation prices and submits the quotation for generation.
@@ -144,8 +144,8 @@ def test_granular_happy_path(granular):
 
     granular_meta = final.json()["stage_meta"]["granular_workflow"]
     assert granular_meta["current_stage"] == "quotation_sent_to_customer"
-    assert len(granular_meta["history_log"]) == 11
-    assert granular_meta["history_log"][0]["action"] == "forward_to_estimation"
+    assert len(granular_meta["history_log"]) == 7
+    assert granular_meta["history_log"][0]["action"] == "begin_spec_check"
     assert granular_meta["history_log"][-1]["by"]  # actor recorded for audit
 
 
@@ -156,13 +156,9 @@ def test_generate_route_derived_from_market_type(granular):
     org = f"org-gw-route-{uuid.uuid4().hex}"
     qid = _create_enquiry(client, org, market_type="export")
     for role, action in [
-        ("estimation", "forward_to_estimation"),
         ("estimation", "begin_spec_check"),
-        ("estimation", "mark_spec_complete"),
-        ("estimation", "proceed_to_gasket_check"),
-        ("estimation", "run_gasket_type_check"),
+        ("estimation", "send_to_technical_review"),
         ("technical", "return_tr_spec"),
-        ("estimation", "submit_for_pricing"),
         ("shashnam", "open_pricing"),
         ("estimation", "submit_priced_quotation"),
     ]:
@@ -179,45 +175,55 @@ def test_granular_query_loop(granular):
     org = f"org-gw-query-{uuid.uuid4().hex}"
     qid = _create_enquiry(client, org)
 
-    _act(client, org, "estimation", qid, "forward_to_estimation")
     _act(client, org, "estimation", qid, "begin_spec_check")
     assert _stage(_act(client, org, "estimation", qid, "raise_customer_query")) == "query_raised_to_customer"
     # Estimation may not answer a customer query; Sales must.
     _act_blocked(client, org, "estimation", qid, "answer_customer_query")
     assert _stage(_act(client, org, "sales", qid, "answer_customer_query")) == "spec_check"
-    # Loop closed: spec can now be marked complete.
-    assert _stage(_act(client, org, "estimation", qid, "mark_spec_complete")) == "converted_to_ggpl_format"
+    # Loop closed: the spec work can now be finished and handed to technical.
+    assert _stage(_act(client, org, "estimation", qid, "send_to_technical_review")) == "technical_review_pending"
 
 
-def test_granular_technical_review_routing(granular):
-    """The gasket type check routes the enquiry to the technical review team (no
-    bypass). Only technical may view/forward it ahead. From the combined review,
-    estimation may either send for pricing or send for technical review again."""
+def test_granular_technical_review_gate(granular):
+    """Spec completion routes the enquiry to the technical review team (no
+    bypass). Only technical may forward it ahead — done means the specs are
+    cleared for pricing, so it lands in the admin pricing queue."""
     client = TestClient(app)
     org = f"org-gw-tr-{uuid.uuid4().hex}"
     qid = _create_enquiry(client, org)
 
-    _act(client, org, "estimation", qid, "forward_to_estimation")
     _act(client, org, "estimation", qid, "begin_spec_check")
-    _act(client, org, "estimation", qid, "mark_spec_complete")
-    _act(client, org, "estimation", qid, "proceed_to_gasket_check")
-    # Gasket type check -> technical review team (mandatory, no bypass).
-    assert _stage(_act(client, org, "estimation", qid, "run_gasket_type_check", gasket_type="ring_joint")) == "technical_review_pending"
-    # Estimation cannot skip past TR from here — pricing is a wrong-stage action.
-    _act_blocked_or_conflict = client.post(
-        f"/api/v1/quotes/{qid}/workflow",
-        headers=_headers(org, "estimation"),
-        json={"action": "submit_for_pricing"},
-    )
-    assert _act_blocked_or_conflict.status_code in (403, 404, 409)
-    # Only technical forwards the enquiry ahead.
+    assert _stage(_act(client, org, "estimation", qid, "send_to_technical_review", gasket_type="ring_joint")) == "technical_review_pending"
+    # Estimation cannot act while the enquiry is with technical review.
     _act_blocked(client, org, "estimation", qid, "return_tr_spec")
-    assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "combined_spec_review"
-    # From the combined review estimation chooses: technical review again...
+    # Admin's pricing action is a wrong-stage action here.
+    wrong_stage = client.post(
+        f"/api/v1/quotes/{qid}/workflow",
+        headers=_headers(org, "shashnam"),
+        json={"action": "open_pricing"},
+    )
+    assert wrong_stage.status_code in (403, 404, 409)
+    # Only technical forwards the enquiry ahead — into the pricing queue.
+    assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "sent_for_pricing"
+
+
+def test_retired_step_ids_keep_flowing(granular):
+    """An in-flight record parked on a retired 13-step id reads as the surviving
+    6-step state, stays in the owning team's queue, and moves on normally."""
+    client = TestClient(app)
+    org = f"org-gw-retired-{uuid.uuid4().hex}"
+    qid = _create_enquiry(client, org)
+
+    # Simulate a record the old machine left at the gasket-type check.
+    patched = client.patch(
+        f"/api/v1/quotes/{qid}",
+        headers=_headers(org, "estimation"),
+        json={"stage_meta": {"owner_id": "sales", "market_type": "domestic", "workflow_stage": "gasket_type_check"}},
+    )
+    assert patched.status_code == 200, patched.text
+    # Estimation (who owns spec_check, the surviving state) can finish the spec
+    # work directly — no dead-end, no unknown-stage error.
     assert _stage(_act(client, org, "estimation", qid, "send_to_technical_review")) == "technical_review_pending"
-    assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "combined_spec_review"
-    # ...or send for pricing.
-    assert _stage(_act(client, org, "estimation", qid, "submit_for_pricing")) == "sent_for_pricing"
 
 
 def test_granular_is_superset_of_legacy(granular):
@@ -225,8 +231,8 @@ def test_granular_is_superset_of_legacy(granular):
     the granular ones, so the existing (unmodified) screens and any in-flight
     legacy records keep working — enabling the flag only ADDS behaviour."""
     tx = active_transitions()
-    assert "send_for_pricing" in tx and "submit_for_pricing" in tx  # legacy + granular
-    assert "send_to_estimation" in tx and "forward_to_estimation" in tx
+    assert "send_for_pricing" in tx and "begin_spec_check" in tx  # legacy + granular
+    assert "send_to_estimation" in tx and "send_to_technical_review" in tx
     ids = active_step_ids()
     assert "estimation_review" in ids and "spec_check" in ids
     # Legacy-stage ownership is still enforced under the flag.
@@ -241,7 +247,7 @@ _PARITY = [
     ("enquiry", "sales", "enquiry_received", "estimation"),
     ("estimation_review", "estimation", "spec_check", "estimation"),
     ("technical_specs", "technical", "technical_review_pending", "technical"),
-    ("pricing", "admin", "pricing_decision", "admin"),
+    ("pricing", "admin", "pricing_decision", "estimation"),
 ]
 
 

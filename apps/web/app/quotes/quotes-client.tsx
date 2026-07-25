@@ -56,6 +56,7 @@ import {
   GRANULAR_ENQUIRY_WORKFLOW_ACTIONS,
   GRANULAR_ENQUIRY_WORKFLOW_STEPS,
   GRANULAR_WORKFLOW,
+  GRANULAR_WORKFLOW_SUBSTATES,
   GasketItem,
   ITEM_FIELDS,
   NewContactInput,
@@ -69,6 +70,9 @@ import {
   advanceEnquiryWorkflow,
   advanceQuoteStage,
   bulkRecompute,
+  canonicalGranularStep,
+  granularMainlineStep,
+  isGranularWorkflowState,
   createExtraction,
   createQuote,
   deleteQuote,
@@ -142,6 +146,23 @@ const FACE_OPTIONS = ["RF", "FF", ""];
 const UOM_OPTIONS = ["NOS", "M"];
 const GROOVE_OPTIONS = ["OCT", "OVAL", ""];
 const ISK_FIRE_SAFETY_OPTIONS = ["NON FIRE SAFE", "FIRE SAFE"];
+// "NON STANDARD" is a sentinel the rules engine keeps as-is: the recomputed
+// GGPL description drops the ASME/API/EN/DIN tag entirely.
+const STANDARD_OPTIONS = [
+  "NON STANDARD",
+  "ASME B16.21",
+  "ASME B16.20",
+  "ASME B16.5",
+  "ASME B16.47 (SERIES-A)",
+  "ASME B16.47 (SERIES-B)",
+  "API 6A",
+  "EN 1514-1",
+  "EN 1514-2",
+  "EN 1514-3",
+  "EN 1514-4",
+  "EN 1514-6",
+  "DIN 2696",
+];
 
 const defaultFx: Record<string, number> = {
   INR: 1,
@@ -1453,18 +1474,24 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const canOpenQuotation = currentUser.role !== "sales";
   // Resolve the workflow machine per-quote so mixed legacy/granular data both
   // render correctly. Prefer the granular namespace, then the legacy stage key.
-  // A granular stage id => granular steps/actions; a legacy id => legacy; an
-  // unknown/empty stage falls back to whichever machine the flag has active.
+  // A granular state id (incl. retired 13-step ids) => granular steps/actions;
+  // a legacy id => legacy; unknown/empty falls back to the flag's machine.
   const granularWorkflowMeta = (quote?.stage_meta?.granular_workflow ?? {}) as Record<string, unknown>;
-  const rawWorkflowStep = getString(granularWorkflowMeta.current_stage) || getString(quote?.stage_meta?.workflow_stage);
-  const isGranularStep = GRANULAR_ENQUIRY_WORKFLOW_STEPS.some((step) => step.id === rawWorkflowStep);
+  const rawWorkflowStep = canonicalGranularStep(getString(granularWorkflowMeta.current_stage) || getString(quote?.stage_meta?.workflow_stage));
+  const isGranularStep = Boolean(rawWorkflowStep) && isGranularWorkflowState(rawWorkflowStep);
   const isLegacyStep = ENQUIRY_WORKFLOW_STEPS.some((step) => step.id === rawWorkflowStep);
   const useGranularWorkflow = isGranularStep || (!isLegacyStep && GRANULAR_WORKFLOW);
   const workflowSteps = useGranularWorkflow ? GRANULAR_ENQUIRY_WORKFLOW_STEPS : ENQUIRY_WORKFLOW_STEPS;
   const workflowActions = useGranularWorkflow ? GRANULAR_ENQUIRY_WORKFLOW_ACTIONS : ENQUIRY_WORKFLOW_ACTIONS;
   const defaultWorkflowStep = useGranularWorkflow ? "enquiry_received" : "enquiry";
-  const currentWorkflowStep = workflowSteps.some((step) => step.id === rawWorkflowStep) ? rawWorkflowStep : defaultWorkflowStep;
-  const currentWorkflowStepIndex = workflowSteps.findIndex((step) => step.id === currentWorkflowStep);
+  // The current state (may be an exception substate like query_raised_to_customer)
+  // drives action buttons; the numbered bar highlights the step it anchors to.
+  const currentWorkflowStep = (useGranularWorkflow ? isGranularStep : workflowSteps.some((step) => step.id === rawWorkflowStep))
+    ? rawWorkflowStep
+    : defaultWorkflowStep;
+  const currentWorkflowMainline = useGranularWorkflow ? granularMainlineStep(currentWorkflowStep) : currentWorkflowStep;
+  const currentWorkflowStepIndex = workflowSteps.findIndex((step) => step.id === currentWorkflowMainline);
+  const workflowSubstate = useGranularWorkflow ? GRANULAR_WORKFLOW_SUBSTATES[currentWorkflowStep] : undefined;
   const availableWorkflowActions = workflowActions.filter(
     (item) =>
       (item.from as readonly string[]).includes(currentWorkflowStep) &&
@@ -4163,6 +4190,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         value={getString(rawValue)}
         onChange={(event) => updateItem(index, column.field, event.target.value)}
         title={validation?.message}
+        list={column.field === "standard" ? "standard-options-list" : undefined}
       />
     );
   }
@@ -4749,7 +4777,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm font-medium">Enquiry workflow</div>
             <div className="text-xs text-muted-foreground">
-              Currently with: <span className="font-medium text-foreground">{workflowSteps[currentWorkflowStepIndex]?.team ?? "Sales"}</span>
+              Currently with: <span className="font-medium text-foreground">{workflowSubstate?.team ?? workflowSteps[currentWorkflowStepIndex]?.team ?? "Sales"}</span>
+              {workflowSubstate ? <Badge variant="warning" className="ml-2">{workflowSubstate.badge}</Badge> : null}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-1">
@@ -4959,7 +4988,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <SelectContent>
                     <SelectItem value={BLANK_SELECT_VALUE}>Select stage / team</SelectItem>
                     {workflowSteps.map((step) => (
-                      <SelectItem key={step.id} value={step.id} disabled={step.id === currentWorkflowStep}>
+                      <SelectItem key={step.id} value={step.id} disabled={step.id === currentWorkflowMainline}>
                         {step.label} ({step.team})
                       </SelectItem>
                     ))}
@@ -5811,6 +5840,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               )}
 
               <div className={rowEditorOpen ? "grid gap-3 xl:grid-cols-[minmax(0,1fr)_380px]" : "grid gap-3"}>
+                {/* Shared suggestions for Standard cells; "NON STANDARD" strips ASME/API/EN tags on recompute */}
+                <datalist id="standard-options-list">
+                  {STANDARD_OPTIONS.map((value) => <option key={value} value={value} />)}
+                </datalist>
                 <div className="min-w-0 space-y-3">
               <div className={`${tableMode === "spreadsheet" && pageCount === 1 ? "hidden" : "flex"} flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/30 px-3 py-2 text-sm`}>
                 <div className="flex flex-wrap items-center gap-2 text-muted-foreground">
@@ -6143,6 +6176,12 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                         <Field label="Quantity" value={getString(selectedItem.quantity)} onChange={(value) => updateItem(selectedRowIndex, "quantity", value)} type="number" />
                         <Field label="UoM" value={getString(selectedItem.uom)} onChange={(value) => updateItem(selectedRowIndex, "uom", value)} />
                       </div>
+                      <Field
+                        label="Standard"
+                        value={getString(selectedItem.standard)}
+                        onChange={(value) => updateItem(selectedRowIndex, "standard", value)}
+                        options={STANDARD_OPTIONS}
+                      />
                       <div className="space-y-1.5">
                         <Label>Missing / review notes</Label>
                         <textarea
@@ -6174,6 +6213,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                               value={getString(selectedItem[field])}
                               onChange={(value) => updateItem(selectedRowIndex, field, value)}
                               textarea={field === "raw_description" || field === "ggpl_description" || field === "flags"}
+                              options={field === "standard" ? STANDARD_OPTIONS : undefined}
                             />
                           ))}
                         </div>
