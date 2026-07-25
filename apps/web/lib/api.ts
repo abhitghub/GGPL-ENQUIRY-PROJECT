@@ -36,6 +36,9 @@ export type GasketItem = Record<string, unknown> & {
   status_source?: string | null;
   flags?: string[];
   regret?: boolean;
+  // Fields the operator explicitly set in the portal; the rules engine will
+  // not re-derive these from the raw description on recompute.
+  manual_fields?: string[];
 };
 
 export type Quote = {

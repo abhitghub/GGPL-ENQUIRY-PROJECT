@@ -9,6 +9,7 @@ from data.reference_data import (
     lookup_rtj_ring,
 )
 from data.brand_dictionary import apply_brand_rules
+from data.customer_gasket_codes import apply_gasket_code
 from core.formatter import NON_STANDARD, is_non_standard
 
 # GGPL escalation phrases (exact house strings — never paraphrased)
@@ -1767,6 +1768,10 @@ def apply_rules(item: dict) -> dict:
                     applied_defaults.append(f'{_od_val}MM pipe OD mapped to NPS {_nps} (ANSI class context)')
                     break
 
+    # Project gasket codes (Toyo/HSEPL G-codes etc.) — resolve construction
+    # for fields the row text left blank; row text always outranks the code.
+    apply_gasket_code(item, flags, applied_defaults)
+
     gasket_type = item.get('gasket_type', 'SOFT_CUT')
     raw_desc = (
         item.get('description')
@@ -1774,52 +1779,59 @@ def apply_rules(item: dict) -> dict:
         or ''
     ).upper()
 
-    if re.search(r'\bHEAT\s+EXCHANGER\s+GASKET\b', raw_desc):
-        gasket_type = 'KAMM'
-        item['gasket_type'] = 'KAMM'
-    elif re.search(r'\bDOUBLE[\s\-]?JACKET(?:ED)?\b|\bJACKETED\b', raw_desc):
-        gasket_type = 'DJI'
-        item['gasket_type'] = 'DJI'
-    elif gasket_type == 'SOFT_CUT' and re.search(
-        r'\b(?:SPIRAL|SPRIAL|SPRIRAL|SPIRIAL|SPLRAL|SPRLAL|SPIRRAL|SPRRAL|SPRL|SPL)\s*[-\s]*(?:W(?:OU)?ND\w*|WIND\w*)\b|\bSPW\b',
-        raw_desc,
-    ) and 'INSERT' not in str(item.get('moc') or '').upper():
-        # LLM missed/misclassified — description text is unambiguous.
-        # (Reinforced-graphite-with-insert rows keep their SOFT_CUT family
-        # classification even though the enquiry says "spiral wound".)
-        gasket_type = 'SPIRAL_WOUND'
-        item['gasket_type'] = 'SPIRAL_WOUND'
-    elif gasket_type == 'SOFT_CUT' and _looks_like_oring(raw_desc):
-        gasket_type = 'O_RING'
-        item['gasket_type'] = 'O_RING'
-    elif gasket_type == 'SOFT_CUT' and re.search(r'\bKAMMPROFILE\b|\bCAMPROFILE\b', raw_desc):
-        gasket_type = 'KAMM'
-        item['gasket_type'] = 'KAMM'
-    elif gasket_type == 'SOFT_CUT' and re.search(
-        r'\b(?:RING\s+JOINT|RING\s+TYPE\s+JOINT|RTJ\s+GASKET)\b', raw_desc
-    ) and not re.search(r'\bSPIRAL\b|\bCNAF\b|\bPTFE\b|\bRUBBER\b|\bNEOPRENE\b|\bGRAPHITE\s+SHEET\b', raw_desc):
-        gasket_type = 'RTJ'
-        item['gasket_type'] = 'RTJ'
-    elif gasket_type == 'SOFT_CUT' and re.search(
-        r'\b(?:ISK|INSULAT(?:ING|ION)\s+GASKET|INSULAT(?:ING|ION)\s+KIT|FLANGE\s+ISOLAT(?:ING|ION)\s+KIT)\b',
-        raw_desc,
-    ):
-        gasket_type = 'ISK'
-        item['gasket_type'] = 'ISK'
-    elif gasket_type == 'SOFT_CUT' and re.search(r'\bPLUG\s+GASKET\b|\bPLUG\s+TYPE\s+GASKET\b', raw_desc):
-        gasket_type = 'PLUG_GASKET'
-        item['gasket_type'] = 'PLUG_GASKET'
-    elif gasket_type == 'SOFT_CUT' and re.search(r'\bCORRUGATED(?:\s+METAL(?:LIC)?)?\s+GASKET\b|\bCORRUGATED\s+GASKET\b', raw_desc):
-        gasket_type = 'CORRUGATED'
-        item['gasket_type'] = 'CORRUGATED'
-    elif gasket_type == 'SOFT_CUT' and re.search(r'\bSHEET\s+GASKET\b|\bGASKET\s+SHEET\b', raw_desc):
-        gasket_type = 'SHEET_GASKET'
-        item['gasket_type'] = 'SHEET_GASKET'
+    # Fields the operator set by hand in the portal outrank anything re-derived
+    # from the raw description text — otherwise a recompute silently reverts
+    # their edit (e.g. gasket type changed on a "HEAT EXCHANGER GASKET" row).
+    manual_fields = set(item.get('manual_fields') or [])
+    gasket_type_is_manual = 'gasket_type' in manual_fields and item.get('gasket_type')
 
-    # If "non-metallic" is mentioned in the original description, force SOFT_CUT
-    if re.search(r'NON[\s\-]?METALLIC', raw_desc) and gasket_type not in ('SOFT_CUT', 'SHEET_GASKET', 'O_RING'):
-        gasket_type = 'SOFT_CUT'
-        item['gasket_type'] = 'SOFT_CUT'
+    if not gasket_type_is_manual:
+        if re.search(r'\bHEAT\s+EXCHANGER\s+GASKET\b', raw_desc):
+            gasket_type = 'KAMM'
+            item['gasket_type'] = 'KAMM'
+        elif re.search(r'\bDOUBLE[\s\-]?JACKET(?:ED)?\b|\bJACKETED\b', raw_desc):
+            gasket_type = 'DJI'
+            item['gasket_type'] = 'DJI'
+        elif gasket_type == 'SOFT_CUT' and re.search(
+            r'\b(?:SPIRAL|SPRIAL|SPRIRAL|SPIRIAL|SPLRAL|SPRLAL|SPIRRAL|SPRRAL|SPRL|SPL)\s*[-\s]*(?:W(?:OU)?ND\w*|WIND\w*)\b|\bSPW\b',
+            raw_desc,
+        ) and 'INSERT' not in str(item.get('moc') or '').upper():
+            # LLM missed/misclassified — description text is unambiguous.
+            # (Reinforced-graphite-with-insert rows keep their SOFT_CUT family
+            # classification even though the enquiry says "spiral wound".)
+            gasket_type = 'SPIRAL_WOUND'
+            item['gasket_type'] = 'SPIRAL_WOUND'
+        elif gasket_type == 'SOFT_CUT' and _looks_like_oring(raw_desc):
+            gasket_type = 'O_RING'
+            item['gasket_type'] = 'O_RING'
+        elif gasket_type == 'SOFT_CUT' and re.search(r'\bKAMMPROFILE\b|\bCAMPROFILE\b', raw_desc):
+            gasket_type = 'KAMM'
+            item['gasket_type'] = 'KAMM'
+        elif gasket_type == 'SOFT_CUT' and re.search(
+            r'\b(?:RING\s+JOINT|RING\s+TYPE\s+JOINT|RTJ\s+GASKET)\b', raw_desc
+        ) and not re.search(r'\bSPIRAL\b|\bCNAF\b|\bPTFE\b|\bRUBBER\b|\bNEOPRENE\b|\bGRAPHITE\s+SHEET\b', raw_desc):
+            gasket_type = 'RTJ'
+            item['gasket_type'] = 'RTJ'
+        elif gasket_type == 'SOFT_CUT' and re.search(
+            r'\b(?:ISK|INSULAT(?:ING|ION)\s+GASKET|INSULAT(?:ING|ION)\s+KIT|FLANGE\s+ISOLAT(?:ING|ION)\s+KIT)\b',
+            raw_desc,
+        ):
+            gasket_type = 'ISK'
+            item['gasket_type'] = 'ISK'
+        elif gasket_type == 'SOFT_CUT' and re.search(r'\bPLUG\s+GASKET\b|\bPLUG\s+TYPE\s+GASKET\b', raw_desc):
+            gasket_type = 'PLUG_GASKET'
+            item['gasket_type'] = 'PLUG_GASKET'
+        elif gasket_type == 'SOFT_CUT' and re.search(r'\bCORRUGATED(?:\s+METAL(?:LIC)?)?\s+GASKET\b|\bCORRUGATED\s+GASKET\b', raw_desc):
+            gasket_type = 'CORRUGATED'
+            item['gasket_type'] = 'CORRUGATED'
+        elif gasket_type == 'SOFT_CUT' and re.search(r'\bSHEET\s+GASKET\b|\bGASKET\s+SHEET\b', raw_desc):
+            gasket_type = 'SHEET_GASKET'
+            item['gasket_type'] = 'SHEET_GASKET'
+
+        # If "non-metallic" is mentioned in the original description, force SOFT_CUT
+        if re.search(r'NON[\s\-]?METALLIC', raw_desc) and gasket_type not in ('SOFT_CUT', 'SHEET_GASKET', 'O_RING'):
+            gasket_type = 'SOFT_CUT'
+            item['gasket_type'] = 'SOFT_CUT'
 
     # Brand & trade-name translation (three-bucket policy, Master Spec v3.2)
     apply_brand_rules(item, flags, applied_defaults)

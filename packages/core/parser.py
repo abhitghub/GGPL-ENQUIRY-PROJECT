@@ -442,7 +442,8 @@ def _infer_gasket_type(description: str) -> str | None:
         return 'PLUG_GASKET'
     # Standalone corrugated gasket = corrugated metal gasket (CMG family);
     # "corrugated type ... filler" inside a DJ text stays DJI (checked above)
-    if re.search(r'\bCORRUGATED(?:\s+METAL(?:LIC)?)?\s+GASKET\b|\bCORRUGATED\s+GASKET\b|\bCMG\b', raw):
+    if re.search(r'\bCORRUGATED(?:\s+METAL(?:LIC)?)?\s+GASKET\b|\bCORRUGATED\s+GASKET\b|\bCMG\b'
+                 r'|\b\d-?PLY\s+CORRUGATED\b|METAL\s+SOLID\s+GASKET\s+CORRUGATED', raw):
         return 'CMG'
     if re.search(r'\bMETAL\s+CLAD(?:DED)?\b|\bCLAD\s+GASKET\b', raw) and 'DOUBLE' not in raw:
         return 'METAL_CLAD'
@@ -560,7 +561,11 @@ _SW_FILLER_ALIASES: list[tuple[str, str]] = [
     (r'EXPANDED\s+GRAPHITE', 'EXPANDED GRAPHITE'),
     # GGPL preserves the FLEXIBLE qualifier when the customer states it
     (r'FLEXIBLE\s+GRAPHITE|FLEX\.?\s+GRAPHITE|W/\s*FLEXIBLE\s+GRAPHITE', 'FLEXIBLE GRAPHITE'),
+    # EPC gasket lists (Toyo etc.) call the filler "Graphite Tape" (typo "Grapite")
+    (r'GRAP[HI]?ITE\s+TAPE', 'GRAPHITE'),
     (r'GRAFOIL|GRAFIL|\bGR?PH\b|GRAPH(?:ITE|OIL)', 'GRAPHITE'),
+    # "Vermiculite Fill or amorphous polysilicic acid fibers with talc filler"
+    (r'VERMICULITE(?:\s+FILL)?|AMORPHOUS\s+POLYSILICIC', 'VERMICULITE'),
     (r'\bPTFE\b|TEFLON', 'PTFE'),
     (r'\bMICA\b', 'MICA'),
     (r'\bCERAMIC\b', 'CERAMIC'),
@@ -1153,6 +1158,12 @@ def _material_from_text(description: str) -> str | None:
             return f'EPDM {shore.group(1)} - {shore.group(2)} SHORE A HARDNESS'
         return 'EPDM'
     # Grade-qualified echoes come first — GGPL keeps the qualifier
+    # Cloth-inserted rubber sheet (EPC gasket lists: "NBR ... rubber with Cloth")
+    cloth = re.search(r'\b(NBR|EPDM|SILICONE?|NEOPRENE|SBR|BUTYL)\b[^,;]{0,60}?WITH\s+CLOTH', description, re.IGNORECASE)
+    if cloth:
+        base = cloth.group(1).upper()
+        base = 'SILICONE' if base.startswith('SILICON') else base
+        return f'{base} WITH CLOTH INSERT'
     if re.search(r'COMP\.?\s*NON[\s.–-]*ASB\.?\s*SYNTHETIC\s+FIBER', description, re.IGNORECASE):
         return 'COMPRESSED NON ASBESTOS SYNTHETIC FIBER'
     match = re.search(r'FLEX\.?(?:IBLE)?\s+GRAPHITE\s+REINFORCED\s+W(?:/|ITH)\s*(SS\s*\d{3}L?)\s+SHEET\s+INSERT', description, re.IGNORECASE)
@@ -1504,7 +1515,7 @@ def _enrich_from_description(item: dict) -> dict:
             'LIP_SEAL', 'DIAPHRAGM', 'EYELET', 'SHEET', 'PLUG_GASKET'):
         _enrich_specialty(item, desc, upper)
 
-    if item.get('gasket_type') == 'SOFT_CUT' and not item.get('moc'):
+    if item.get('gasket_type') in ('SOFT_CUT', 'SHEET_GASKET', 'CORRUGATED') and not item.get('moc'):
         material = _material_from_text(desc)
         if material:
             item['moc'] = material
