@@ -577,6 +577,10 @@ export const GRANULAR_ENQUIRY_WORKFLOW_ACTIONS = [
   { action: "raise_customer_query", from: ["spec_check"], roles: ["estimation"], label: "Raise query to customer" },
   { action: "answer_customer_query", from: ["query_raised_to_customer"], roles: ["sales", "management"], label: "Answer customer query" },
   { action: "send_to_technical_review", from: ["spec_check"], roles: ["estimation"], label: "Spec complete — send for technical review" },
+  // Technical review is optional — estimation may skip straight to pricing.
+  { action: "send_to_pricing_direct", from: ["spec_check"], roles: ["estimation"], label: "Spec complete — send for pricing (skip technical review)" },
+  // Reviewer error loop: back to estimation with a note, re-submit, re-check.
+  { action: "return_spec_errors", from: ["technical_review_pending"], roles: ["technical"], label: "Errors found — return to estimation" },
   { action: "return_tr_spec", from: ["technical_review_pending"], roles: ["technical"], label: "Technical review done — submit for pricing" },
   { action: "open_pricing", from: ["sent_for_pricing"], roles: ["admin", "management"], label: "Set pricing formula & send to estimation" },
   { action: "submit_priced_quotation", from: ["pricing_decision"], roles: ["estimation", "management"], label: "Submit priced quotation" },

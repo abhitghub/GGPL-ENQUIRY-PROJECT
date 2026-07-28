@@ -20,6 +20,8 @@ export type PriceBreakupLine = {
   quantity: number;
   unitPrice: number;
   total: number;
+  // GTQ line: price still to come, shown as "Will quote soon" instead of a figure.
+  isGtq: boolean;
 };
 
 export type PriceBreakupGroup = {
@@ -88,6 +90,7 @@ export function buildPriceBreakup(items: GasketItem[], lines: QuotePricingLine[]
       quantity: line.quantity,
       unitPrice: line.finalUnitPrice,
       total: line.lineTotal,
+      isGtq: line.isGtq,
     });
     group.quantity += line.quantity;
     group.amount += line.lineTotal;
@@ -147,8 +150,8 @@ function GroupSection({ group, currency }: { group: PriceBreakupGroup; currency:
                   <td className={NUM}>{line.srNo}</td>
                   <td className={`${CELL} text-xs`}>{line.description || "—"}</td>
                   <td className={NUM}>{line.quantity.toLocaleString("en-IN")}</td>
-                  <td className={NUM}>{line.unitPrice > 0 ? money(line.unitPrice) : "—"}</td>
-                  <td className={NUM}>{money(line.total)}</td>
+                  <td className={NUM}>{line.isGtq ? "Will quote soon" : line.unitPrice > 0 ? money(line.unitPrice) : "—"}</td>
+                  <td className={NUM}>{line.isGtq ? "—" : money(line.total)}</td>
                 </tr>
               ))}
             </tbody>

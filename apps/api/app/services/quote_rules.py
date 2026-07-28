@@ -371,8 +371,14 @@ def workflow_transition_blockers(quote: QuoteRead, target_stage: str) -> list[st
     if target_stage == "sent":
         prices = quote.quote_data.get("unit_prices")
         unit_prices = prices if isinstance(prices, list) else []
+        gtq_raw = quote.quote_data.get("line_gtq")
+        line_gtq = gtq_raw if isinstance(gtq_raw, list) else []
         for index, item in enumerate(quote.items):
             if item.get("status") == "regret":
+                continue
+            # GTQ ("Get The Quote") lines are quoted later — the document shows
+            # "Will quote soon" for them, so no positive price is required.
+            if index < len(line_gtq) and bool(line_gtq[index]):
                 continue
             try:
                 unit_price = float(unit_prices[index] or 0) if index < len(unit_prices) else 0

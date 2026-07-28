@@ -324,6 +324,13 @@ def build_quotation_excel(
         (float(up) if up else 0.0) * (1 - _line_disc(i) / 100)
         for i, up in enumerate(raw_unit_prices)
     ]
+    # GTQ ("Get The Quote") lines have no price yet: the sheet says "Will quote
+    # soon" for them and they add nothing to the totals.
+    raw_line_gtq = quote_data.get('line_gtq', []) or []
+
+    def _is_gtq(i):
+        return i < len(raw_line_gtq) and bool(raw_line_gtq[i])
+
     total_qty = 0.0
     subtotal  = 0.0
 
@@ -347,7 +354,8 @@ def build_quotation_excel(
 
         qty = item.get('quantity') or 0
         uom = item.get('uom') or 'NOS'
-        unit_price = unit_prices[idx] if idx < len(unit_prices) else 0.0
+        is_gtq = _is_gtq(idx)
+        unit_price = 0.0 if is_gtq else (unit_prices[idx] if idx < len(unit_prices) else 0.0)
         quoted_qty = 0 if status == 'regret' else qty
         total_price = quoted_qty * unit_price if unit_price else 0.0
         total_qty  += float(quoted_qty) if quoted_qty else 0
@@ -365,8 +373,14 @@ def build_quotation_excel(
         ws.write(row, 3, ggpl_desc,            rfmt_desc)
         ws.write(row, 4, qty,                  rfmt_num)
         ws.write(row, 5, uom,                  rfmt_num)
-        ws.write(row, 6, unit_price,           rfmt_money)
-        ws.merge_range(_range(row, 7, row, NCOLS - 1), total_price, rfmt_money)
+        if is_gtq:
+            rfmt_gtq = _fmt(font_size=9, align='right', border=1,
+                            border_color=_BORDER, bg_color=row_bg)
+            ws.write(row, 6, 'Will quote soon', rfmt_gtq)
+            ws.merge_range(_range(row, 7, row, NCOLS - 1), '', rfmt_gtq)
+        else:
+            ws.write(row, 6, unit_price,           rfmt_money)
+            ws.merge_range(_range(row, 7, row, NCOLS - 1), total_price, rfmt_money)
         row += 1
 
     # ── Totals section ───────────────────────────────────────────────────────

@@ -35,6 +35,23 @@ def _display_standard(item: dict, default: str | None = None) -> str | None:
     return raw or default
 
 
+def describe_item(item: dict) -> str:
+    """GGPL description that is never blank for a row that has any wording.
+
+    format_description() returns '' when the classified fields needed for a house
+    format are missing — true for hand-keyed rows (nothing has classified them)
+    and for one-off products with no GGPL format at all, e.g.
+    'SIZE : 0.1 THK x 1736 LG x 45 W , DUPLEX S31803 LAMIFLEX SEALING STRIP'.
+    Those must still read back to the operator, so fall back to the wording as
+    typed rather than leaving the column empty.
+    """
+    formatted = format_description(item)
+    if formatted:
+        return formatted
+    raw = str(item.get('raw_description') or item.get('description') or '').strip()
+    return ' '.join(raw.upper().split())
+
+
 def format_description(item: dict) -> str:
     """Build GGPL description. Returns empty string if critical fields missing.
 

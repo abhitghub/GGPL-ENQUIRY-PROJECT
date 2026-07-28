@@ -53,11 +53,71 @@ function currentStep(quote: Quote): string {
   return canonicalGranularStep(String(granular.current_stage || meta.workflow_stage || DEFAULT_STEP));
 }
 
-// The one-line note estimation left when sending an enquiry back to sales.
+// The one-line note the previous team left on the last handoff.
 function workflowNote(quote: Quote): string {
   const meta = (quote.stage_meta ?? {}) as Record<string, unknown>;
   return typeof meta.workflow_comment === "string" ? meta.workflow_comment : "";
 }
+
+// The formula admin set for this enquiry — durable, unlike workflow_comment.
+function pricingFormula(quote: Quote): string {
+  const meta = (quote.stage_meta ?? {}) as Record<string, unknown>;
+  return typeof meta.pricing_formula === "string" ? meta.pricing_formula : "";
+}
+
+function lastWorkflowAction(quote: Quote): string {
+  const meta = (quote.stage_meta ?? {}) as Record<string, unknown>;
+  const granular = (meta.granular_workflow ?? {}) as Record<string, unknown>;
+  const history = Array.isArray(granular.history_log) ? granular.history_log : [];
+  const last = history[history.length - 1] as { action?: unknown } | undefined;
+  return typeof last?.action === "string" ? last.action : "";
+}
+
+// The banner to show on a queue row: what the previous team is waiting on, or
+// what the reviewer asked estimation to fix.
+function rowAlert(quote: Quote, step: string): string {
+  const note = workflowNote(quote);
+  if (!note) return "";
+  if (step === "query_raised_to_customer") return `⚠ Missing: ${note}`;
+  if (step === "spec_check" && lastWorkflowAction(quote) === "return_spec_errors") {
+    return `⚠ Returned by review: ${note}`;
+  }
+  return "";
+}
+
+const asText = (value: unknown): string =>
+  typeof value === "string" ? value.trim() : typeof value === "number" ? String(value) : "";
+
+// Compact enquiry summary shown against each queue row — customer/order context
+// the pricing decision needs without opening the enquiry.
+function enquirySummary(quote: Quote): Array<[string, string]> {
+  const meta = (quote.stage_meta ?? {}) as Record<string, unknown>;
+  const qd = (quote.quote_data ?? {}) as Record<string, unknown>;
+  const orderType = [asText(meta.market_type), asText(meta.bid_type)].filter(Boolean).join(" · ");
+  return (
+    [
+      ["Order type", orderType],
+      ["Due date", asText(meta.due_date)],
+      ["Delivery / lead time", asText(qd.delivery)],
+      ["Priority", asText(meta.priority)],
+      ["Items", quote.items?.length ? String(quote.items.length) : ""],
+      ["Enq no", asText(meta.customer_enq_no)],
+    ] as Array<[string, string]>
+  ).filter(([, value]) => value);
+}
+
+// Actions that are meaningless without a note (mirrors require_comment on the
+// backend transitions): the pricing formula and the reviewer's error list.
+const NOTE_REQUIRED: Record<string, string> = {
+  open_pricing: "Enter the pricing formula before sending to estimation.",
+  return_spec_errors: "Describe the errors found before returning to estimation.",
+};
+
+// Per-step placeholder for the row's note box.
+const NOTE_PLACEHOLDER: Record<string, string> = {
+  sent_for_pricing: "Pricing formula for estimation (e.g. base rate × factor; GTQ items → will quote soon)",
+  technical_review_pending: "Note for estimation — required when returning with errors",
+};
 
 // From pricing onward the work happens on the Quotations screen (pricing sheet,
 // generate, PDF) — link those rows there instead of the enquiry editor.
@@ -97,6 +157,8 @@ export function RoleDashboardClient() {
   const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState<string | null>(null);
   const [registerExporting, setRegisterExporting] = React.useState(false);
+  // Per-row note: the pricing formula (admin) or the reviewer's error note.
+  const [rowNotes, setRowNotes] = React.useState<Record<string, string>>({});
 
   async function downloadEnquiryRegister() {
     setRegisterExporting(true);
@@ -156,9 +218,15 @@ export function RoleDashboardClient() {
   );
 
   async function runAction(quote: Quote, action: string) {
+    const note = (rowNotes[quote.id] ?? "").trim();
+    if (NOTE_REQUIRED[action] && !note) {
+      toast.error(NOTE_REQUIRED[action]);
+      return;
+    }
     setBusy(`${quote.id}:${action}`);
     try {
-      await advanceEnquiryWorkflow(quote.id, action);
+      await advanceEnquiryWorkflow(quote.id, action, note);
+      setRowNotes((prev) => ({ ...prev, [quote.id]: "" }));
       toast.success("Workflow updated");
       await refresh();
     } catch (error) {
@@ -219,7 +287,9 @@ export function RoleDashboardClient() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Customer</TableHead>
+                  <TableHead>Enquiry summary</TableHead>
                   <TableHead>Stage</TableHead>
+                  <TableHead>{role === "admin" || role === "management" ? "Pricing formula" : "Note"}</TableHead>
                   <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -227,6 +297,8 @@ export function RoleDashboardClient() {
                 {queue.map((quote) => {
                   const step = currentStep(quote);
                   const actions = actionsFor(step, role);
+                  const summary = enquirySummary(quote);
+                  const notePlaceholder = NOTE_PLACEHOLDER[step];
                   return (
                     <TableRow key={quote.id}>
                       <TableCell>
@@ -236,14 +308,47 @@ export function RoleDashboardClient() {
                         <div className="max-w-56 truncate text-xs text-muted-foreground">
                           {quote.project_ref || quote.quote_no || "No reference added"}
                         </div>
-                        {step === "query_raised_to_customer" && workflowNote(quote) ? (
+                        {rowAlert(quote, step) ? (
                           <div className="mt-1 max-w-72 text-xs text-amber-700 dark:text-amber-300" title={workflowNote(quote)}>
-                            ⚠ Missing: {workflowNote(quote)}
+                            {rowAlert(quote, step)}
                           </div>
                         ) : null}
                       </TableCell>
                       <TableCell>
+                        {summary.length ? (
+                          <div className="grid max-w-80 gap-x-3 gap-y-0.5 text-xs sm:grid-cols-2">
+                            {summary.map(([label, value]) => (
+                              <div key={label} className="truncate" title={`${label}: ${value}`}>
+                                <span className="text-muted-foreground">{label}: </span>
+                                <span className="font-medium">{value}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">No details added yet</span>
+                        )}
+                      </TableCell>
+                      <TableCell>
                         <Badge variant="outline">{STEP_LABELS[step] ?? step.replaceAll("_", " ")}</Badge>
+                      </TableCell>
+                      <TableCell>
+                        {notePlaceholder ? (
+                          <textarea
+                            value={rowNotes[quote.id] ?? ""}
+                            onChange={(event) => setRowNotes((prev) => ({ ...prev, [quote.id]: event.target.value }))}
+                            placeholder={notePlaceholder}
+                            className="min-h-[52px] w-56 rounded-md border border-input bg-background px-2 py-1.5 text-xs outline-none focus:ring-2 focus:ring-ring"
+                          />
+                        ) : pricingFormula(quote) ? (
+                          // Estimation prices against this — read-only here, and
+                          // repeated on the pricing sheet itself.
+                          <div className="max-w-56 text-xs" title={pricingFormula(quote)}>
+                            <span className="text-muted-foreground">Formula: </span>
+                            <span className="font-medium">{pricingFormula(quote)}</span>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
                       </TableCell>
                       <TableCell>
                         <div className="flex flex-wrap gap-2">
@@ -252,7 +357,8 @@ export function RoleDashboardClient() {
                               key={item.action}
                               variant="secondary"
                               size="sm"
-                              disabled={busy !== null}
+                              disabled={busy !== null || (Boolean(NOTE_REQUIRED[item.action]) && !(rowNotes[quote.id] ?? "").trim())}
+                              title={NOTE_REQUIRED[item.action] && !(rowNotes[quote.id] ?? "").trim() ? NOTE_REQUIRED[item.action] : undefined}
                               onClick={() => runAction(quote, item.action)}
                             >
                               {item.label}

@@ -628,11 +628,17 @@ def _make_items_table(
         label
         for key, label, _ in columns
     ]
+    gtq_raw = quote_data.get("line_gtq")
+    line_gtq = gtq_raw if isinstance(gtq_raw, list) else []
     rows = [header]
     for i, (item, unit) in enumerate(zip(items_slice, prices_slice)):
         qty = _num(item.get("quantity"))
         quoted_qty = 0 if item.get("status") == "regret" else qty
         total = quoted_qty * unit
+        # GTQ ("Get The Quote") lines are quoted later — the document says so
+        # instead of printing a zero price.
+        idx = start_serial - 1 + i
+        is_gtq = idx < len(line_gtq) and bool(line_gtq[idx])
         values = {
             "ggpl_serial": str(start_serial + i),
             "customer_serial": str(item.get("customer_sl_no") or start_serial + i),
@@ -640,8 +646,8 @@ def _make_items_table(
             "description": _description_cell(item),
             "quantity": _fmt_qty(qty),
             "uom": item.get("uom") or "NOS",
-            "unit": _fmt_amount(unit),
-            "total": _fmt_amount(total),
+            "unit": "Will quote soon" if is_gtq else _fmt_amount(unit),
+            "total": "" if is_gtq else _fmt_amount(total),
         }
         rows.append([values[key] for key in keys])
     desc_col = keys.index("description")
@@ -837,11 +843,15 @@ def _draw_items_page(c: canvas.Canvas, items: list[dict], quote_data: dict, star
 def _totals(items: list[dict], quote_data: dict):
     unit_prices = _effective_unit_prices(quote_data)
     currency = quote_data.get("currency", "INR")
+    gtq_raw = quote_data.get("line_gtq")
+    line_gtq = gtq_raw if isinstance(gtq_raw, list) else []
     total_qty = Decimal("0")
     subtotal = Decimal("0")
     for idx, item in enumerate(items):
         qty = Decimal("0") if item.get("status") == "regret" else Decimal(str(_num(item.get("quantity"))))
-        unit = Decimal(str(_num(unit_prices[idx] if idx < len(unit_prices) else 0)))
+        # GTQ lines have no price yet — counted in the quantity, not the value.
+        is_gtq = idx < len(line_gtq) and bool(line_gtq[idx])
+        unit = Decimal("0") if is_gtq else Decimal(str(_num(unit_prices[idx] if idx < len(unit_prices) else 0)))
         total_qty += qty
         subtotal += qty * unit
     discount_pct = Decimal(str(_num(quote_data.get("discount_pct"))))

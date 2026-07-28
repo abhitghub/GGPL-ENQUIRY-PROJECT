@@ -128,7 +128,8 @@ def test_granular_happy_path(granular):
     # Technical review done -> straight into the admin pricing queue.
     assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "sent_for_pricing"
     # Admin sets the pricing formula and hands it back to estimation to price.
-    assert _stage(_act(client, org, "shashnam", qid, "open_pricing")) == "pricing_decision"
+    # The pricing formula is the note on this action and is required.
+    assert _stage(_act(client, org, "shashnam", qid, "open_pricing", comment="Base rate x 1.4")) == "pricing_decision"
     # Estimation prices and submits the quotation for generation.
     assert _stage(_act(client, org, "estimation", qid, "submit_priced_quotation")) == "pricing_submitted"
     # Estimation cannot generate the quotation — only sales or admin.
@@ -162,7 +163,8 @@ def test_generate_route_derived_from_market_type(granular):
         ("shashnam", "open_pricing"),
         ("estimation", "submit_priced_quotation"),
     ]:
-        _act(client, org, role, qid, action)
+        # open_pricing carries the pricing formula, which is required.
+        _act(client, org, role, qid, action, comment="Base rate x 1.4" if action == "open_pricing" else "")
     generated = _act(client, org, "sales", qid, "generate_quotation")
     assert _stage(generated) == "quotation_generated"
     assert generated.json()["stage_meta"]["pricing_route"] == "international"
@@ -184,10 +186,72 @@ def test_granular_query_loop(granular):
     assert _stage(_act(client, org, "estimation", qid, "send_to_technical_review")) == "technical_review_pending"
 
 
+def test_reviewer_returns_errors_then_rechecks(granular):
+    """The reviewer finds errors and returns the enquiry to estimation with a
+    note; estimation fixes it and re-submits, and the reviewer checks it again
+    before it can go to pricing. The loop can repeat any number of times."""
+    client = TestClient(app)
+    org = f"org-gw-errors-{uuid.uuid4().hex}"
+    qid = _create_enquiry(client, org)
+
+    _act(client, org, "estimation", qid, "begin_spec_check")
+    _act(client, org, "estimation", qid, "send_to_technical_review")
+    # A return with no note is rejected — estimation must be told what to fix.
+    _act(client, org, "technical", qid, "return_spec_errors", expect=422)
+    returned = _act(client, org, "technical", qid, "return_spec_errors", comment="Flange rating missing on lines 3-5")
+    assert _stage(returned) == "spec_check"
+    assert returned.json()["stage_meta"]["workflow_comment"] == "Flange rating missing on lines 3-5"
+    # Estimation cannot skip the re-check by pushing straight past the reviewer
+    # once it has re-submitted.
+    assert _stage(_act(client, org, "estimation", qid, "send_to_technical_review")) == "technical_review_pending"
+    _act_blocked(client, org, "estimation", qid, "return_tr_spec")
+    # Second round: the reviewer clears it, so it moves to the pricing queue.
+    assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "sent_for_pricing"
+
+
+def test_technical_review_is_optional(granular):
+    """Technical review is optional: estimation may send a spec-complete enquiry
+    straight to the admin pricing queue, skipping the review step."""
+    client = TestClient(app)
+    org = f"org-gw-optional-tr-{uuid.uuid4().hex}"
+    qid = _create_enquiry(client, org)
+
+    _act(client, org, "estimation", qid, "begin_spec_check")
+    assert _stage(_act(client, org, "estimation", qid, "send_to_pricing_direct")) == "sent_for_pricing"
+    # Only estimation may skip the review — sales cannot.
+    other = _create_enquiry(client, org)
+    _act(client, org, "estimation", other, "begin_spec_check")
+    _act_blocked(client, org, "sales", other, "send_to_pricing_direct")
+
+
+def test_pricing_formula_is_required_and_durable(granular):
+    """Admin must enter the pricing formula to hand the enquiry to estimation,
+    and the formula survives later handoffs (workflow_comment does not)."""
+    client = TestClient(app)
+    org = f"org-gw-formula-{uuid.uuid4().hex}"
+    qid = _create_enquiry(client, org)
+
+    _act(client, org, "estimation", qid, "begin_spec_check")
+    _act(client, org, "estimation", qid, "send_to_pricing_direct")
+    # No formula -> no handoff.
+    _act(client, org, "shashnam", qid, "open_pricing", expect=422)
+    priced = _act(client, org, "shashnam", qid, "open_pricing", comment="Base rate x 1.4, freight at actuals")
+    meta = priced.json()["stage_meta"]
+    assert _stage(priced) == "pricing_decision"
+    assert meta["pricing_formula"] == "Base rate x 1.4, freight at actuals"
+    assert meta["pricing_formula_by"]
+    # A later handoff overwrites workflow_comment but leaves the formula intact,
+    # so estimation can still read it while pricing.
+    submitted = _act(client, org, "estimation", qid, "submit_priced_quotation", comment="Priced per formula")
+    submitted_meta = submitted.json()["stage_meta"]
+    assert submitted_meta["workflow_comment"] == "Priced per formula"
+    assert submitted_meta["pricing_formula"] == "Base rate x 1.4, freight at actuals"
+
+
 def test_granular_technical_review_gate(granular):
-    """Spec completion routes the enquiry to the technical review team (no
-    bypass). Only technical may forward it ahead — done means the specs are
-    cleared for pricing, so it lands in the admin pricing queue."""
+    """When estimation does send an enquiry for technical review, the review is
+    a real gate: only technical may move it on. Done means the specs are cleared
+    for pricing, so it lands in the admin pricing queue."""
     client = TestClient(app)
     org = f"org-gw-tr-{uuid.uuid4().hex}"
     qid = _create_enquiry(client, org)

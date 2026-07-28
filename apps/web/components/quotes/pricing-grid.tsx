@@ -8,9 +8,13 @@ import { toNumber } from "@/lib/api";
 // Excel-like pricing grid: click/drag range selection, type-to-edit, Enter/Tab/
 // arrow navigation, copy/paste TSV (works with real Excel), Ctrl+D fill down,
 // and a drag fill-handle on the selection corner. Editable columns are Unit
-// price and Discount %; everything else is read-only context.
+// price, Discount % and the GTQ flag; everything else is read-only context.
+//
+// GTQ ("Get The Quote") marks a line whose price is not known yet: the
+// quotation prints "Will quote soon" for it and it carries no value into the
+// totals. Type any of yes/y/gtq/true/1 in the GTQ cell to set it.
 
-type ColKey = "sl" | "desc" | "ggpl" | "qty" | "uom" | "unit" | "disc" | "final" | "total";
+type ColKey = "sl" | "desc" | "ggpl" | "qty" | "uom" | "unit" | "disc" | "gtq" | "final" | "total";
 
 const COLS: Array<{ key: ColKey; label: string; editable: boolean; className: string }> = [
   { key: "sl", label: "#", editable: false, className: "w-12 text-center" },
@@ -20,9 +24,17 @@ const COLS: Array<{ key: ColKey; label: string; editable: boolean; className: st
   { key: "uom", label: "UOM", editable: false, className: "w-16" },
   { key: "unit", label: "Unit price", editable: true, className: "w-28 text-right" },
   { key: "disc", label: "Discount %", editable: true, className: "w-24 text-right" },
+  { key: "gtq", label: "GTQ", editable: true, className: "w-20 text-center" },
   { key: "final", label: "Final price", editable: false, className: "w-28 text-right" },
   { key: "total", label: "Total", editable: false, className: "w-28 text-right" },
 ];
+
+const GTQ_LABEL = "Will quote soon";
+const GTQ_TRUE = new Set(["yes", "y", "gtq", "true", "1", "will quote soon", "quote soon"]);
+
+function parseGtq(raw: string): boolean {
+  return GTQ_TRUE.has(String(raw).trim().toLowerCase());
+}
 
 const EDITABLE_COLS = COLS.map((col, index) => (col.editable ? index : -1)).filter((index) => index >= 0);
 
@@ -43,14 +55,16 @@ export function PricingGrid({
   items,
   unitPrices,
   lineDiscounts,
+  lineGtq,
   canEdit,
   onApply,
 }: {
   items: GasketItem[];
   unitPrices: number[];
   lineDiscounts: number[];
+  lineGtq: boolean[];
   canEdit: boolean;
-  onApply: (next: { unit_prices: number[]; line_discounts_pct: number[] }) => void;
+  onApply: (next: { unit_prices: number[]; line_discounts_pct: number[]; line_gtq: boolean[] }) => void;
 }) {
   const [active, setActive] = React.useState<{ row: number; col: number } | null>(null);
   const [anchor, setAnchor] = React.useState<{ row: number; col: number } | null>(null);
@@ -78,8 +92,9 @@ export function PricingGrid({
   function cellValue(row: number, col: number): string {
     const item = items[row];
     if (!item) return "";
-    const unit = toNumber(unitPrices[row] ?? 0);
-    const disc = Math.max(toNumber(lineDiscounts[row] ?? 0), 0);
+    const isGtq = Boolean(lineGtq[row]);
+    const unit = isGtq ? 0 : toNumber(unitPrices[row] ?? 0);
+    const disc = isGtq ? 0 : Math.max(toNumber(lineDiscounts[row] ?? 0), 0);
     const finalPrice = unit * (1 - disc / 100);
     const qty = item.status === "regret" ? 0 : toNumber(item.quantity);
     switch (COLS[col].key) {
@@ -88,26 +103,38 @@ export function PricingGrid({
       case "ggpl": return item.status === "regret" ? "" : String(item.ggpl_description || "");
       case "qty": return String(item.quantity ?? "");
       case "uom": return String(item.uom || "NOS");
-      case "unit": return String(unitPrices[row] ?? 0);
-      case "disc": return String(lineDiscounts[row] ?? 0);
-      case "final": return finalPrice.toFixed(2);
-      case "total": return (finalPrice * qty).toFixed(2);
+      case "unit": return isGtq ? GTQ_LABEL : String(unitPrices[row] ?? 0);
+      case "disc": return isGtq ? "" : String(lineDiscounts[row] ?? 0);
+      case "gtq": return isGtq ? "Yes" : "";
+      case "final": return isGtq ? GTQ_LABEL : finalPrice.toFixed(2);
+      case "total": return isGtq ? "" : (finalPrice * qty).toFixed(2);
     }
   }
 
-  // Apply a batch of edits to the two arrays in ONE parent update.
+  // Apply a batch of edits to the three arrays in ONE parent update.
   function applyEdits(edits: Array<{ row: number; col: number; value: string }>) {
     if (!canEdit || !edits.length) return;
     const nextUnits = [...unitPrices];
     const nextDiscs = [...lineDiscounts];
+    const nextGtq = items.map((_, index) => Boolean(lineGtq[index]));
     let changed = false;
     for (const edit of edits) {
       if (edit.row < 0 || edit.row >= items.length) continue;
       const key = COLS[edit.col]?.key;
       if (key === "unit") { nextUnits[edit.row] = parseNumber(edit.value); changed = true; }
       if (key === "disc") { nextDiscs[edit.row] = parseNumber(edit.value); changed = true; }
+      if (key === "gtq") { nextGtq[edit.row] = parseGtq(edit.value); changed = true; }
     }
-    if (changed) onApply({ unit_prices: nextUnits, line_discounts_pct: nextDiscs });
+    // A line marked GTQ has no price yet — clear any figures left on it so the
+    // stored data matches what the quotation shows.
+    nextGtq.forEach((flag, index) => {
+      if (flag) { nextUnits[index] = 0; nextDiscs[index] = 0; }
+    });
+    if (changed) onApply({ unit_prices: nextUnits, line_discounts_pct: nextDiscs, line_gtq: nextGtq });
+  }
+
+  function toggleGtq(row: number) {
+    applyEdits([{ row, col: COLS.findIndex((col) => col.key === "gtq"), value: lineGtq[row] ? "no" : "yes" }]);
   }
 
   function select(row: number, col: number, extend: boolean) {
@@ -314,6 +341,16 @@ export function PricingGrid({
                         onChange={(event) => setEditing((current) => (current ? { ...current, value: event.target.value } : current))}
                         onBlur={() => commitEdit("stay")}
                         className="w-full bg-transparent text-right outline-none"
+                      />
+                    ) : col.key === "gtq" ? (
+                      <input
+                        type="checkbox"
+                        checked={Boolean(lineGtq[row])}
+                        disabled={!canEdit}
+                        title="Get The Quote — price not known yet; the quotation shows 'Will quote soon'"
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onChange={() => toggleGtq(row)}
+                        className="h-3.5 w-3.5 cursor-pointer accent-emerald-600"
                       />
                     ) : (
                       cellValue(row, colIndex)
