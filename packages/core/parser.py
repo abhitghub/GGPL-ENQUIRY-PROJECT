@@ -380,8 +380,29 @@ def _size_from_text(value: str | None) -> str | None:
         return raw
 
 
+# RULE J-2 Part 1 — spaced/period-broken abbreviations ("S P W D", "R.T.J")
+# left behind by manual typing, OCR, and PDF text extraction. A run of 2–5
+# single letters is collapsed ONLY when the joined form is a known gasket
+# abbreviation, so real words ("SS INNER") and dimensions ("4 MM") are never
+# touched.
+_SPACED_ABBREV_CANONICAL = {
+    'SPWD', 'SPW', 'SWG', 'RTJ', 'CNAF', 'IR', 'OR', 'CR', 'DJ', 'DJI',
+    'MCR', 'FF', 'RF',
+}
+_SPACED_ABBREV_RE = re.compile(
+    r'(?<![A-Za-z0-9.])([A-Za-z](?:[ .][A-Za-z]){1,4})(?![A-Za-z0-9])'
+)
+
+
+def _collapse_spaced_abbrevs(text: str) -> str:
+    def _sub(m: re.Match) -> str:
+        joined = re.sub(r'[ .]', '', m.group(1)).upper()
+        return joined if joined in _SPACED_ABBREV_CANONICAL else m.group(0)
+    return _SPACED_ABBREV_RE.sub(_sub, text)
+
+
 def _infer_gasket_type(description: str) -> str | None:
-    raw = description.upper()
+    raw = _collapse_spaced_abbrevs(description).upper()
     raw = re.sub(r'(?i)(GASKET)(?=(SKAG|CAM|KAMM|DOUBLE|COPPER|\d))', r'\1 ', raw)
     raw = re.sub(r'(?i)(\d)(INST\.?\s+KIT|INSULATING|IN\s+GASKET)', r'\1 \2', raw)
     # Adjacent (non-gasket) products — quoted as REGRET per GGPL policy
@@ -473,7 +494,9 @@ def _standard_from_text(value: str | None) -> str | None:
     if not value:
         return None
     raw = str(value).upper()
-    match = re.search(r'\b(?:(?:ASME|ANSI)\s*)?B\s*16\.(20|21|47)\b', raw)
+    # RULE V legacy-typo tolerance: "ASME B16..20" (double dot), "B-16.21",
+    # "ASME 16.20" (missing B) all normalize to the canonical ASME form.
+    match = re.search(r'\b(?:(?:ASME|ANSI)\s*B?|B)[\s.-]*16\s*\.{1,2}\s*(20|21|47)\b', raw)
     if match:
         std = f'ASME B16.{match.group(1)}'
         if match.group(1) == '47':
@@ -1214,7 +1237,7 @@ def _pre_clean_description(desc: str) -> str:
          "GASKET FLAT - THK=2mmDN 4;CL150RFTEMASIL HTASME B16.21"
          "4300#SPIRAL WOUND GASKET AISI 316..."
     """
-    t = desc
+    t = _collapse_spaced_abbrevs(desc)  # RULE J-2: "S P W D" → "SPWD" before token fixes
     t = re.sub(r'(?i)(?<=[a-z0-9])(DN\s*\d)', r' \1', t)
     t = re.sub(r'(?i)(DN\s*\d{1,4})(?=[A-Z])', r'\1 ', t)
     t = re.sub(r'(?i)(NPS)(\d)', r'\1 \2', t)
