@@ -380,8 +380,29 @@ def _size_from_text(value: str | None) -> str | None:
         return raw
 
 
+# RULE J-2 Part 1 — spaced/period-broken abbreviations ("S P W D", "R.T.J")
+# left behind by manual typing, OCR, and PDF text extraction. A run of 2–5
+# single letters is collapsed ONLY when the joined form is a known gasket
+# abbreviation, so real words ("SS INNER") and dimensions ("4 MM") are never
+# touched.
+_SPACED_ABBREV_CANONICAL = {
+    'SPWD', 'SPW', 'SWG', 'RTJ', 'CNAF', 'IR', 'OR', 'CR', 'DJ', 'DJI',
+    'MCR', 'FF', 'RF',
+}
+_SPACED_ABBREV_RE = re.compile(
+    r'(?<![A-Za-z0-9.])([A-Za-z](?:[ .][A-Za-z]){1,4})(?![A-Za-z0-9])'
+)
+
+
+def _collapse_spaced_abbrevs(text: str) -> str:
+    def _sub(m: re.Match) -> str:
+        joined = re.sub(r'[ .]', '', m.group(1)).upper()
+        return joined if joined in _SPACED_ABBREV_CANONICAL else m.group(0)
+    return _SPACED_ABBREV_RE.sub(_sub, text)
+
+
 def _infer_gasket_type(description: str) -> str | None:
-    raw = description.upper()
+    raw = _collapse_spaced_abbrevs(description).upper()
     raw = re.sub(r'(?i)(GASKET)(?=(SKAG|CAM|KAMM|DOUBLE|COPPER|\d))', r'\1 ', raw)
     raw = re.sub(r'(?i)(\d)(INST\.?\s+KIT|INSULATING|IN\s+GASKET)', r'\1 \2', raw)
     # Adjacent (non-gasket) products — quoted as REGRET per GGPL policy
@@ -442,7 +463,8 @@ def _infer_gasket_type(description: str) -> str | None:
         return 'PLUG_GASKET'
     # Standalone corrugated gasket = corrugated metal gasket (CMG family);
     # "corrugated type ... filler" inside a DJ text stays DJI (checked above)
-    if re.search(r'\bCORRUGATED(?:\s+METAL(?:LIC)?)?\s+GASKET\b|\bCORRUGATED\s+GASKET\b|\bCMG\b', raw):
+    if re.search(r'\bCORRUGATED(?:\s+METAL(?:LIC)?)?\s+GASKET\b|\bCORRUGATED\s+GASKET\b|\bCMG\b'
+                 r'|\b\d-?PLY\s+CORRUGATED\b|METAL\s+SOLID\s+GASKET\s+CORRUGATED', raw):
         return 'CMG'
     if re.search(r'\bMETAL\s+CLAD(?:DED)?\b|\bCLAD\s+GASKET\b', raw) and 'DOUBLE' not in raw:
         return 'METAL_CLAD'
@@ -472,7 +494,9 @@ def _standard_from_text(value: str | None) -> str | None:
     if not value:
         return None
     raw = str(value).upper()
-    match = re.search(r'\b(?:(?:ASME|ANSI)\s*)?B\s*16\.(20|21|47)\b', raw)
+    # RULE V legacy-typo tolerance: "ASME B16..20" (double dot), "B-16.21",
+    # "ASME 16.20" (missing B) all normalize to the canonical ASME form.
+    match = re.search(r'\b(?:(?:ASME|ANSI)\s*B?|B)[\s.-]*16\s*\.{1,2}\s*(20|21|47)\b', raw)
     if match:
         std = f'ASME B16.{match.group(1)}'
         if match.group(1) == '47':
@@ -560,7 +584,11 @@ _SW_FILLER_ALIASES: list[tuple[str, str]] = [
     (r'EXPANDED\s+GRAPHITE', 'EXPANDED GRAPHITE'),
     # GGPL preserves the FLEXIBLE qualifier when the customer states it
     (r'FLEXIBLE\s+GRAPHITE|FLEX\.?\s+GRAPHITE|W/\s*FLEXIBLE\s+GRAPHITE', 'FLEXIBLE GRAPHITE'),
+    # EPC gasket lists (Toyo etc.) call the filler "Graphite Tape" (typo "Grapite")
+    (r'GRAP[HI]?ITE\s+TAPE', 'GRAPHITE'),
     (r'GRAFOIL|GRAFIL|\bGR?PH\b|GRAPH(?:ITE|OIL)', 'GRAPHITE'),
+    # "Vermiculite Fill or amorphous polysilicic acid fibers with talc filler"
+    (r'VERMICULITE(?:\s+FILL)?|AMORPHOUS\s+POLYSILICIC', 'VERMICULITE'),
     (r'\bPTFE\b|TEFLON', 'PTFE'),
     (r'\bMICA\b', 'MICA'),
     (r'\bCERAMIC\b', 'CERAMIC'),
@@ -1153,6 +1181,12 @@ def _material_from_text(description: str) -> str | None:
             return f'EPDM {shore.group(1)} - {shore.group(2)} SHORE A HARDNESS'
         return 'EPDM'
     # Grade-qualified echoes come first — GGPL keeps the qualifier
+    # Cloth-inserted rubber sheet (EPC gasket lists: "NBR ... rubber with Cloth")
+    cloth = re.search(r'\b(NBR|EPDM|SILICONE?|NEOPRENE|SBR|BUTYL)\b[^,;]{0,60}?WITH\s+CLOTH', description, re.IGNORECASE)
+    if cloth:
+        base = cloth.group(1).upper()
+        base = 'SILICONE' if base.startswith('SILICON') else base
+        return f'{base} WITH CLOTH INSERT'
     if re.search(r'COMP\.?\s*NON[\s.–-]*ASB\.?\s*SYNTHETIC\s+FIBER', description, re.IGNORECASE):
         return 'COMPRESSED NON ASBESTOS SYNTHETIC FIBER'
     match = re.search(r'FLEX\.?(?:IBLE)?\s+GRAPHITE\s+REINFORCED\s+W(?:/|ITH)\s*(SS\s*\d{3}L?)\s+SHEET\s+INSERT', description, re.IGNORECASE)
@@ -1203,7 +1237,7 @@ def _pre_clean_description(desc: str) -> str:
          "GASKET FLAT - THK=2mmDN 4;CL150RFTEMASIL HTASME B16.21"
          "4300#SPIRAL WOUND GASKET AISI 316..."
     """
-    t = desc
+    t = _collapse_spaced_abbrevs(desc)  # RULE J-2: "S P W D" → "SPWD" before token fixes
     t = re.sub(r'(?i)(?<=[a-z0-9])(DN\s*\d)', r' \1', t)
     t = re.sub(r'(?i)(DN\s*\d{1,4})(?=[A-Z])', r'\1 ', t)
     t = re.sub(r'(?i)(NPS)(\d)', r'\1 \2', t)
@@ -1504,7 +1538,7 @@ def _enrich_from_description(item: dict) -> dict:
             'LIP_SEAL', 'DIAPHRAGM', 'EYELET', 'SHEET', 'PLUG_GASKET'):
         _enrich_specialty(item, desc, upper)
 
-    if item.get('gasket_type') == 'SOFT_CUT' and not item.get('moc'):
+    if item.get('gasket_type') in ('SOFT_CUT', 'SHEET_GASKET', 'CORRUGATED') and not item.get('moc'):
         material = _material_from_text(desc)
         if material:
             item['moc'] = material

@@ -18,6 +18,7 @@ import {
   FileUp,
   FileSpreadsheet,
   FileText,
+  History,
   Inbox,
   ListFilter,
   Loader2,
@@ -238,6 +239,30 @@ const quoteDefaults: Record<string, unknown> = {
   technical_deviation_remarks: "",
   commercial_tnc: "",
   technical_notes: DEFAULT_TECHNICAL_NOTES,
+};
+
+// Standard options for commercial terms (from TERMS AND CONDITIONS.xlsx).
+// Fields not listed here stay free-text; the Combobox still allows typing a custom value.
+const TERM_FIELD_OPTIONS: Record<string, string[]> = {
+  price_basis: ["EX-WORKS", "FOR BASIS"],
+  validity_days: ["7", "15", "30"],
+  packing: ["INCLUSIVE", "3% EXTRA", "5% EXTRA"],
+  freight: ["TO YOUR ACCOUNT", "INCLUSIVE"],
+  payment_terms: [
+    "30% ADVANCE & 70% BALANCE BEFORE DISPATCH OF MATERIAL",
+    "50% ADVANCE & 50% BALANCE BEFORE DISPATCH OF MATERIAL",
+    "100% ADVANCE ALONG WITH THE ORDER",
+  ],
+  delivery: [
+    "1 WEEK",
+    "1 - 2 WEEKS",
+    "4 - 6 WEEKS",
+    "6 WEEKS",
+    "8 - 10 WEEKS",
+    "10 - 12 WEEKS",
+  ],
+  bank_charges: ["TO YOUR ACCOUNT", "INCLUSIVE"],
+  insurance: ["TO YOUR ACCOUNT", "INCLUSIVE"],
 };
 
 const BUYER_ADDRESS_FIELDS = [
@@ -914,6 +939,69 @@ function todayDisplayDate(): string {
   return new Date().toLocaleDateString("en-GB");
 }
 
+// --- Quotation versioning ----------------------------------------------------
+// A quotation carries a working version number (quote_data.quotation_version,
+// V1 by default). When it is sent to the customer, the full state (items +
+// quote_data) is frozen into quote_data.quotation_versions. Post-negotiation
+// changes happen after "Create new version" bumps the working version, so V1
+// stays exactly as the customer received it.
+type QuotationVersionSnapshot = {
+  version: number;
+  quote_no: string;
+  rev_no: string;
+  note: string;
+  saved_at: string;
+  saved_by: string;
+  sent_at?: string;
+  items: GasketItem[];
+  quote_data: Record<string, unknown>;
+};
+
+function quotationVersionOf(qd: Record<string, unknown>): number {
+  const raw = qd.quotation_version;
+  const value = typeof raw === "number" ? raw : Number.parseInt(getString(raw), 10);
+  return Number.isFinite(value) && value >= 1 ? Math.floor(value) : 1;
+}
+
+function quotationVersionSnapshots(qd: Record<string, unknown>): QuotationVersionSnapshot[] {
+  if (!Array.isArray(qd.quotation_versions)) return [];
+  return (qd.quotation_versions as QuotationVersionSnapshot[])
+    .filter((snapshot) => snapshot && typeof snapshot === "object")
+    .slice()
+    .sort((a, b) => (a.version ?? 0) - (b.version ?? 0));
+}
+
+function buildVersionSnapshot(
+  version: number,
+  quoteNo: string,
+  items: GasketItem[],
+  qd: Record<string, unknown>,
+  actor: string,
+  note: string,
+): QuotationVersionSnapshot {
+  // The snapshot keeps the full quote_data except the version list itself.
+  const qdSnapshot = { ...qd };
+  delete qdSnapshot.quotation_versions;
+  return {
+    version,
+    quote_no: quoteNo,
+    rev_no: getString(qd.rev_no),
+    note,
+    saved_at: new Date().toISOString(),
+    saved_by: actor,
+    items: cloneJson(items),
+    quote_data: cloneJson(qdSnapshot),
+  };
+}
+
+function upsertVersionSnapshot(
+  snapshots: QuotationVersionSnapshot[],
+  snapshot: QuotationVersionSnapshot,
+): QuotationVersionSnapshot[] {
+  return [...snapshots.filter((entry) => entry.version !== snapshot.version), snapshot]
+    .sort((a, b) => a.version - b.version);
+}
+
 function storedMaterialPlan(quote: Quote | null): MaterialPlan | null {
   const plan = quote?.stage_meta?.material_plan;
   if (!plan || typeof plan !== "object") return null;
@@ -1062,7 +1150,25 @@ function descriptionWithSpecial(item: GasketItem, nextSpecial: string): string {
   return description ? `${description}, ${special}` : special;
 }
 
+// Record that the operator explicitly set a rules-engine field, so a later
+// recompute does not re-derive it from the raw description (clearing the value
+// hands the field back to the rules engine).
+function withManualField(item: GasketItem, field: string, value: string): GasketItem {
+  if (!AUTO_UPDATE_FIELDS.has(field)) return item;
+  const current = Array.isArray(item.manual_fields) ? item.manual_fields : [];
+  if (value.trim() === "") {
+    if (!current.includes(field)) return item;
+    return { ...item, manual_fields: current.filter((name) => name !== field) };
+  }
+  if (current.includes(field)) return item;
+  return { ...item, manual_fields: [...current, field] };
+}
+
 function setItemValue(item: GasketItem, field: string, value: string): GasketItem {
+  return withManualField(applyItemFieldValue(item, field, value), field, value);
+}
+
+function applyItemFieldValue(item: GasketItem, field: string, value: string): GasketItem {
   if (field === "special") {
     return { ...item, special: value, ggpl_description: descriptionWithSpecial(item, value) };
   }
@@ -1383,6 +1489,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [intakeCollapsed, setIntakeCollapsed] = React.useState(false);
   const [enquirySetupOpen, setEnquirySetupOpen] = React.useState(false);
   const [quotationSetupOpen, setQuotationSetupOpen] = React.useState(false);
+  const [versionHistoryOpen, setVersionHistoryOpen] = React.useState(false);
   const [workflowComment, setWorkflowComment] = React.useState("");
   // Shown right after "Generate quotation" so the user can preview/download it.
   const [generatedDialogOpen, setGeneratedDialogOpen] = React.useState(false);
@@ -2396,11 +2503,20 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       const linked = await getQuote(linkedQuoteId);
       const currentQuoteData = { ...(linked.quote_data ?? {}) };
       const nextRevNo = nextRevisionNo(currentQuoteData.rev_no);
-      const nextQuoteData = {
+      const nextQuoteData: Record<string, unknown> = {
         ...currentQuoteData,
         rev_no: nextRevNo,
         rev_date: todayDisplayDate(),
       };
+      // If the working version has already gone to the customer, keep it
+      // frozen and move the enquiry-driven changes into a new version.
+      const linkedVersion = quotationVersionOf(currentQuoteData);
+      const versionSent = quotationVersionSnapshots(currentQuoteData)
+        .some((entry) => entry.version === linkedVersion && entry.sent_at);
+      const nextVersion = versionSent ? linkedVersion + 1 : linkedVersion;
+      if (versionSent) {
+        nextQuoteData.quotation_version = nextVersion;
+      }
       const nextStageMeta = appendActivity(
         {
           ...(linked.stage_meta ?? {}),
@@ -2411,7 +2527,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         {
           kind: "workflow",
           title: "Quotation revised from enquiry",
-          detail: `Revision ${nextRevNo} created after enquiry update`,
+          detail: versionSent
+            ? `Version V${nextVersion} (rev ${nextRevNo}) started after enquiry update — V${linkedVersion} stays as sent`
+            : `Revision ${nextRevNo} created after enquiry update`,
           user: currentUser.name || currentUser.id,
         },
       );
@@ -2422,7 +2540,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         stage_meta: nextStageMeta,
       } as Partial<Quote>);
       setQuotes((prev) => prev.map((row) => (row.id === updatedQuotation.id ? quoteSummary(updatedQuotation) : row)));
-      toast.success(`Linked quotation revised to rev ${nextRevNo}`);
+      toast.success(versionSent
+        ? `Linked quotation moved to V${nextVersion} (rev ${nextRevNo}) — sent version preserved`
+        : `Linked quotation revised to rev ${nextRevNo}`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Linked quotation revision failed");
     }
@@ -2950,7 +3070,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     const now = new Date().toISOString();
     const stageInfo = QUOTATION_STAGES[QUOTATION_STAGE_INDEX.get(stage) ?? 0];
     const history = Array.isArray(qd.quotation_stage_history) ? qd.quotation_stage_history : [];
-    const nextQuoteData = {
+    const nextQuoteData: Record<string, unknown> = {
       ...qd,
       quotation_stage: stage,
       quotation_stage_updated_at: now,
@@ -2964,6 +3084,16 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         },
       ],
     };
+    if (stage === "sent_to_customer") {
+      // Freeze the working version exactly as it goes to the customer.
+      const versionNo = quotationVersionOf(qd);
+      const snapshot = {
+        ...buildVersionSnapshot(versionNo, effectiveQuoteNo, items, qd, currentUser.name || currentUser.id, "Sent to customer"),
+        sent_at: now,
+      };
+      nextQuoteData.quotation_version = versionNo;
+      nextQuoteData.quotation_versions = upsertVersionSnapshot(quotationVersionSnapshots(qd), snapshot);
+    }
     const nextMeta = appendActivity(quote.stage_meta ?? {}, {
       kind: "workflow",
       title: "Quotation stage updated",
@@ -2994,28 +3124,129 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       toast.error("Approve the quotation before marking it sent");
       return;
     }
+    const now = new Date().toISOString();
+    const actor = currentUser.name || currentUser.id;
+    const versionNo = quotationVersionOf(qd);
     const sentMeta = {
       ...(quote.stage_meta ?? {}),
       approval,
-      sent_by: currentUser.name || currentUser.id,
-      sent_at: new Date().toISOString(),
+      sent_by: actor,
+      sent_at: now,
+    };
+    // Freeze this version exactly as the customer receives it.
+    const snapshot = {
+      ...buildVersionSnapshot(versionNo, effectiveQuoteNo, items, qd, actor, "Sent to customer"),
+      sent_at: now,
     };
     const nextQuoteData = {
       ...qd,
+      quotation_version: versionNo,
+      quotation_versions: upsertVersionSnapshot(quotationVersionSnapshots(qd), snapshot),
       quotation_stage: "sent_to_customer",
-      quotation_stage_updated_at: new Date().toISOString(),
+      quotation_stage_updated_at: now,
     };
     const saved = await savePatch({ quote_data: nextQuoteData, quote_no: effectiveQuoteNo } as Partial<Quote>);
     if (!saved) return;
-    const advanced = await advanceQuoteStage(saved.id, "sent", "Approved quotation sent", appendActivity(sentMeta, {
+    const activityMeta = appendActivity(sentMeta, {
       kind: "workflow",
       title: "Quotation sent",
-      detail: "Approved quotation marked sent",
-      user: currentUser.name || currentUser.id,
-    }));
+      detail: `Version V${versionNo} sent to customer`,
+      user: actor,
+    });
+    // Re-sending a revised version: the pipeline stage is already "sent",
+    // so only the first send advances it.
+    const advanced = saved.stage === "sent" || saved.stage === "po"
+      ? await patchQuote(saved.id, { stage_meta: activityMeta } as Partial<Quote>)
+      : await advanceQuoteStage(saved.id, "sent", "Approved quotation sent", activityMeta);
     setQuote(advanced);
     setQuotes((prev) => prev.map((row) => (row.id === advanced.id ? quoteSummary(advanced) : row)));
-    toast.success("Quotation marked sent");
+    toast.success(`Quotation V${versionNo} marked sent`);
+  }
+
+  // After negotiation, further changes go into a new working version of the
+  // same quotation. The sent version stays frozen in quotation_versions.
+  async function createNewQuotationVersion() {
+    if (!canEditQuotation) {
+      toast.error("You do not have permission to revise quotations.");
+      return;
+    }
+    if (!quote) return;
+    const actor = currentUser.name || currentUser.id;
+    const currentVersion = quotationVersionOf(qd);
+    const nextVersion = currentVersion + 1;
+    if (!window.confirm(`Create version V${nextVersion}? V${currentVersion} will be preserved exactly as sent, and further changes will apply to V${nextVersion}.`)) return;
+    const snapshots = quotationVersionSnapshots(qd);
+    // Quotations sent before versioning existed have no snapshot yet — capture
+    // the outgoing state so V1 is never lost.
+    const preserved = snapshots.some((entry) => entry.version === currentVersion)
+      ? snapshots
+      : upsertVersionSnapshot(snapshots, buildVersionSnapshot(currentVersion, effectiveQuoteNo, items, qd, actor, "Captured before revision"));
+    const now = new Date().toISOString();
+    const history = Array.isArray(qd.quotation_stage_history) ? qd.quotation_stage_history : [];
+    const nextQuoteData = {
+      ...qd,
+      quotation_version: nextVersion,
+      quotation_versions: preserved,
+      rev_no: String(nextVersion - 1),
+      rev_date: todayDisplayDate(),
+      quotation_stage: "revision",
+      quotation_stage_updated_at: now,
+      quotation_stage_history: [
+        ...history,
+        { stage: "revision", label: `Revision — V${nextVersion} started`, at: now, user: actor },
+      ],
+    };
+    // Negotiation changes need fresh approval before the new version is sent.
+    const nextMeta = appendActivity(
+      { ...(quote.stage_meta ?? {}), approval: { status: "draft" } },
+      {
+        kind: "workflow",
+        title: `Version V${nextVersion} created`,
+        detail: `V${currentVersion} preserved as sent; changes now edit V${nextVersion}`,
+        user: actor,
+      },
+    );
+    const saved = await savePatch(
+      { quote_data: nextQuoteData, quote_no: effectiveQuoteNo, stage_meta: nextMeta } as Partial<Quote>,
+      `Version V${nextVersion} created — V${currentVersion} preserved`,
+    );
+    if (saved) setVersionHistoryOpen(false);
+  }
+
+  // Load a frozen version's line items and prices into the current working
+  // version as unsaved local edits (useful when negotiation circles back).
+  function restoreQuotationVersion(snapshot: QuotationVersionSnapshot) {
+    if (!canEditQuotation) {
+      toast.error("You do not have permission to revise quotations.");
+      return;
+    }
+    if (!quote) return;
+    const workingVersion = quotationVersionOf(qd);
+    if (!window.confirm(`Load the items and prices from V${snapshot.version} into working version V${workingVersion}? Current line items and prices will be replaced (review and save to keep).`)) return;
+    const snapQd = (snapshot.quote_data ?? {}) as Record<string, unknown>;
+    const nextQuoteData = {
+      ...qd,
+      unit_prices: cloneJson(snapQd.unit_prices ?? []),
+      cost_prices: cloneJson(snapQd.cost_prices ?? []),
+    };
+    invalidateMaterialPlan();
+    setQuote((current) => (current ? { ...current, items: cloneJson(snapshot.items ?? []), quote_data: nextQuoteData } : current));
+    setHasUnsavedLocalEdits(true);
+    setVersionHistoryOpen(false);
+    toast.success(`V${snapshot.version} items and prices loaded into V${workingVersion} — save to keep them`);
+  }
+
+  // Queue rows for the debounced rules + GGPL-description recompute (the
+  // effect above picks them up). Used by every edit path that can change a
+  // description-driving field: single-cell edits, paste, fill, and clear.
+  function queueAutoUpdateRows(indices: Iterable<number>) {
+    const pending = Array.from(indices);
+    if (!pending.length) return;
+    setAutoUpdateRows((current) => {
+      const updated = new Set(current);
+      pending.forEach((index) => updated.add(index));
+      return updated;
+    });
   }
 
   function updateItem(index: number, field: string, value: string) {
@@ -3026,11 +3257,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     setQuote((current) => (current ? { ...current, items: next } : current));
     setHasUnsavedLocalEdits(true);
     if (AUTO_UPDATE_FIELDS.has(field)) {
-      setAutoUpdateRows((current) => {
-        const updated = new Set(current);
-        updated.add(index);
-        return updated;
-      });
+      queueAutoUpdateRows([index]);
     }
   }
 
@@ -3554,6 +3781,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const quotationStage = quotationStageFromData(qd, quote);
   const quotationStageIndex = QUOTATION_STAGE_INDEX.get(quotationStage) ?? 0;
   const quotationStageMeta = QUOTATION_STAGES[quotationStageIndex] ?? QUOTATION_STAGES[0];
+  const quotationVersion = quotationVersionOf(qd);
+  const quotationVersions = quotationVersionSnapshots(qd);
+  const currentVersionSent = quotationVersions.some((entry) => entry.version === quotationVersion && entry.sent_at);
   const quotationChecklist = quotationStageChecklist(quotationStage, approval, pricingSummary, qualityReport.score);
   const visibleQuotes = quotes.filter((row) => {
     if (isPoSection) {
@@ -3734,6 +3964,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     const next = [...items];
     let changed = 0;
     let appendedRows = 0;
+    const recomputeIndices = new Set<number>();
     for (let rowOffset = 0; rowOffset < rowCount; rowOffset += 1) {
       let itemIndex = displayIndices[startPosition + rowOffset];
       if (itemIndex === undefined) {
@@ -3751,6 +3982,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           : rawValue;
         row = setItemValue(row, column.field, value);
         changed += 1;
+        if (AUTO_UPDATE_FIELDS.has(column.field)) recomputeIndices.add(itemIndex);
       }
       next[itemIndex] = row;
     }
@@ -3762,6 +3994,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     invalidateMaterialPlan();
     setQuote((current) => (current ? { ...current, items: next } : current));
     setHasUnsavedLocalEdits(true);
+    queueAutoUpdateRows(recomputeIndices);
     toast.success(`Pasted ${changed} cell${changed === 1 ? "" : "s"}${appendedRows ? ` and appended ${appendedRows} row${appendedRows === 1 ? "" : "s"}` : ""}`);
     return true;
   }
@@ -3813,6 +4046,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     if (sourceIndex === undefined || !items[sourceIndex]) return false;
     const next = [...items];
     let changed = 0;
+    const recomputeIndices = new Set<number>();
     for (let position = selectedRange.minPosition + 1; position <= selectedRange.maxPosition; position += 1) {
       const rowIndex = displayIndices[position];
       if (rowIndex === undefined || !next[rowIndex]) continue;
@@ -3822,6 +4056,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         if (!column || !isEditableGridColumn(column)) continue;
         row = setItemValue(row, column.field, columnValue(items[sourceIndex], column));
         changed += 1;
+        if (AUTO_UPDATE_FIELDS.has(column.field)) recomputeIndices.add(rowIndex);
       }
       next[rowIndex] = row;
     }
@@ -3830,6 +4065,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     invalidateMaterialPlan();
     setQuote((current) => current ? { ...current, items: next } : current);
     setHasUnsavedLocalEdits(true);
+    queueAutoUpdateRows(recomputeIndices);
     toast.success(`Filled ${changed} cell${changed === 1 ? "" : "s"} down`);
     return true;
   }
@@ -3853,6 +4089,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     const srcCols = fillSource.maxCol - fillSource.minCol + 1;
     const next = [...items];
     let changed = 0;
+    const recomputeIndices = new Set<number>();
     for (let position = fillRange.minPosition; position <= fillRange.maxPosition; position += 1) {
       for (let colIndex = fillRange.minCol; colIndex <= fillRange.maxCol; colIndex += 1) {
         const inSource = position >= fillSource.minPosition && position <= fillSource.maxPosition && colIndex >= fillSource.minCol && colIndex <= fillSource.maxCol;
@@ -3868,6 +4105,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         if (!srcItem || !srcColumn) continue;
         next[rowIndex] = setItemValue(next[rowIndex], column.field, columnValue(srcItem, srcColumn));
         changed += 1;
+        if (AUTO_UPDATE_FIELDS.has(column.field)) recomputeIndices.add(rowIndex);
       }
     }
     if (changed) {
@@ -3875,6 +4113,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       invalidateMaterialPlan();
       setQuote((current) => (current ? { ...current, items: next } : current));
       setHasUnsavedLocalEdits(true);
+      queueAutoUpdateRows(recomputeIndices);
       const anchorRow = displayIndices[fillRange.minPosition];
       const focusRow = displayIndices[fillRange.maxPosition];
       if (anchorRow !== undefined && focusRow !== undefined) {
@@ -3909,6 +4148,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     if (!selectedRange) return false;
     const next = [...items];
     let changed = 0;
+    const recomputeIndices = new Set<number>();
     for (let position = selectedRange.minPosition; position <= selectedRange.maxPosition; position += 1) {
       const rowIndex = displayIndices[position];
       if (rowIndex === undefined || !next[rowIndex]) continue;
@@ -3918,6 +4158,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         if (!column || !isEditableGridColumn(column)) continue;
         row = setItemValue(row, column.field, column.kind === "checkbox" ? "false" : "");
         changed += 1;
+        if (AUTO_UPDATE_FIELDS.has(column.field)) recomputeIndices.add(rowIndex);
       }
       next[rowIndex] = row;
     }
@@ -3926,6 +4167,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     invalidateMaterialPlan();
     setQuote((current) => (current ? { ...current, items: next } : current));
     setHasUnsavedLocalEdits(true);
+    queueAutoUpdateRows(recomputeIndices);
     return true;
   }
 
@@ -6823,6 +7065,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <CardTitle className="text-base">Quotation preparation</CardTitle>
                   <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                     <span>{quote.customer || quote.quote_no || "Untitled enquiry"}</span>
+                    <Badge variant="secondary">V{quotationVersion}</Badge>
                     <Badge variant={quotationStageBadgeVariant(quotationStage)}>{quotationStageMeta.label}</Badge>
                     <Badge variant={approvalBadgeVariant(approval.status)}>{approval.status}</Badge>
                   </div>
@@ -6857,15 +7100,95 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       <FileSpreadsheet className="mr-2 h-4 w-4" />
                       Download Excel
                     </DropdownMenuItem>}
-                    {canEditQuotation && <DropdownMenuItem onSelect={markSent} disabled={approval.status !== "approved" || quote.stage === "sent"}>
+                    {canEditQuotation && <DropdownMenuItem onSelect={markSent} disabled={approval.status !== "approved" || currentVersionSent}>
                       <Send className="mr-2 h-4 w-4" />
-                      Mark as sent
+                      {currentVersionSent ? `V${quotationVersion} already sent` : `Mark V${quotationVersion} as sent`}
+                    </DropdownMenuItem>}
+                    <DropdownMenuItem onSelect={() => setVersionHistoryOpen(true)}>
+                      <History className="mr-2 h-4 w-4" />
+                      Version history{quotationVersions.length ? ` (${quotationVersions.length})` : ""}
+                    </DropdownMenuItem>
+                    {canEditQuotation && <DropdownMenuItem onSelect={createNewQuotationVersion} disabled={!currentVersionSent}>
+                      <Plus className="mr-2 h-4 w-4" />
+                      Create new version (V{quotationVersion + 1})
                     </DropdownMenuItem>}
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
             </div>
           </CardHeader>
+          <Dialog open={versionHistoryOpen} onOpenChange={setVersionHistoryOpen}>
+            <DialogContent className="max-h-[80vh] max-w-3xl overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle>Quotation versions</DialogTitle>
+                <DialogDescription>
+                  Working version is V{quotationVersion}. Each version sent to the customer is frozen here, so post-negotiation changes never overwrite what the customer received.
+                </DialogDescription>
+              </DialogHeader>
+              {quotationVersions.length === 0 ? (
+                <div className="rounded-md border bg-muted/20 p-3 text-sm text-muted-foreground">
+                  No frozen versions yet. The current version is frozen automatically when the quotation is marked sent; after that, use &quot;Create new version&quot; to start V{quotationVersion + 1} for negotiation changes.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {[...quotationVersions].reverse().map((snapshot) => {
+                    const snapQd = (snapshot.quote_data ?? {}) as Record<string, unknown>;
+                    const snapPrices = Array.isArray(snapQd.unit_prices) ? (snapQd.unit_prices as unknown[]) : [];
+                    const snapItems = Array.isArray(snapshot.items) ? snapshot.items : [];
+                    return (
+                      <div key={snapshot.version} className="rounded-md border">
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/20 px-3 py-2">
+                          <div className="flex flex-wrap items-center gap-2 text-sm">
+                            <Badge variant={snapshot.version === quotationVersion ? "secondary" : "outline"}>V{snapshot.version}</Badge>
+                            <span className="font-medium">{snapshot.quote_no || "—"}</span>
+                            <span className="text-xs text-muted-foreground">Rev {snapshot.rev_no || "0"}</span>
+                            {snapshot.sent_at ? <Badge variant="outline">Sent {new Date(snapshot.sent_at).toLocaleDateString("en-GB")}</Badge> : null}
+                          </div>
+                          {canEditQuotation && snapshot.version !== quotationVersion && (
+                            <Button variant="secondary" size="sm" onClick={() => restoreQuotationVersion(snapshot)}>
+                              <RotateCcw className="h-4 w-4" />
+                              Load into V{quotationVersion}
+                            </Button>
+                          )}
+                        </div>
+                        <div className="px-3 py-2 text-xs text-muted-foreground">
+                          {snapshot.note || "Saved"} by {snapshot.saved_by || "unknown"} on {snapshot.saved_at ? new Date(snapshot.saved_at).toLocaleString("en-GB") : "—"} · {snapItems.length} item{snapItems.length === 1 ? "" : "s"}
+                        </div>
+                        <details className="border-t">
+                          <summary className="cursor-pointer px-3 py-2 text-xs font-medium">View line items</summary>
+                          <div className="max-h-64 overflow-auto border-t">
+                            <table className="w-full text-xs">
+                              <thead className="sticky top-0 bg-muted/40">
+                                <tr className="text-left">
+                                  <th className="px-2 py-1 font-medium">#</th>
+                                  <th className="px-2 py-1 font-medium">GGPL description</th>
+                                  <th className="px-2 py-1 font-medium">Qty</th>
+                                  <th className="px-2 py-1 font-medium">Unit price</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {snapItems.map((item, index) => (
+                                  <tr key={index} className="border-t align-top">
+                                    <td className="px-2 py-1">{getString(item.line_no) || index + 1}</td>
+                                    <td className="px-2 py-1">{getString(item.ggpl_description) || getString(item.raw_description) || "—"}</td>
+                                    <td className="px-2 py-1">{getString(item.quantity) || "—"}</td>
+                                    <td className="px-2 py-1">{getString(snapPrices[index]) || "—"}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </details>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <DialogFooter>
+                <Button variant="secondary" onClick={() => setVersionHistoryOpen(false)}>Close</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
           <CardContent className="space-y-3 p-3">
             <div className="space-y-3">
               <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -6873,6 +7196,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                        <Badge variant="secondary">V{quotationVersion}</Badge>
                         <Badge variant={quotationStageBadgeVariant(quotationStage)}>{quotationStageIndex + 1}. {quotationStageMeta.label}</Badge>
                         <Badge variant={quote.customer && quote.project_ref ? "secondary" : "outline"}>{quote.customer && quote.project_ref ? "Context ready" : "Needs context"}</Badge>
                         <Badge variant={approvalBadgeVariant(approval.status)}>{approval.status}</Badge>
@@ -7087,7 +7411,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                           label={label}
                           value={getString(qd[key])}
                           onChange={(value) => updateQd(key, value)}
-                          textarea={["payment_terms", "cancellation", "min_order_value", "technical_notes"].includes(key)}
+                          options={TERM_FIELD_OPTIONS[key]}
+                          textarea={["cancellation", "min_order_value", "technical_notes"].includes(key)}
                           disabled={!canEditQuotation && key !== "technical_notes"}
                         />
                       ))}

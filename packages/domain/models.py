@@ -64,5 +64,8 @@ class GasketItem(BaseModel):
     status: Optional[str] = None
     flags: list[str] = Field(default_factory=list)
     size_norm: Optional[str] = None
+    # Fields the operator explicitly set in the portal; the rules engine will
+    # not re-derive these from the raw description on recompute.
+    manual_fields: list[str] = Field(default_factory=list)
 
     model_config = {"extra": "allow"}  # allow unknown fields from LLM

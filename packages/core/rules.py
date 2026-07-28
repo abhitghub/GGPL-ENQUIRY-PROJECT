@@ -9,6 +9,7 @@ from data.reference_data import (
     lookup_rtj_ring,
 )
 from data.brand_dictionary import apply_brand_rules
+from data.customer_gasket_codes import apply_gasket_code
 from core.formatter import NON_STANDARD, is_non_standard
 
 # GGPL escalation phrases (exact house strings — never paraphrased)
@@ -21,6 +22,28 @@ ESC_CLEAR_SPEC = 'KINDLY PROVIDE CLEAR SPEC'
 ESC_DATASHEET = 'KINDLY PROVIDE DATASHEET / DETAILED MATERIAL DESCRIPTION'
 ESC_DIMENSIONS = 'KINDLY PROVIDE DIMENSIONS'
 ESC_REGRET = 'REGRET'
+
+# RULE J-2 Part 2 — mandatory confirmation for ringed SPW quoted by bare OD/ID
+# (no drawing): the stated dims may be the sealing element or the overall
+# gasket over the rings. Quote issues; order must not release unresolved.
+FLAG_SW_ELEMENT_VS_OVERALL = (
+    'KINDLY CONFIRM — STATED OD/ID ARE SEALING ELEMENT DIMS OR OVERALL DIMS '
+    '(OVER INNER/OUTER RINGS)? CRITICAL AT THESE DIAMETERS — CHANGES MANUFACTURING DIMS'
+)
+
+# RULE V catch-all — dimensional-standard slot forms the GGPL library knows.
+# Anything else cited by a customer is kept verbatim and flagged for tech
+# review, never silently substituted.
+_KNOWN_STANDARD_RE = re.compile(
+    r'^(?:TO\s+SUIT\s+)?'
+    r'(?:NACE\b'                                  # NACE-prefixed combos / RX template
+    r'|(?:ASME|ANSI)\s*B\s*16\s*\.\s*(?:20|21|47|5)\b'
+    r'|B\s*16\s*\.\s*(?:20|21|47|5)\b'
+    r'|API\s*6\s*[AB]\b'
+    r'|EN\s*1514\b'
+    r'|AS\s+PER\s+DRAWING\b'
+    r')'
+)
 
 # mm pipe-OD → NPS map (W1 flange context only — Master Spec A1)
 _PIPE_OD_TO_NPS = {
@@ -606,9 +629,45 @@ def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
             applied_defaults.append('standard defaulted to EN 1514-2 (SPW on PN-rated flanges)')
     elif size_val is not None and size_val >= 26:
         _set_b1647_standard(item, flags, applied_defaults)
+    elif item.get('size_type') == 'OD_ID' and not item.get('rating'):
+        # RULE V OD×ID law (W3 world): a dims-only SPW has no size+class to key
+        # a dimensional table — no standard is defaulted (KAMM/DJI already
+        # follow this convention; the formatter simply omits the tag).
+        pass
     elif not item.get('standard'):
         item['standard'] = 'ASME B16.20'
         applied_defaults.append('standard defaulted to ASME B16.20')
+
+    # --- RULE J-2 Part 2: element-vs-overall OD/ID ambiguity (ringed SPW, W3) ---
+    # For a ringed spiral wound quoted by bare OD/ID, "OD/ID" can mean the
+    # sealing element or the overall gasket over the rings — a 20–30mm
+    # manufacturing difference. Quote as stated but demand confirmation,
+    # unless a drawing governs or the text itself disambiguates.
+    if item.get('size_type') == 'OD_ID':
+        od_v, id_v = item.get('od_mm'), item.get('id_mm')
+        if od_v and id_v and float(od_v) > float(id_v):
+            width = (float(od_v) - float(id_v)) / 2
+            thk_v = item.get('thickness_mm')
+            # Advisory coherence check: radial width vs thickness sanity
+            if (thk_v and float(thk_v) > width) or (width < 8 and float(od_v) >= 300):
+                flags.append(
+                    f'SPW OD/ID coherence: radial width {width:g}MM vs '
+                    f'{thk_v or "?"}MM THK — possible typo in OD/ID, verify'
+                )
+        if od_v and id_v and (inner_ring or outer_ring):
+            special_txt = str(item.get('special') or '').upper()
+            has_drawing = bool(
+                re.search(r'\bDRAWING\b|\bDRG\b|\bDWG\b', raw_desc_upper)
+                or 'DRAWING' in special_txt
+            )
+            text_disambiguates = bool(re.search(
+                r'(?:WINDING|ELEMENT|OVERALL|SEALING)\s+(?:ELEMENT\s+)?[OI]\.?D'
+                r'|SEALING\s+ELEMENT'
+                r'|OVER\s+(?:THE\s+)?(?:CENTERING|CENTRING|OUTER|INNER)\s+RING',
+                raw_desc_upper,
+            ))
+            if not has_drawing and not text_disambiguates and FLAG_SW_ELEMENT_VS_OVERALL not in flags:
+                flags.append(FLAG_SW_ELEMENT_VS_OVERALL)
 
 
 # ---------------------------------------------------------------------------
@@ -1767,6 +1826,27 @@ def apply_rules(item: dict) -> dict:
                     applied_defaults.append(f'{_od_val}MM pipe OD mapped to NPS {_nps} (ANSI class context)')
                     break
 
+    # Project gasket codes (Toyo/HSEPL G-codes etc.) — resolve construction
+    # for fields the row text left blank; row text always outranks the code.
+    apply_gasket_code(item, flags, applied_defaults)
+
+    # --- RULE V Part 5.0 case 3: dims-only line + cited dimensional standard ---
+    # With no size+class there is no table row for the citation to govern, so
+    # the size is non-standard; the citation survives only as a construction
+    # reference. Scoped to the equipment-world families (SPW/DJI/KAMM) — soft
+    # cut keeps its ground-truth B16.21 convention.
+    if (item.get('size_type') == 'OD_ID'
+            and not item.get('rating') and not size_norm
+            and item.get('gasket_type') in ('SPIRAL_WOUND', 'DJI', 'KAMM')
+            and item.get('standard') and not is_non_standard(item['standard'])):
+        _cited_std = str(item['standard']).strip()
+        if re.search(r'\bB\s*16\s*\.\s*(?:20|21|47)\b', _cited_std.upper()):
+            item['standard'] = NON_STANDARD
+            _add_item_deviation(
+                item, flags,
+                f'{_cited_std} CITED ON DIMS-ONLY LINE — SIZE NOT TABULATED; '
+                f'CONSTRUCTION PER {_cited_std} ONLY (NON-STANDARD SIZE)')
+
     gasket_type = item.get('gasket_type', 'SOFT_CUT')
     raw_desc = (
         item.get('description')
@@ -1774,52 +1854,59 @@ def apply_rules(item: dict) -> dict:
         or ''
     ).upper()
 
-    if re.search(r'\bHEAT\s+EXCHANGER\s+GASKET\b', raw_desc):
-        gasket_type = 'KAMM'
-        item['gasket_type'] = 'KAMM'
-    elif re.search(r'\bDOUBLE[\s\-]?JACKET(?:ED)?\b|\bJACKETED\b', raw_desc):
-        gasket_type = 'DJI'
-        item['gasket_type'] = 'DJI'
-    elif gasket_type == 'SOFT_CUT' and re.search(
-        r'\b(?:SPIRAL|SPRIAL|SPRIRAL|SPIRIAL|SPLRAL|SPRLAL|SPIRRAL|SPRRAL|SPRL|SPL)\s*[-\s]*(?:W(?:OU)?ND\w*|WIND\w*)\b|\bSPW\b',
-        raw_desc,
-    ) and 'INSERT' not in str(item.get('moc') or '').upper():
-        # LLM missed/misclassified — description text is unambiguous.
-        # (Reinforced-graphite-with-insert rows keep their SOFT_CUT family
-        # classification even though the enquiry says "spiral wound".)
-        gasket_type = 'SPIRAL_WOUND'
-        item['gasket_type'] = 'SPIRAL_WOUND'
-    elif gasket_type == 'SOFT_CUT' and _looks_like_oring(raw_desc):
-        gasket_type = 'O_RING'
-        item['gasket_type'] = 'O_RING'
-    elif gasket_type == 'SOFT_CUT' and re.search(r'\bKAMMPROFILE\b|\bCAMPROFILE\b', raw_desc):
-        gasket_type = 'KAMM'
-        item['gasket_type'] = 'KAMM'
-    elif gasket_type == 'SOFT_CUT' and re.search(
-        r'\b(?:RING\s+JOINT|RING\s+TYPE\s+JOINT|RTJ\s+GASKET)\b', raw_desc
-    ) and not re.search(r'\bSPIRAL\b|\bCNAF\b|\bPTFE\b|\bRUBBER\b|\bNEOPRENE\b|\bGRAPHITE\s+SHEET\b', raw_desc):
-        gasket_type = 'RTJ'
-        item['gasket_type'] = 'RTJ'
-    elif gasket_type == 'SOFT_CUT' and re.search(
-        r'\b(?:ISK|INSULAT(?:ING|ION)\s+GASKET|INSULAT(?:ING|ION)\s+KIT|FLANGE\s+ISOLAT(?:ING|ION)\s+KIT)\b',
-        raw_desc,
-    ):
-        gasket_type = 'ISK'
-        item['gasket_type'] = 'ISK'
-    elif gasket_type == 'SOFT_CUT' and re.search(r'\bPLUG\s+GASKET\b|\bPLUG\s+TYPE\s+GASKET\b', raw_desc):
-        gasket_type = 'PLUG_GASKET'
-        item['gasket_type'] = 'PLUG_GASKET'
-    elif gasket_type == 'SOFT_CUT' and re.search(r'\bCORRUGATED(?:\s+METAL(?:LIC)?)?\s+GASKET\b|\bCORRUGATED\s+GASKET\b', raw_desc):
-        gasket_type = 'CORRUGATED'
-        item['gasket_type'] = 'CORRUGATED'
-    elif gasket_type == 'SOFT_CUT' and re.search(r'\bSHEET\s+GASKET\b|\bGASKET\s+SHEET\b', raw_desc):
-        gasket_type = 'SHEET_GASKET'
-        item['gasket_type'] = 'SHEET_GASKET'
+    # Fields the operator set by hand in the portal outrank anything re-derived
+    # from the raw description text — otherwise a recompute silently reverts
+    # their edit (e.g. gasket type changed on a "HEAT EXCHANGER GASKET" row).
+    manual_fields = set(item.get('manual_fields') or [])
+    gasket_type_is_manual = 'gasket_type' in manual_fields and item.get('gasket_type')
 
-    # If "non-metallic" is mentioned in the original description, force SOFT_CUT
-    if re.search(r'NON[\s\-]?METALLIC', raw_desc) and gasket_type not in ('SOFT_CUT', 'SHEET_GASKET', 'O_RING'):
-        gasket_type = 'SOFT_CUT'
-        item['gasket_type'] = 'SOFT_CUT'
+    if not gasket_type_is_manual:
+        if re.search(r'\bHEAT\s+EXCHANGER\s+GASKET\b', raw_desc):
+            gasket_type = 'KAMM'
+            item['gasket_type'] = 'KAMM'
+        elif re.search(r'\bDOUBLE[\s\-]?JACKET(?:ED)?\b|\bJACKETED\b', raw_desc):
+            gasket_type = 'DJI'
+            item['gasket_type'] = 'DJI'
+        elif gasket_type == 'SOFT_CUT' and re.search(
+            r'\b(?:SPIRAL|SPRIAL|SPRIRAL|SPIRIAL|SPLRAL|SPRLAL|SPIRRAL|SPRRAL|SPRL|SPL)\s*[-\s]*(?:W(?:OU)?ND\w*|WIND\w*)\b|\bSPW\b',
+            raw_desc,
+        ) and 'INSERT' not in str(item.get('moc') or '').upper():
+            # LLM missed/misclassified — description text is unambiguous.
+            # (Reinforced-graphite-with-insert rows keep their SOFT_CUT family
+            # classification even though the enquiry says "spiral wound".)
+            gasket_type = 'SPIRAL_WOUND'
+            item['gasket_type'] = 'SPIRAL_WOUND'
+        elif gasket_type == 'SOFT_CUT' and _looks_like_oring(raw_desc):
+            gasket_type = 'O_RING'
+            item['gasket_type'] = 'O_RING'
+        elif gasket_type == 'SOFT_CUT' and re.search(r'\bKAMMPROFILE\b|\bCAMPROFILE\b', raw_desc):
+            gasket_type = 'KAMM'
+            item['gasket_type'] = 'KAMM'
+        elif gasket_type == 'SOFT_CUT' and re.search(
+            r'\b(?:RING\s+JOINT|RING\s+TYPE\s+JOINT|RTJ\s+GASKET)\b', raw_desc
+        ) and not re.search(r'\bSPIRAL\b|\bCNAF\b|\bPTFE\b|\bRUBBER\b|\bNEOPRENE\b|\bGRAPHITE\s+SHEET\b', raw_desc):
+            gasket_type = 'RTJ'
+            item['gasket_type'] = 'RTJ'
+        elif gasket_type == 'SOFT_CUT' and re.search(
+            r'\b(?:ISK|INSULAT(?:ING|ION)\s+GASKET|INSULAT(?:ING|ION)\s+KIT|FLANGE\s+ISOLAT(?:ING|ION)\s+KIT)\b',
+            raw_desc,
+        ):
+            gasket_type = 'ISK'
+            item['gasket_type'] = 'ISK'
+        elif gasket_type == 'SOFT_CUT' and re.search(r'\bPLUG\s+GASKET\b|\bPLUG\s+TYPE\s+GASKET\b', raw_desc):
+            gasket_type = 'PLUG_GASKET'
+            item['gasket_type'] = 'PLUG_GASKET'
+        elif gasket_type == 'SOFT_CUT' and re.search(r'\bCORRUGATED(?:\s+METAL(?:LIC)?)?\s+GASKET\b|\bCORRUGATED\s+GASKET\b', raw_desc):
+            gasket_type = 'CORRUGATED'
+            item['gasket_type'] = 'CORRUGATED'
+        elif gasket_type == 'SOFT_CUT' and re.search(r'\bSHEET\s+GASKET\b|\bGASKET\s+SHEET\b', raw_desc):
+            gasket_type = 'SHEET_GASKET'
+            item['gasket_type'] = 'SHEET_GASKET'
+
+        # If "non-metallic" is mentioned in the original description, force SOFT_CUT
+        if re.search(r'NON[\s\-]?METALLIC', raw_desc) and gasket_type not in ('SOFT_CUT', 'SHEET_GASKET', 'O_RING'):
+            gasket_type = 'SOFT_CUT'
+            item['gasket_type'] = 'SOFT_CUT'
 
     # Brand & trade-name translation (three-bucket policy, Master Spec v3.2)
     apply_brand_rules(item, flags, applied_defaults)
@@ -1951,6 +2038,15 @@ def apply_rules(item: dict) -> dict:
 
     # --- Obsolete standards cited (API 601 / API 605 / MSS SP-44) ---
     _raw_all_std = (item.get('raw_description') or item.get('description') or '').upper()
+    # If the obsolete citation itself landed in the standard field (LLM path),
+    # replace it with the successor before wording the deviation (Rule V Part 4).
+    _std_field_upper = str(item.get('standard') or '').upper()
+    if re.search(r'\bAPI\s*601\b', _std_field_upper):
+        item['standard'] = 'ASME B16.20'
+    elif re.search(r'\bAPI\s*605\b', _std_field_upper):
+        item['standard'] = 'ASME B16.47 (SERIES-B)'
+    elif re.search(r'\bMSS\s*SP[-\s]?44\b', _std_field_upper):
+        item['standard'] = 'ASME B16.47 (SERIES-A)'
     if re.search(r'\bAPI\s*60[15]\b|\bMSS\s*SP[-\s]?44\b', _raw_all_std):
         _add_item_deviation(
             item, flags,
@@ -1964,6 +2060,17 @@ def apply_rules(item: dict) -> dict:
             if _std_now and 'NACE' not in str(_std_now).upper() and not is_non_standard(_std_now):
                 item['standard'] = f'NACE MR0175, {_std_now}'
                 applied_defaults.append('NACE MR0175 certification demanded — inserted before the standard')
+
+    # --- RULE V catch-all: cited standard outside the GGPL library ---
+    # Keep the citation verbatim in the slot and flag for tech review — never
+    # substitute an ASME equivalent by guess. Engine-generated forms always
+    # match the library, so only genuine unknown citations fire this.
+    _std_final = item.get('standard')
+    if (_std_final and not is_non_standard(_std_final)
+            and not _KNOWN_STANDARD_RE.match(str(_std_final).strip().upper())):
+        _catchall_flag = f'STANDARD "{_std_final}" NOT IN GGPL LIBRARY — KEPT VERBATIM — TECH REVIEW'
+        if _catchall_flag not in flags:
+            flags.append(_catchall_flag)
 
     # --- Critical field validation — varies by type ---
     if gasket_type == 'RTJ':
