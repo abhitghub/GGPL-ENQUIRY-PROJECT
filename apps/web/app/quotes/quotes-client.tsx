@@ -479,6 +479,9 @@ const TABLE_COLUMNS: TableColumn[] = [
   { label: "Cust Sl.No", field: "customer_sl_no", width: "w-28" },
   { label: "Customer Item Code", field: "customer_item_code", width: "w-36" },
   { label: "Notes / Flags", field: "flags", kind: "readonly", width: "min-w-80" },
+  // RULE Z: customer-facing deviation register. Distinct from Notes / Flags,
+  // which is internal — the same field cannot do both jobs.
+  { label: "Deviation", field: "deviation", kind: "textarea", width: "min-w-80" },
   { label: "Qty", field: "quantity", kind: "number", width: "w-24" },
   { label: "UoM", field: "uom", kind: "select", options: UOM_OPTIONS, width: "w-28" },
   { label: "Regret", field: "regret", kind: "checkbox", width: "w-20" },
@@ -531,6 +534,7 @@ const COMPACT_TABLE_COLUMNS: TableColumn[] = [
   { label: "Customer Item Code", field: "customer_item_code", width: "w-36" },
   { label: "GGPL Description", field: "ggpl_description", kind: "readonly", width: "min-w-96" },
   { label: "Notes / Flags", field: "flags", kind: "readonly", width: "min-w-72" },
+  { label: "Deviation", field: "deviation", kind: "textarea", width: "min-w-72" },
   { label: "Qty", field: "quantity", kind: "number", width: "w-24" },
   { label: "UoM", field: "uom", width: "w-24" },
   { label: "Type", field: "gasket_type", width: "w-36" },
@@ -588,10 +592,11 @@ const STREAMLIT_TABLE_FIELDS = [
   "regret",
   "confidence",
   "flags",
+  "deviation",
 ];
 
 const COLUMN_PRESET_FIELDS: Record<string, string[]> = {
-  review: ["line_no", "status", "customer_sl_no", "customer_item_code", "ggpl_description", "flags", "quantity", "gasket_type", "size", "rating", "moc", "confidence"],
+  review: ["line_no", "status", "customer_sl_no", "customer_item_code", "ggpl_description", "flags", "deviation", "quantity", "gasket_type", "size", "rating", "moc", "confidence"],
   commercial: ["line_no", "status", "customer_sl_no", "customer_item_code", "ggpl_description", "quantity", "uom", "gasket_type", "size", "rating", "moc"],
   soft_cut: ["line_no", "status", "ggpl_description", "quantity", "gasket_type", "size", "rating", "moc", "face_type", "thickness_mm", "standard", "confidence"],
   spiral_wound: ["line_no", "status", "ggpl_description", "quantity", "size", "rating", "sw_winding_material", "sw_filler", "sw_outer_ring", "sw_inner_ring", "standard", "confidence"],

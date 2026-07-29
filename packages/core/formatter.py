@@ -16,6 +16,8 @@ Formats by type:
 """
 
 
+import re
+
 # Operator-selected sentinel for the `standard` field: the item is non-standard,
 # so no ASME/API/EN/DIN tag may be shown in the description or defaulted back in.
 NON_STANDARD = 'NON STANDARD'
@@ -32,7 +34,13 @@ def _display_standard(item: dict, default: str | None = None) -> str | None:
     raw = item.get('standard')
     if is_non_standard(raw):
         return None
-    return raw or default
+    value = raw or default
+    # RULE Z Part 5 — a quoted Mo content qualifies the slot:
+    # `ASME B16.20 ( 2 %MO TO 2.5% MOLLY CONTENT )`
+    qualifier = item.get('standard_qualifier')
+    if value and qualifier and str(qualifier) not in str(value):
+        value = f'{value} {qualifier}'
+    return value
 
 
 def describe_item(item: dict) -> str:
@@ -255,6 +263,23 @@ def _fmt_rtj(item: dict) -> str:
     return ' ,'.join(parts)
 
 
+def _kamm_drawing_ref(item: dict) -> str:
+    """RULE Y Part 8 — `( AS PER DRAWING {ref} )` when a drawing governs."""
+    special = (item.get('special') or '').upper()
+    raw = (item.get('raw_description') or item.get('description') or '').upper()
+    ref = item.get('drawing_ref') or item.get('drawing_no')
+    if not ref:
+        match = re.search(
+            r'\b(?:DRAWING|DRG|DWG)\.?\s*(?:NO\.?|#)?\s*([A-Z0-9][A-Z0-9\-/]{2,})', raw)
+        if match:
+            ref = match.group(1)
+    if ref:
+        return f'( AS PER DRAWING {ref} )'
+    if 'DRAWING' in special or re.search(r'\bDRAWING\b|\bDRG\b|\bDWG\b', raw):
+        return '( AS PER DRAWING )'
+    return ''
+
+
 def _kamm_covering_name(surface: str) -> str:
     """Normalize KAMM covering layer to a simple name for output.
     FLEXIBLE GRAPHITE → GRAPHITE; all others pass through (PTFE, MICA, etc.).
@@ -270,17 +295,19 @@ def _kamm_covering_name(surface: str) -> str:
 def _fmt_kamm(item: dict) -> str:
     """Build GGPL description for Kammprofile gaskets.
 
-    Supports three format variants (selected automatically):
-      1. New OD/ID format  — when kamm_core_thk or kamm_integral_outer_ring is set:
-            SIZE : OD {od}MM X ID {id}MM X {thk}MM THK ({core_thk}MM CORE THK)
-                   KAMMPROFILE {core} {covering} LAYER ON BOTH SIDES [+ ring_desc]
-      2. Legacy OD/ID format — when pre-formatted moc string is supplied:
-            SIZE : {id}MM ID X {od}MM OD X {thk}MM THK,{moc_str}
-      3. NPS with GROOOVED METAL — when integral_outer_ring or named outer_ring detected:
-            SIZE : {size} X {rating} X {thk}MM THK, KAMMPROFILE {core} GROOOVED METAL GASKET
-                   WITH {covering} COVERING LAYER ON BOTH SIDES, {ring_desc}, {standard}
-      4. NPS legacy — pre-formatted moc string:
-            SIZE : {size} X {rating} X {thk}MM THK,{moc_str},{standard}
+    RULE Y Part 3 — seven house output families, selected by the selection law:
+      Y1 W3 round (dominant) — OD/ID given in MM:
+            SIZE : OD {od}MM X ID {id}MM X {thk}MM THK ({core}MM CORE THK)
+                   KAMMPROFILE {mat} {layer} LAYERS ON BOTH SIDES [+ ring]
+      Y2 W1 flange, integral ring — size + class given
+      Y3 W1 flange, IR + OR named by the customer
+      Y6 MAJOR OD form — convex / crowned, drawing-based
+      Y7 Oval / racetrack — two axis dims + a seal width
+      Y5 Overall-thickness form — thickness known only as an overall figure
+      (Y4, the coded short form, is echoed by the caller rather than rebuilt.)
+
+    Selection law: size + class present -> Y2/Y3 · OD/ID in MM -> Y1 ·
+    convex/crowned -> Y6 · two axes + width -> Y7 · thickness only -> Y5.
     """
     # Prefer dedicated KAMM fields; fall back to legacy moc field
     kamm_core = (item.get('kamm_core_material') or '').strip().upper()
@@ -297,6 +324,33 @@ def _fmt_kamm(item: dict) -> str:
     inner_ring = (item.get('sw_inner_ring') or '').strip().upper() or None
 
     covering = _kamm_covering_name(surface)
+    geometry = (item.get('kamm_geometry') or '').strip().upper()
+    seal_width = item.get('kamm_seal_width_mm')
+    core_thk_str = f' ({_fmt_num(core_thk)}MM CORE THK)' if core_thk is not None else ''
+    drawing_ref = _kamm_drawing_ref(item)
+
+    # --- Y6: convex / crowned profile — MAJOR OD / MAJOR ID wording ----------
+    if geometry == 'CONVEX' and item.get('od_mm') and item.get('id_mm'):
+        parts = [
+            f'SIZE: {_fmt_num(item["od_mm"])}MM MAJOR OD X '
+            f'{_fmt_num(item["id_mm"])}MM MAJOR ID X {_fmt_num(thk)}MM THK{core_thk_str} '
+            f'KAMMPROFILE {core} GASKET WITH {covering} LAYERS ON BOTH SIDES'.replace('  ', ' ')
+        ]
+        if drawing_ref:
+            parts.append(drawing_ref)
+        if item.get('kamm_part_no'):
+            parts.append(f'PART NO.{item["kamm_part_no"]}')
+        return ' , '.join(parts)
+
+    # --- Y7: oval / racetrack — two axis dims + a seal width -----------------
+    if geometry in ('OVAL', 'OBROUND') and item.get('obround_a_mm') and item.get('obround_b_mm'):
+        width_part = f' X WIDTH {_fmt_num(seal_width)}MM' if seal_width else ''
+        out = (
+            f'SIZE : {_fmt_num(item["obround_a_mm"])}MM X {_fmt_num(item["obround_b_mm"])}MM'
+            f'{width_part} X {_fmt_num(thk)}MM THK{core_thk_str} '
+            f'KAMMPROFILE {core} {covering} LAYERS BOTH SIDES'
+        )
+        return f'{out} - {drawing_ref or "AS PER DRAWING"}'
 
     if item.get('size_type') == 'OD_ID':
         od = item.get('od_mm')
@@ -1008,6 +1062,17 @@ def _fmt_size(size: str, gtype: str) -> str:
     # Metric OD/ID strings — pass through unchanged
     if 'MM' in s.upper():
         return s
+    # RULE Z Part 9.1 — DN has no fractional sizes. `GASKET SPIRALDN1/2` is the
+    # ERP's DN prefix sitting on a 1/2" size, not DN 1/2. A fractional or
+    # decimal-inch value after DN/NB is inches; only whole metric values from
+    # the DN series are true DN.
+    m = _re.match(r'^(?:DN|NB)\s*(\d+\s*/\s*\d+|\d+\s+\d+\s*/\s*\d+)$', s, _re.IGNORECASE)
+    if m:
+        frac = _re.sub(r'\s*/\s*', '/', m.group(1))
+        return _fmt_size(f'{frac}"', gtype)
+    m = _re.match(r'^(?:DN|NB)\s*(\d+\.\d+)$', s, _re.IGNORECASE)
+    if m and float(m.group(1)) < 24:
+        return _fmt_size(f'{m.group(1)}"', gtype)
     # DN prefix: "DN 100" / "DN25" → "DN 100" / "DN 25"
     m = _re.match(r'^DN\s*(\d+(?:\.\d+)?)$', s, _re.IGNORECASE)
     if m:

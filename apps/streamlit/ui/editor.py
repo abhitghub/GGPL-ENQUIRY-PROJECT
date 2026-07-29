@@ -164,6 +164,8 @@ def _build_rows(items):
             'Status':               status_icon,
             'GGPL Description':     item.get('ggpl_description', ''),
             'Notes / Flags':        '; '.join(parts),
+            # RULE Z — customer-facing register, separate from the internal notes
+            'Deviation':            item.get('deviation') or '',
             'Qty':                  item.get('quantity') if item.get('quantity') is not None else None,
             'UoM':                  item.get('uom') or 'NOS',
             'Regret':               item.get('regret', False),
@@ -395,6 +397,8 @@ def _editor_fragment(items, display_indices):
             'AI':                   st.column_config.TextColumn('AI', width='small', disabled=True,
                                         help='Confidence: HIGH / MEDIUM / LOW'),
             'Notes / Flags':        st.column_config.TextColumn('Notes / Flags', width='large', disabled=True),
+            'Deviation':            st.column_config.TextColumn('Deviation', width='large',
+                                        help='Customer-facing deviation register (RULE Z Part 7)'),
         },
     )
 
@@ -448,6 +452,13 @@ def _editor_fragment(items, display_indices):
                 if base.get('size_type') == 'OD_ID':
                     base['size_type'] = 'UNKNOWN'
             base['rating']             = row['Rating'] or base.get('rating')
+            # RULE Z — an operator-worded Deviation outranks the generated
+            # register text and must survive the recompute below.
+            edited_deviation = str(row.get('Deviation') or '').strip()
+            if edited_deviation != str(base.get('deviation') or '').strip():
+                base['deviation'] = edited_deviation
+                base['manual_fields'] = sorted(
+                    set(base.get('manual_fields') or []) | {'deviation'})
             base['standard']           = row['Standard'] or None
             base['moc']                = row['MOC'] or None
             base['face_type']          = row['Face'] or None

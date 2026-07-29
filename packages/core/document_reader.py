@@ -124,6 +124,184 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
         return ''
 
 
+# ---------------------------------------------------------------------------
+# RULE X-2 — multi-level (spanned) headers & unit-banner inheritance
+# ---------------------------------------------------------------------------
+
+# Canonical sub-header lexicon. Values are the field name the column binds to;
+# keys are the spellings seen in the wild. Matching is fuzzy (edit distance <= 2)
+# so TRHICKNESS / LENGHT / WITDH still bind instead of silently losing a column.
+_X2_HEADER_LEXICON: dict[str, str] = {
+    'thickness': 'THICKNESS', 'thk': 'THICKNESS', 'th': 'THICKNESS',
+    'length': 'LENGTH', 'lg': 'LENGTH', 'long': 'LENGTH', 'l': 'LENGTH',
+    'width': 'WIDTH', 'wd': 'WIDTH', 'w': 'WIDTH',
+    'qty': 'QTY', 'quantity': 'QTY', 'nos': 'QTY', 'pcs': 'QTY', 'no s': 'QTY',
+    'qnty': 'QTY', 'qyt': 'QTY', 'quantiy': 'QTY',
+    'od': 'OD', 'outer dia': 'OD', 'outside dia': 'OD',
+    'diameter': 'OD', 'dia': 'OD',
+    'id': 'ID', 'inner dia': 'ID', 'inside dia': 'ID',
+    'cs': 'CS', 'height': 'HEIGHT',
+    'nb': 'NB', 'dn': 'DN', 'nps': 'NPS', 'class': 'CLASS', 'unit': 'UNIT',
+    'material': 'MATERIAL', 'material description': 'MATERIAL',
+    'moc': 'MATERIAL', 'matl': 'MATERIAL', 'spec': 'MATERIAL',
+}
+
+# Short tokens must match exactly — fuzzing "L" or "W" at distance 2 would bind
+# almost anything.
+_X2_EXACT_ONLY = {k for k in _X2_HEADER_LEXICON if len(k) <= 3}
+
+# Group labels that name a block of columns rather than a field. A banner is
+# dropped from the composed name; its unit is pushed down to the children.
+_X2_BANNER_RE = re.compile(
+    r'^(?:design\s+data|standards?|technical\s+data|data|item\s+details|'
+    r'dimensions?|dim|size|measurements?|material|certifications?|price|'
+    r'rate|amount|delivery|weight|remarks?)'
+    r'(?:\s*(?:in|:)?\s*[\(\[]?\s*[a-z%/"\']+\s*[\)\]]?)?$',
+    re.IGNORECASE,
+)
+
+_X2_UNIT_RE = re.compile(
+    r'(?:\bin\s+|[\(\[])\s*(mm|cm|mtr|metre|meter|m|inch|in|"|kg|gm|g|lbs?|'
+    r'usd|inr|rs|eur|nos|pcs|%)\s*[\)\]]?\s*$',
+    re.IGNORECASE,
+)
+
+_X2_UNIT_CANON = {
+    'mm': 'MM', 'cm': 'CM', 'm': 'MTR', 'mtr': 'MTR', 'metre': 'MTR', 'meter': 'MTR',
+    'inch': 'INCH', 'in': 'INCH', '"': 'INCH',
+    'kg': 'KG', 'gm': 'GM', 'g': 'GM', 'lb': 'LBS', 'lbs': 'LBS',
+    'usd': 'USD', 'inr': 'INR', 'rs': 'INR', 'eur': 'EUR',
+    'nos': 'NOS', 'pcs': 'NOS', '%': '%',
+}
+
+# DN/NB series (ISO 6708 / ASME equivalents). A value outside this set proves the
+# column holds raw millimetres, not a nominal bore — RULE X-2 Part 2.2 test 5.
+_X2_DN_SERIES = {
+    15, 20, 25, 32, 40, 50, 65, 80, 100, 125, 150, 200, 250, 300, 350, 400,
+    450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000, 1050, 1100,
+    1200, 1300, 1400, 1500, 1600, 1800, 2000, 2200, 2400,
+}
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """Levenshtein distance, iterative two-row form."""
+    if a == b:
+        return 0
+    if not a or not b:
+        return len(a) or len(b)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def _canonical_header(value: object) -> str | None:
+    """Map a header cell to its canonical field name, tolerating typos.
+
+    RULE X-2 Part 2.4: exact-match lookup fails on `TRHICKNESS` and silently
+    loses a dimension column. Matching is fuzzy at edit distance <= 2 for tokens
+    long enough for that to be safe.
+    """
+    text = str(value).strip().lower()
+    # Diameter glyphs survive the alphanumeric squeeze below only if mapped here.
+    if text in ('ø', '⌀', 'dia.', 'ø'):
+        return 'OD'
+    norm = re.sub(r'[^a-z0-9]+', ' ', text).strip()
+    if not norm:
+        return None
+    # Strip a trailing unit so "WIDTH (MM)" and "WIDTH" both canonicalise. The
+    # parens are already gone at this point, so match the bare token too.
+    norm = _X2_UNIT_RE.sub('', norm).strip() or norm
+    bare_unit = re.match(
+        r'^(?P<name>.+?)\s+(?:mm|cm|mtr|inch|kg|gm|lbs?|usd|inr|nos|pcs)$', norm)
+    if bare_unit:
+        norm = bare_unit.group('name').strip()
+    if norm in _X2_HEADER_LEXICON:
+        return _X2_HEADER_LEXICON[norm]
+    if len(norm) <= 3:
+        return None
+    best, best_dist = None, 3
+    for key, canon in _X2_HEADER_LEXICON.items():
+        if key in _X2_EXACT_ONLY:
+            continue
+        dist = _edit_distance(norm, key)
+        if dist < best_dist:
+            best, best_dist = canon, dist
+    return best
+
+
+def _is_group_banner(value: object) -> bool:
+    """True when a header cell names a block of columns, not a field."""
+    text = re.sub(r'\s+', ' ', str(value).strip())
+    return bool(text) and bool(_X2_BANNER_RE.match(text))
+
+
+def _banner_unit(value: object) -> str | None:
+    """Extract the unit a banner carries: `DIMENSION IN MM` -> 'MM'."""
+    match = _X2_UNIT_RE.search(re.sub(r'\s+', ' ', str(value).strip()))
+    if not match:
+        return None
+    return _X2_UNIT_CANON.get(match.group(1).lower())
+
+
+def is_raw_mm_column(header: object, values: list, siblings: list | None = None) -> bool:
+    """RULE X-2 Part 2.2 — raw millimetres vs nominal bore.
+
+    `DIMENSION IN MM` means physical measurements, NOT DN/NB designations, even
+    when a value coincides with one. Reading `100` as NB 100 turns a 100 MM wide
+    neoprene strip into a 4" flange gasket.
+
+    Any single YES means raw MM. A bore reading requires positive evidence: the
+    literal token NB / DN / NPS / A, or a class/PN rating alongside the number.
+    """
+    header_text = re.sub(r'\s+', ' ', str(header).strip()).upper()
+    siblings = [re.sub(r'\s+', ' ', str(s).strip()).upper() for s in (siblings or [])]
+
+    # Test 1 — bore label in this column's own name => NOT raw MM.
+    if re.search(r'\b(?:NB|DN|NPS)\b', header_text):
+        return False
+
+    # Test 1 (positive) — a measurement banner.
+    if re.search(r'\b(?:MM|MILLIMET(?:RE|ER)S?)\b', header_text):
+        return True
+
+    # Test 2 — geometry sub-headers. A bore designation never has a THICKNESS
+    # companion inside the same dimension group.
+    canon = _canonical_header(header)
+    if canon in ('WIDTH', 'LENGTH', 'THICKNESS', 'HEIGHT', 'CS'):
+        return True
+    sibling_fields = {_canonical_header(s) for s in siblings}
+    if canon in ('OD', 'ID') and 'THICKNESS' in sibling_fields:
+        return True
+
+    # Test 3 — three dimensions present. NB/DN is a single value.
+    if len({f for f in sibling_fields if f in
+            ('WIDTH', 'LENGTH', 'THICKNESS', 'OD', 'ID', 'HEIGHT')}) >= 3:
+        return True
+
+    # Test 4 — no class / PN / rating column anywhere, so it is not a flange item.
+    has_rating = any(
+        re.search(r'\b(?:CLASS|CL|RATING|PN|LB|#)\b', s) for s in siblings
+    )
+
+    # Test 5 — off-series test. Any value outside the DN series settles the
+    # whole column, conclusively.
+    numeric: list[float] = []
+    for val in values:
+        text = str(val).strip().replace(',', '')
+        if re.fullmatch(r'\d+(?:\.\d+)?', text):
+            numeric.append(float(text))
+    if numeric and any(
+        not float(n).is_integer() or int(n) not in _X2_DN_SERIES for n in numeric
+    ):
+        return True
+
+    return not has_rating and bool(numeric)
+
+
 def _excel_to_text(excel_bytes: bytes, max_rows: int | None = None) -> tuple[str, bool, int]:
     """Convert Excel to cleaned markdown tables for LLM input.
 
@@ -202,28 +380,47 @@ def _excel_to_text(excel_bytes: bytes, max_rows: int | None = None) -> tuple[str
         if not cells:
             return False
         joined = ' | '.join(cells)
+        # RULE X-2 Part 1.2: the sub-header lexicon includes the geometry field
+        # names (WIDTH / LENGTH / OD / ID / THK / CS / HEIGHT). Without them a
+        # "WIDTH | TRHICKNESS | LENGTH" row scored 1 and the merge never fired.
         header_terms = sum(
             1
             for term in (
                 'size', 'inch', 'class', 'rating', 'facing', 'face', 'material',
                 'standard', 'thick', 'connection', 'type', 'uom', 'qty',
+                'width', 'length', 'height', 'thk', 'dia',
             )
             if term in joined
         )
+        # Count fuzzy hits too, so TRHICKNESS / LENGHT / WITDH still bind.
+        fuzzy_terms = sum(1 for cell in cells if _canonical_header(cell))
         item_terms = sum(
             1
             for term in ('gasket', 'spiral', 'wound', 'ring type', 'asme b16', 'ansi b16')
             if term in joined
         )
-        return header_terms >= 2 and item_terms == 0
+        return max(header_terms, fuzzy_terms) >= 2 and item_terms == 0
 
     def _merge_stacked_headers(parent_row, child_row) -> list[str]:
-        generic_parent = {
-            'design data', 'standards', 'standard', 'technical data',
-            'dimension', 'dimensions', 'data', 'item details',
-        }
         merged: list[str] = []
         seen: dict[str, int] = {}
+
+        # RULE X-2 Part 2: carry the parent down across its span. After a paste the
+        # merged banner survives only in its first cell; the rest are blank
+        # remnants, and without this fill their children inherit no unit.
+        spanned: list[str] = []
+        carried = ''
+        for index in range(len(parent_row)):
+            cell = _clean(parent_row[index])
+            child = _clean(child_row[index] if index < len(child_row) else '')
+            if cell:
+                # A banner spans the columns that follow it; a plain field name
+                # (SR.NO, QTY) spans only its own column and both header rows.
+                carried = cell if _is_group_banner(cell) else ''
+                spanned.append(cell)
+            else:
+                spanned.append(carried if child else '')
+        parent_row = spanned
 
         for index, parent in enumerate(parent_row):
             parent_clean = _clean(parent)
@@ -231,12 +428,23 @@ def _excel_to_text(excel_bytes: bytes, max_rows: int | None = None) -> tuple[str
             parent_norm = _norm(parent_clean)
             child_norm = _norm(child_clean)
 
-            if child_clean and (not parent_clean or parent_norm in generic_parent or parent_norm == child_norm):
+            # RULE X-2 Part 2: compose `parent > child`, but drop a parent that is
+            # only a group label (DIMENSION IN MM, SIZE, PRICE (USD)) — its unit is
+            # re-attached to the child below rather than duplicated into the name.
+            parent_is_banner = _is_group_banner(parent_clean)
+            if child_clean and (not parent_clean or parent_is_banner or parent_norm == child_norm):
                 name = child_clean
             elif parent_clean and child_clean:
                 name = f'{parent_clean} {child_clean}'
             else:
                 name = parent_clean or child_clean or f'Column {index + 1}'
+
+            # RULE X-2 Part 2.1: a parent carrying a unit applies it to every child.
+            # `DIMENSION IN MM > WIDTH` becomes `WIDTH (MM)` so the bare integers in
+            # the data rows are no longer unitless.
+            unit = _banner_unit(parent_clean) if parent_is_banner else None
+            if unit and child_clean and not _banner_unit(child_clean):
+                name = f'{name} ({unit})'
 
             key = name.strip().lower()
             seen[key] = seen.get(key, 0) + 1
@@ -269,14 +477,39 @@ def _excel_to_text(excel_bytes: bytes, max_rows: int | None = None) -> tuple[str
             return True
         return False
 
-    def _render_table_cell(header: object, value: object) -> str:
+    def _render_table_cell(header: object, value: object, mode: str = '') -> str:
         cell = str(value).replace('|', '/')
-        header_norm = _norm(header)
-        if header_norm in {'size', 'sizes', 'size inch', 'size in inch', 'nps'}:
-            stripped = cell.strip()
+        stripped = cell.strip()
+        # RULE X-2 Part 2.2 — a bare metric number under a measurement banner is a
+        # measurement, written `{n}MM`, never `{n} NB` and never `{n}"`. Marking it
+        # here is what stops a 100 MM neoprene strip becoming a 4" flange gasket.
+        if mode == 'raw_mm':
+            if re.fullmatch(r'\d+(?:\.\d+)?', stripped):
+                return f'{stripped}MM'
+            return cell
+        if mode == 'inch':
             if re.fullmatch(r'\d+(?:\.\d+)?|\d+\s+\d+/\d+|\d+/\d+', stripped):
                 return f'{stripped}"'
         return cell
+
+    def _column_render_mode(header: object, values: list, siblings: list) -> str:
+        """Decide how a column's bare numbers should be written out."""
+        header_norm = _norm(header)
+        if header_norm in {'source sheet', 'source row', 'source index'}:
+            return ''
+        # An explicit bore label always wins — `NB 100 X PN16` carries no MM
+        # suffix and no inch mark; the two size worlds never blend.
+        if re.search(r'\b(?:nb|dn|nps)\b', header_norm):
+            return ''
+        # Only dimension columns are candidates for the MM suffix: either the
+        # header canonicalises to a geometry field, or it carries an MM banner.
+        canon = _canonical_header(header)
+        is_dimension = canon in ('WIDTH', 'LENGTH', 'THICKNESS', 'HEIGHT', 'OD', 'ID', 'CS')
+        if (is_dimension or _banner_unit(header) == 'MM') and is_raw_mm_column(header, values, siblings):
+            return 'raw_mm'
+        if header_norm in {'size', 'sizes', 'size inch', 'size in inch', 'nps'}:
+            return 'inch'
+        return ''
 
     def _sheet_score(sheet_name: str, df) -> tuple[int, int]:
         name = _norm(sheet_name)
@@ -304,7 +537,10 @@ def _excel_to_text(excel_bytes: bytes, max_rows: int | None = None) -> tuple[str
         if raw_df.empty:
             continue
 
-        df = raw_df.map(_clean)  # type: ignore[arg-type]
+        # DataFrame.map is pandas >= 2.1; requirements.txt allows >= 2.0,
+        # where the same elementwise method is named applymap.
+        _elementwise = getattr(raw_df, 'map', None) or raw_df.applymap
+        df = _elementwise(_clean)  # type: ignore[arg-type]
 
         # Remove fully-empty rows, preserving the original 0-based Excel row index.
         df = df[df.apply(lambda r: any(c for c in r), axis=1)]
@@ -339,9 +575,22 @@ def _excel_to_text(excel_bytes: bytes, max_rows: int | None = None) -> tuple[str
         if following_indices:
             candidate_idx = following_indices[0]
             candidate_values = df.loc[candidate_idx].tolist()
+
+            # RULE X-2 Part 1.3 — the reliable test: row 1 names N columns but the
+            # data rows carry M > N populated cells. Never proceed by dropping the
+            # surplus columns; a multi-level header is present.
+            named_cols = sum(1 for cell in header_values if _clean(cell))
+            data_indices = [idx for idx in following_indices if idx != candidate_idx][:10]
+            populated = [
+                sum(1 for cell in df.loc[idx].tolist() if _clean(cell))
+                for idx in data_indices
+            ]
+            count_mismatch = bool(populated) and max(populated) > named_cols
+
             has_sparse_or_generic_parent = (
                 sum(1 for cell in header_values if not _clean(cell)) >= 2
-                or any(_norm(cell) in {'design data', 'standards', 'standard', 'technical data'} for cell in header_values)
+                or any(_is_group_banner(cell) for cell in header_values)
+                or count_mismatch
             )
             if has_sparse_or_generic_parent and _looks_like_subheader(candidate_values):
                 header_values = _merge_stacked_headers(header_values, candidate_values)
@@ -395,8 +644,21 @@ def _excel_to_text(excel_bytes: bytes, max_rows: int | None = None) -> tuple[str
             '| ' + ' | '.join(headers) + ' |',
             '| ' + ' | '.join(sep) + ' |',
         ]
+        # Resolve raw-MM vs nominal-bore once per column, using the whole column's
+        # values (the off-series test needs them all) and its sibling headers.
+        modes = [
+            _column_render_mode(
+                header,
+                df[df.columns[pos]].tolist(),
+                [h for i, h in enumerate(headers) if i != pos],
+            )
+            for pos, header in enumerate(headers)
+        ]
         for _, row in df.iterrows():
-            cells = [_render_table_cell(header, value) for header, value in zip(headers, row)]
+            cells = [
+                _render_table_cell(header, value, mode)
+                for header, value, mode in zip(headers, row, modes)
+            ]
             md_rows.append('| ' + ' | '.join(cells) + ' |')
 
         parts.append(f'=== Sheet: {sheet_name} ===')

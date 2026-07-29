@@ -247,6 +247,10 @@ export const ITEM_FIELDS = [
   "kamm_rib",
   "kamm_core_thk",
   "kamm_integral_outer_ring",
+  "kamm_layer_thk",
+  "kamm_geometry",
+  "kamm_seal_width_mm",
+  "kamm_crossbar",
   "dji_filler",
   "dji_rib",
   "dji_face_type",
@@ -265,6 +269,8 @@ export const ITEM_FIELDS = [
   "ggpl_description",
   "status",
   "flags",
+  // RULE Z: customer-facing deviation register (internal notes stay in `flags`)
+  "deviation",
   "size_norm",
 ] as const;
 
