@@ -109,6 +109,7 @@ import {
   MaterialInputRow,
   MaterialPlan,
 } from "@/lib/material-planning";
+import { buildExtractionSummary, isUnclassifiedSummaryItem } from "@/lib/extraction-summary";
 import { getString, notesFor, validateItemField } from "@/components/quotes/item-validation";
 import { buildQuotePricingSummary } from "@/components/quotes/pricing-utils";
 import { evaluateQuoteQuality } from "@/components/quotes/quality-utils";
@@ -318,6 +319,61 @@ function quoteDataWithDefaults(data?: Record<string, unknown> | null): Record<st
   return next;
 }
 
+// The quotation Setup tab prints Buyer details straight into the PDF, but the
+// same details were already captured once during enquiry setup — on the chosen
+// customer master record and on its contact person. Fill only the keys that are
+// still blank so a hand-typed override always wins.
+function withInheritedBuyerDetails(
+  data: Record<string, unknown>,
+  quote?: Pick<Quote, "customer"> | null,
+  customer?: CustomerRecord | null,
+): Record<string, unknown> {
+  if (!quote && !customer) return data;
+  const next = { ...data };
+  let filled = false;
+  const inherit = (key: string, ...candidates: unknown[]) => {
+    if (getString(next[key]).trim()) return;
+    const value = candidates.map(getString).find((candidate) => candidate.trim());
+    if (!value) return;
+    next[key] = value;
+    filled = true;
+  };
+  // A contact is only unambiguous when the customer has exactly one saved
+  // person; the legacy single-contact columns stand in for older records.
+  const contacts = customer?.contacts ?? [];
+  const contact = contacts.length === 1 ? contacts[0] : undefined;
+  const contactName = contact?.name || (contacts.length === 0 ? customer?.contact_name : "");
+  const contactDesignation = contact?.designation || (contacts.length === 0 ? customer?.designation : "");
+  const contactEmail = contact?.email || (contacts.length === 0 ? customer?.email : "");
+  const contactPhone = contact?.phone || (contacts.length === 0 ? customer?.phone : "");
+  const contactMobile = contact?.mobile;
+
+  inherit("buyer_name", quote?.customer, customer?.name);
+  inherit("buyer_address_line1", customer?.address_line1);
+  inherit("buyer_address_line2", customer?.address_line2);
+  inherit("buyer_city", customer?.city);
+  inherit("buyer_state", customer?.state);
+  inherit("buyer_pin_code", customer?.pin_code);
+  inherit("buyer_country", customer?.country);
+  inherit("gst_no", customer?.gst_no);
+  inherit("attention", contactName);
+  inherit("designation", contactDesignation);
+  inherit("email", contactEmail);
+  // customer_enq_no stays manual on purpose: it is the customer's own RFQ
+  // reference, which the enquiry register keeps distinct from GGPL's Enq No.
+  inherit("contact_no", contactPhone, contactMobile);
+  inherit("mobile_no", contactMobile);
+  inherit("telephone_no", contactPhone);
+  // Enquiry intake only asks for one "Contact no" of unstated kind — put it on
+  // the mobile line alone, since filling both would repeat it in the PDF.
+  if (!getString(next.mobile_no).trim() && !getString(next.telephone_no).trim()) {
+    inherit("mobile_no", next.contact_no);
+  }
+  if (!filled) return data;
+  next.buyer_name_address = buyerNameAddressText(next);
+  return next;
+}
+
 const SALES_DETAIL_QUOTE_DATA_FIELDS = new Set([
   "buyer_name_address",
   ...BUYER_ADDRESS_FIELDS,
@@ -335,6 +391,15 @@ const SALES_DETAIL_QUOTE_DATA_FIELDS = new Set([
 function pickSalesDetailQuoteData(data: Record<string, unknown>) {
   return Object.fromEntries(
     Object.entries(data).filter(([key]) => SALES_DETAIL_QUOTE_DATA_FIELDS.has(key)),
+  );
+}
+
+// Sales details the enquiry has but the target does not. Blank keys only, so a
+// detail edited directly on the quotation is never overwritten by the enquiry.
+function inheritableSalesDetails(source: Record<string, unknown>, target: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(pickSalesDetailQuoteData(source))
+      .filter(([key, value]) => getString(value).trim() && !getString(target[key]).trim()),
   );
 }
 
@@ -1264,23 +1329,6 @@ function quoteSummary(quote: Quote): Quote {
   return { ...quote, items: [] };
 }
 
-function summaryKey(item: GasketItem): string {
-  if (item.status === "regret") return "";
-  const type = getString(item.gasket_type || "SOFT_CUT").toUpperCase();
-  if (type === "RTJ") {
-    return ["RTJ", item.rtj_groove_type, item.moc, item.rtj_hardness_bhn ? `${item.rtj_hardness_bhn} BHN HARDNESS MAX` : "", getString(item.standard).toUpperCase().includes("API 6A") ? "API-6A TYPE" : ""].filter(Boolean).join(" ,");
-  }
-  if (type === "SPIRAL_WOUND") {
-    const material = [item.sw_winding_material, item.sw_filler].filter(Boolean).join("/");
-    const rings = `${item.sw_inner_ring ? `+${item.sw_inner_ring}IR` : ""}${item.sw_outer_ring ? `&${item.sw_outer_ring}OR` : ""}`;
-    return [material + rings, item.rating].filter(Boolean).join(",");
-  }
-  if (type === "KAMM") return ["KAMMPROFILE", item.kamm_core_material ? `CORE: ${item.kamm_core_material}` : "", item.kamm_surface_material ? `SURFACE: ${item.kamm_surface_material}` : ""].filter(Boolean).join(" ,");
-  if (type === "DJI") return ["DOUBLE JACKET", item.dji_filler].filter(Boolean).join(" ,");
-  if (type === "ISK" || type === "ISK_RTJ") return ["ISK", item.isk_type, item.isk_gasket_material].filter(Boolean).join(" ,");
-  return ["SOFT CUT", item.moc, item.face_type, item.rating].filter(Boolean).join(" ,");
-}
-
 function normalizeExtractionSummaryRows(value: unknown): ExtractionSummaryRow[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -1646,7 +1694,6 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const newQuoteRequest = React.useRef<string | null>(null);
   const locallyStartedExtractionJobs = React.useRef(new Map<string, string>());
 
-  const qd = React.useMemo(() => quoteDataWithDefaults(quote?.quote_data), [quote?.quote_data]);
   const customerOptions = React.useMemo<ComboboxOption[]>(
     () => masterData.customers.filter((row) => row.active).map((row) => ({ value: row.id, label: row.name, hint: row.country || undefined })),
     [masterData.customers],
@@ -1654,6 +1701,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const selectedCustomerRecord = React.useMemo(
     () => masterData.customers.find((row) => row.id === getString(quote?.stage_meta?.customer_master_id)),
     [masterData.customers, quote?.stage_meta?.customer_master_id],
+  );
+  // Buyer details inherit from the enquiry context (customer master, its sole
+  // contact, the enquiry reference) so the quotation Setup tab and the PDF do
+  // not ask again for details sales already entered once. Blank keys only.
+  const qd = React.useMemo(
+    () => withInheritedBuyerDetails(quoteDataWithDefaults(quote?.quote_data), quote, selectedCustomerRecord),
+    [quote, selectedCustomerRecord],
   );
   // A customer counts as selected when the top-level field, the chosen master
   // record, or the buyer name resolves — records created via import/API may have
@@ -1856,14 +1910,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     : "";
   const activeCellValue = activeGridItem && activeGridColumn ? columnValue(activeGridItem, activeGridColumn) : "";
   const selectedItemBadges = selectedItem ? issueBadgesForItem(selectedItem) : [];
-  const extractionSummary = React.useMemo(() => {
-    const summary = items.reduce<Record<string, number>>((acc, item) => {
-      const key = summaryKey(item);
-      if (key) acc[key] = (acc[key] ?? 0) + 1;
-      return acc;
-    }, {});
-    return Object.entries(summary).sort((left, right) => right[1] - left[1]);
-  }, [items]);
+  const extractionSummary = React.useMemo(() => buildExtractionSummary(items), [items]);
   const legacyExtractionSummaryRows = React.useMemo(
     () => normalizeExtractionSummaryRows(quote?.stage_meta?.extraction_summary_rows),
     [quote?.stage_meta?.extraction_summary_rows],
@@ -1885,7 +1932,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     [legacyExtractionSummaryRows, quote?.stage_meta?.extraction_summary_notes],
   );
   const extractionSummaryRows = React.useMemo(
-    () => extractionSummary.map(([item, count]) => ({
+    () => extractionSummary.map(({ item, count }) => ({
       item,
       count,
       note1: getString(extractionSummaryNotes[item]?.note1),
@@ -1895,8 +1942,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   );
   const unmatchedSummaryItemRows = React.useMemo(
     () => items
-      .map((item, index) => ({ index, key: summaryKey(item), status: item.status }))
-      .filter((row) => !row.key && row.status !== "regret")
+      .map((item, index) => ({ index, unclassified: isUnclassifiedSummaryItem(item) }))
+      .filter((row) => row.unclassified)
       .map((row) => row.index + 1),
     [items],
   );
@@ -2430,6 +2477,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         const savedEnquiry = await savePatch({ items, quote_data: qd, quote_no: effectiveQuoteNo } as Partial<Quote>);
         if (savedEnquiry) await syncLinkedQuotationFromEnquiry(savedEnquiry, savedEnquiry.items);
       }
+      await backfillQuotationBuyerDetails(linkedQuoteId, quote);
       const linked = await getQuote(linkedQuoteId);
       setQuote(linked);
       rememberRecentQuote(linked);
@@ -2515,6 +2563,31 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     router.push(`/quotes?quote=${sourceEnquiryId || quote.id}`);
   }
 
+  // Buyer details filled in on the enquiry after the quotation was created only
+  // travel through the revision sync, which runs on line-item saves. Carry them
+  // over whenever the quotation is opened too, using the enquiry's live view
+  // (qd) so master-record values that are not persisted yet come along. Blank
+  // keys only, and no revision bump — this copies details, it does not revise.
+  async function backfillQuotationBuyerDetails(linkedQuoteId: string, enquiry: Quote) {
+    try {
+      const linked = await getQuote(linkedQuoteId);
+      const linkedQuoteData = { ...(linked.quote_data ?? {}) };
+      const source = enquiry.id === quote?.id ? qd : quoteDataWithDefaults(enquiry.quote_data);
+      const inherited = inheritableSalesDetails(source, linkedQuoteData);
+      const customer = linked.customer || enquiry.customer;
+      const projectRef = linked.project_ref || enquiry.project_ref;
+      const identityChanged = customer !== linked.customer || projectRef !== linked.project_ref;
+      if (!Object.keys(inherited).length && !identityChanged) return;
+      const nextQuoteData = { ...linkedQuoteData, ...inherited };
+      if (Object.keys(inherited).length) {
+        nextQuoteData.buyer_name_address = buyerNameAddressText(nextQuoteData);
+      }
+      await patchQuote(linked.id, { quote_data: nextQuoteData, customer, project_ref: projectRef } as Partial<Quote>);
+    } catch {
+      // Opening the quotation must not fail because the backfill could not run.
+    }
+  }
+
   async function syncLinkedQuotationFromEnquiry(enquiry: Quote, nextItems: GasketItem[]) {
     if (isQuotationSection) return;
     const linkedQuoteId = getString(enquiry.stage_meta?.linked_quote_id);
@@ -2523,11 +2596,19 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       const linked = await getQuote(linkedQuoteId);
       const currentQuoteData = { ...(linked.quote_data ?? {}) };
       const nextRevNo = nextRevisionNo(currentQuoteData.rev_no);
+      // Buyer/contact details captured on the enquiry after the quotation was
+      // created would otherwise never reach it — carry them across, but only
+      // into keys the quotation has left blank so Setup-tab edits survive.
+      const inheritedDetails = inheritableSalesDetails(enquiry.quote_data ?? {}, currentQuoteData);
       const nextQuoteData: Record<string, unknown> = {
         ...currentQuoteData,
+        ...inheritedDetails,
         rev_no: nextRevNo,
         rev_date: todayDisplayDate(),
       };
+      if (Object.keys(inheritedDetails).length) {
+        nextQuoteData.buyer_name_address = buyerNameAddressText(nextQuoteData);
+      }
       // If the working version has already gone to the customer, keep it
       // frozen and move the enquiry-driven changes into a new version.
       const linkedVersion = quotationVersionOf(currentQuoteData);
@@ -2557,6 +2638,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         items: cloneJson(nextItems),
         quote_data: nextQuoteData,
         quote_no: linked.quote_no || getString(linked.quote_data?.quote_no),
+        customer: linked.customer || enquiry.customer,
+        project_ref: linked.project_ref || enquiry.project_ref,
         stage_meta: nextStageMeta,
       } as Partial<Quote>);
       setQuotes((prev) => prev.map((row) => (row.id === updatedQuotation.id ? quoteSummary(updatedQuotation) : row)));
@@ -2948,7 +3031,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         {
           kind: "items",
           title: "Extraction summary regenerated",
-          detail: `${extractionSummaryRows.length} generated group(s), ${unmatchedSummaryItemRows.length} unmatched row(s)`,
+          detail: `${extractionSummaryRows.length} spec line(s), ${unmatchedSummaryItemRows.length} row(s) listed from raw wording`,
           user: currentUser.name || currentUser.id,
         },
       ),
@@ -3463,6 +3546,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       email: contact?.email ?? "",
       contact_no: contact?.phone || contact?.mobile || "",
       mobile_no: contact?.mobile ?? "",
+      // The quotation PDF prints mobile and telephone on separate lines, so the
+      // landline has to land in its own key instead of only in contact_no.
+      telephone_no: contact?.phone ?? "",
     };
   }
 
@@ -6535,8 +6621,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                         <Badge variant={extractionSummaryStale ? "warning" : "secondary"}>{extractionSummaryStale ? "Stale - regenerate" : "Current"}</Badge>
                       </div>
                       <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
-                        <span>{extractionSummaryRows.reduce((total, row) => total + row.count, 0)} matched item(s)</span>
-                        <span>{unmatchedSummaryItemRows.length} unmatched row(s)</span>
+                        <span>{extractionSummaryRows.reduce((total, row) => total + row.count, 0)} item(s) in {extractionSummaryRows.length} spec(s)</span>
+                        <span>{unmatchedSummaryItemRows.length} row(s) listed from raw wording</span>
                       </div>
                     </div>
                     {canEditLineItems && (
@@ -6550,7 +6636,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   </summary>
                   <div className="border-t px-3 py-2">
                     <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-                      <span>Grouped from processed rows. Manual notes are retained when regenerated.</span>
+                      <span>One line per spec - sizes and pressure ratings collapse onto the line. Manual notes are retained when regenerated.</span>
                       {canEditLineItems && (
                         <div className="flex flex-wrap gap-1.5">
                           <Button variant="secondary" size="sm" onClick={addBlankRow}>
