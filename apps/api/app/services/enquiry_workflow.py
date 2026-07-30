@@ -180,13 +180,33 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
     },
     # branch B: specs complete — GGPL conversion and the gasket-type check are
     # part of Estimation's spec work, so one action closes the step and hands
-    # the enquiry to the technical review team (TR is not bypassed).
+    # the enquiry to the reviewer (technical review team).
     "send_to_technical_review": {
         "from": {"spec_check"},
         "roles": {"estimation"},
         "to": "technical_review_pending",
         "with_whom": "Technical review",
         "label": "Spec complete — send for technical review",
+    },
+    # Technical review is optional: when the specs need no review pass,
+    # estimation may send the enquiry straight to the admin pricing queue.
+    "send_to_pricing_direct": {
+        "from": {"spec_check"},
+        "roles": {"estimation"},
+        "to": "sent_for_pricing",
+        "with_whom": "Admin",
+        "label": "Spec complete — send for pricing (skip technical review)",
+    },
+    # The reviewer found errors — send the enquiry back to estimation with a
+    # note describing what to fix. After the fix, estimation re-submits for
+    # review, so the loop repeats until the reviewer clears it.
+    "return_spec_errors": {
+        "from": {"technical_review_pending"},
+        "roles": {"technical"},
+        "to": "spec_check",
+        "with_whom": "Estimation",
+        "label": "Errors found — return to estimation",
+        "require_comment": "Describe the errors found so estimation knows what to fix",
     },
     # Only technical can forward an enquiry that is up for technical review —
     # done means the specs are cleared for pricing, so it goes straight to the
@@ -198,14 +218,16 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "with_whom": "Admin",
         "label": "Technical review done — submit for pricing",
     },
-    # Admin sets the pricing formula (in the enquiry notes) and hands the enquiry
-    # back to estimation to price against it — admin does not price directly.
+    # Admin sets the pricing formula (the note on this action, kept durably in
+    # stage_meta.pricing_formula) and hands the enquiry back to estimation to
+    # price against it — admin does not price directly.
     "open_pricing": {
         "from": {"sent_for_pricing"},
         "roles": {"admin", "management"},
         "to": "pricing_decision",
         "with_whom": "Estimation",
         "label": "Set pricing formula & send to estimation",
+        "require_comment": "Enter the pricing formula for estimation to price against",
     },
     # Estimation fills the pricing per the formula (and can preview the quotation),
     # then submits it for generation. Estimation does NOT generate the quotation.

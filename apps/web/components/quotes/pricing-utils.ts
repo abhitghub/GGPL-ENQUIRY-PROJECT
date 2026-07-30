@@ -13,6 +13,9 @@ export type QuotePricingLine = {
   costTotal: number;
   marginPct: number | null;
   discountImpact: number;
+  // GTQ ("Get The Quote"): price deferred, quoted as "Will quote soon". The
+  // line carries no value, so it is excluded from every money total.
+  isGtq: boolean;
 };
 
 export type QuotePricingSummary = {
@@ -30,6 +33,7 @@ export type QuotePricingSummary = {
   lowestLineMarginPct: number | null;
   approvalRequired: boolean;
   approvalReasons: string[];
+  gtqCount: number;
 };
 
 export function buildQuotePricingSummary({
@@ -38,6 +42,7 @@ export function buildQuotePricingSummary({
   costPrices,
   targetMargins,
   lineDiscountsPct = [],
+  lineGtq = [],
   discountPct,
   gstPct,
   riskCount,
@@ -49,6 +54,7 @@ export function buildQuotePricingSummary({
   costPrices: number[];
   targetMargins: number[];
   lineDiscountsPct?: number[];
+  lineGtq?: boolean[];
   discountPct: number;
   gstPct: number;
   riskCount: number;
@@ -58,11 +64,14 @@ export function buildQuotePricingSummary({
   const divisor = isForeignCurrency ? fxRate || 1 : 1;
   const lines = items.map((item, index) => {
     const quantity = item.status === "regret" ? 0 : toNumber(item.quantity, 0);
-    const sellingPrice = (unitPrices[index] ?? 0) / divisor;
-    const costPrice = costPrices[index] ?? 0;
+    const isGtq = Boolean(lineGtq[index]);
+    // A GTQ line has no price yet, so it contributes nothing to any total —
+    // its quantity still shows on the quotation next to "Will quote soon".
+    const sellingPrice = isGtq ? 0 : (unitPrices[index] ?? 0) / divisor;
+    const costPrice = isGtq ? 0 : costPrices[index] ?? 0;
     // Per-line discount % applied to the unit price. Zero (the default) keeps
     // finalUnitPrice === sellingPrice, so totals match the pre-discount behaviour.
-    const lineDiscountPct = Math.max(lineDiscountsPct[index] ?? 0, 0);
+    const lineDiscountPct = isGtq ? 0 : Math.max(lineDiscountsPct[index] ?? 0, 0);
     const finalUnitPrice = sellingPrice * (1 - lineDiscountPct / 100);
     const lineTotal = quantity * finalUnitPrice;
     const costTotal = quantity * costPrice;
@@ -79,6 +88,7 @@ export function buildQuotePricingSummary({
       costTotal,
       marginPct,
       discountImpact: quantity * sellingPrice * (lineDiscountPct / 100),
+      isGtq,
     };
   });
 
@@ -91,6 +101,7 @@ export function buildQuotePricingSummary({
   const grossMargin = taxable - costTotal;
   const grossMarginPct = taxable > 0 ? (grossMargin / taxable) * 100 : null;
   const pricedMargins = lines
+    .filter((line) => !line.isGtq)
     .map((line) => line.marginPct)
     .filter((value): value is number => value !== null && Number.isFinite(value));
   const lowestLineMarginPct = pricedMargins.length ? Math.min(...pricedMargins) : null;
@@ -113,5 +124,6 @@ export function buildQuotePricingSummary({
     lowestLineMarginPct,
     approvalRequired: approvalReasons.length > 0,
     approvalReasons,
+    gtqCount: lines.filter((line) => line.isGtq).length,
   };
 }

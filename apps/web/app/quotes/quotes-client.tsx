@@ -479,6 +479,9 @@ const TABLE_COLUMNS: TableColumn[] = [
   { label: "Cust Sl.No", field: "customer_sl_no", width: "w-28" },
   { label: "Customer Item Code", field: "customer_item_code", width: "w-36" },
   { label: "Notes / Flags", field: "flags", kind: "readonly", width: "min-w-80" },
+  // RULE Z: customer-facing deviation register. Distinct from Notes / Flags,
+  // which is internal — the same field cannot do both jobs.
+  { label: "Deviation", field: "deviation", kind: "textarea", width: "min-w-80" },
   { label: "Qty", field: "quantity", kind: "number", width: "w-24" },
   { label: "UoM", field: "uom", kind: "select", options: UOM_OPTIONS, width: "w-28" },
   { label: "Regret", field: "regret", kind: "checkbox", width: "w-20" },
@@ -531,6 +534,7 @@ const COMPACT_TABLE_COLUMNS: TableColumn[] = [
   { label: "Customer Item Code", field: "customer_item_code", width: "w-36" },
   { label: "GGPL Description", field: "ggpl_description", kind: "readonly", width: "min-w-96" },
   { label: "Notes / Flags", field: "flags", kind: "readonly", width: "min-w-72" },
+  { label: "Deviation", field: "deviation", kind: "textarea", width: "min-w-72" },
   { label: "Qty", field: "quantity", kind: "number", width: "w-24" },
   { label: "UoM", field: "uom", width: "w-24" },
   { label: "Type", field: "gasket_type", width: "w-36" },
@@ -588,10 +592,11 @@ const STREAMLIT_TABLE_FIELDS = [
   "regret",
   "confidence",
   "flags",
+  "deviation",
 ];
 
 const COLUMN_PRESET_FIELDS: Record<string, string[]> = {
-  review: ["line_no", "status", "customer_sl_no", "customer_item_code", "ggpl_description", "flags", "quantity", "gasket_type", "size", "rating", "moc", "confidence"],
+  review: ["line_no", "status", "customer_sl_no", "customer_item_code", "ggpl_description", "flags", "deviation", "quantity", "gasket_type", "size", "rating", "moc", "confidence"],
   commercial: ["line_no", "status", "customer_sl_no", "customer_item_code", "ggpl_description", "quantity", "uom", "gasket_type", "size", "rating", "moc"],
   soft_cut: ["line_no", "status", "ggpl_description", "quantity", "gasket_type", "size", "rating", "moc", "face_type", "thickness_mm", "standard", "confidence"],
   spiral_wound: ["line_no", "status", "ggpl_description", "quantity", "size", "rating", "sw_winding_material", "sw_filler", "sw_outer_ring", "sw_inner_ring", "standard", "confidence"],
@@ -1599,6 +1604,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const currentWorkflowMainline = useGranularWorkflow ? granularMainlineStep(currentWorkflowStep) : currentWorkflowStep;
   const currentWorkflowStepIndex = workflowSteps.findIndex((step) => step.id === currentWorkflowMainline);
   const workflowSubstate = useGranularWorkflow ? GRANULAR_WORKFLOW_SUBSTATES[currentWorkflowStep] : undefined;
+  // An enquiry sent back by the reviewer sits at spec_check again — flag it so
+  // estimation sees the error note, not a neutral "last note" line.
+  const lastWorkflowAction = React.useMemo(() => {
+    const history = granularWorkflowMeta.history_log;
+    const entries = Array.isArray(history) ? history : [];
+    const last = entries[entries.length - 1] as { action?: unknown } | undefined;
+    return getString(last?.action);
+  }, [granularWorkflowMeta.history_log]);
+  const returnedWithErrors =
+    currentWorkflowStep === "spec_check" &&
+    lastWorkflowAction === "return_spec_errors" &&
+    Boolean(getString(quote?.stage_meta?.workflow_comment));
   const availableWorkflowActions = workflowActions.filter(
     (item) =>
       (item.from as readonly string[]).includes(currentWorkflowStep) &&
@@ -2109,6 +2126,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       }
       return;
     }
+    // Once the URL drops ?new=1 (create finished or user navigated away), arm the
+    // guard again so the next header "+ New enquiry" click starts a fresh workspace.
+    newQuoteRequest.current = null;
     if (initialRouteLoaded.current) return;
     initialRouteLoaded.current = true;
     refreshQuotes(params.get("quote") ?? undefined).catch((error) => toast.error(error.message));
@@ -2734,6 +2754,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         ...row,
         line_no: items.length + index + 1,
         raw_description: getString(row.raw_description),
+        ggpl_description: getString(row.ggpl_description).trim() || getString(row.raw_description).trim().toUpperCase(),
         quantity: toNumber(row.quantity, 1) || 1,
         uom: getString(row.uom || "NOS") || "NOS",
         status: "check",
@@ -3228,6 +3249,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       ...qd,
       unit_prices: cloneJson(snapQd.unit_prices ?? []),
       cost_prices: cloneJson(snapQd.cost_prices ?? []),
+      // Restored alongside the prices they belong to — keeping the current
+      // values would apply this version's discounts/GTQ flags to another
+      // version's price list.
+      line_discounts_pct: cloneJson(snapQd.line_discounts_pct ?? []),
+      line_gtq: cloneJson(snapQd.line_gtq ?? []),
     };
     invalidateMaterialPlan();
     setQuote((current) => (current ? { ...current, items: cloneJson(snapshot.items ?? []), quote_data: nextQuoteData } : current));
@@ -3695,6 +3721,17 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       toast.error("Add a one-line note on what is missing before sending back to sales.");
       return;
     }
+    // The reviewer must say WHAT is wrong when returning an enquiry, and admin
+    // must give the pricing formula when handing to estimation (mirrors the
+    // backend require_comment gate).
+    if (action === "return_spec_errors" && !comment) {
+      toast.error("Describe the errors found before returning to estimation.");
+      return;
+    }
+    if (action === "open_pricing" && !comment) {
+      toast.error("Enter the pricing formula (in the comment box) before sending to estimation.");
+      return;
+    }
     try {
       const updated = await advanceEnquiryWorkflow(quote.id, action, comment);
       setQuote(updated);
@@ -3735,6 +3772,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const costPrices = React.useMemo(() => Array.isArray(qd.cost_prices) ? qd.cost_prices.map((value) => toNumber(value)) : [], [qd.cost_prices]);
   const targetMargins = React.useMemo(() => Array.isArray(qd.target_margins_pct) ? qd.target_margins_pct.map((value) => toNumber(value, 0)) : [], [qd.target_margins_pct]);
   const lineDiscounts = React.useMemo(() => Array.isArray(qd.line_discounts_pct) ? qd.line_discounts_pct.map((value) => toNumber(value, 0)) : [], [qd.line_discounts_pct]);
+  // GTQ ("Get The Quote") lines: price deferred — quoted as "Will quote soon".
+  const lineGtq = React.useMemo(() => (Array.isArray(qd.line_gtq) ? qd.line_gtq.map(Boolean) : []), [qd.line_gtq]);
   const currency = getString(qd.currency) || "INR";
   const fxRate = toNumber(qd.fx_rate, defaultFx[currency] ?? 1);
   const discountPct = toNumber(qd.discount_pct);
@@ -3747,13 +3786,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       costPrices,
       targetMargins,
       lineDiscountsPct: lineDiscounts,
+      lineGtq,
       discountPct,
       gstPct,
       riskCount: qualityReport.risks.filter((risk) => risk.severity === "high").length,
       fxRate,
       isForeignCurrency: currency !== "INR",
     }),
-    [costPrices, currency, discountPct, fxRate, gstPct, items, lineDiscounts, qualityReport.risks, targetMargins, unitPrices],
+    [costPrices, currency, discountPct, fxRate, gstPct, items, lineDiscounts, lineGtq, qualityReport.risks, targetMargins, unitPrices],
   );
   const subtotal = pricingSummary.subtotal;
   const discount = pricingSummary.discount;
@@ -5057,10 +5097,24 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               <span className="font-medium">Missing / needs clarification: </span>
               <span>{getString(quote.stage_meta?.workflow_comment)}</span>
             </div>
+          ) : returnedWithErrors ? (
+            <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-950/30 dark:text-amber-200">
+              <span className="font-medium">Returned by review — fix and send back: </span>
+              <span>{getString(quote.stage_meta?.workflow_comment)}</span>
+            </div>
           ) : getString(quote.stage_meta?.workflow_comment) ? (
             <div className="mt-2 rounded-md border bg-muted/30 px-2.5 py-1.5 text-xs">
               <span className="text-muted-foreground">Last note: </span>
               <span>{getString(quote.stage_meta?.workflow_comment)}</span>
+            </div>
+          ) : null}
+          {/* The pricing formula travels with the enquiry as a durable note —
+              unlike workflow_comment it survives later handoffs, so estimation
+              can always read it while pricing. */}
+          {getString(quote.stage_meta?.pricing_formula) ? (
+            <div className="mt-2 rounded-md border border-primary/40 bg-primary/5 px-2.5 py-1.5 text-xs">
+              <span className="font-medium">Pricing formula{getString(quote.stage_meta?.pricing_formula_by) ? ` (${getString(quote.stage_meta?.pricing_formula_by)})` : ""}: </span>
+              <span>{getString(quote.stage_meta?.pricing_formula)}</span>
             </div>
           ) : null}
           {availableWorkflowActions.length > 0 ? (
@@ -7372,15 +7426,19 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
 
                 <TabsContent value="items" className="space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/30 px-3 py-2 text-sm">
-                    <div className="text-muted-foreground">{items.length} quotation row(s) — Excel-style pricing sheet.</div>
+                    <div className="text-muted-foreground">
+                      {items.length} quotation row(s) — Excel-style pricing sheet.
+                      {pricingSummary.gtqCount ? ` ${pricingSummary.gtqCount} marked GTQ (will quote soon).` : ""}
+                    </div>
                     <div className="text-xs text-muted-foreground">
-                      Click a cell and type · drag the corner handle to fill · paste from Excel · Ctrl+D fills down
+                      Click a cell and type · drag the corner handle to fill · paste from Excel · Ctrl+D fills down · tick GTQ when the price is not known yet
                     </div>
                   </div>
                   <PricingGrid
                     items={items}
                     unitPrices={unitPrices}
                     lineDiscounts={lineDiscounts}
+                    lineGtq={lineGtq}
                     canEdit={canEditQuotation}
                     onApply={(next) => updateQdMany(next)}
                   />

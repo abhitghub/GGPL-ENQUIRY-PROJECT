@@ -216,6 +216,8 @@ def build_enquiry_detail_xlsx(quote: QuoteRead, linked: QuoteRead | None = None)
     items_sheet.write(0, price_col, "Unit Price", header_fmt)
     items_sheet.write(0, price_col + 1, "Line Total", header_fmt)
     source_items = (linked.items if linked and linked.items else quote.items) or []
+    gtq_raw = value_qd.get("line_gtq")
+    line_gtq = gtq_raw if isinstance(gtq_raw, list) else []
     for row_index, item in enumerate(source_items, start=1):
         for col, (_, key, _width) in enumerate(_ITEM_COLUMNS):
             items_sheet.write(row_index, col, item.get(key) if item.get(key) is not None else "", cell_fmt)
@@ -224,6 +226,12 @@ def build_enquiry_detail_xlsx(quote: QuoteRead, linked: QuoteRead | None = None)
             quantity = float(item.get("quantity") or 0)
         except (TypeError, ValueError):
             unit_price, quantity = 0.0, 0.0
+        # GTQ lines carry no price yet — say so instead of writing a zero.
+        index = row_index - 1
+        if index < len(line_gtq) and bool(line_gtq[index]):
+            items_sheet.write(row_index, price_col, "Will quote soon", cell_fmt)
+            items_sheet.write(row_index, price_col + 1, "", cell_fmt)
+            continue
         items_sheet.write(row_index, price_col, unit_price, money_fmt)
         items_sheet.write(row_index, price_col + 1, round(unit_price * quantity, 2), money_fmt)
     items_sheet.freeze_panes(1, 0)

@@ -42,6 +42,12 @@ class GasketItem(BaseModel):
     kamm_rib: Optional[str] = None
     kamm_core_thk: Optional[float] = None
     kamm_integral_outer_ring: Optional[str] = None
+    # RULE Y: covering-layer thickness per side (TOTAL = CORE + 2 x LAYER)
+    kamm_layer_thk: Optional[float] = None
+    # RULE Y Part 7 geometry variants: ROUND / OVAL / CONVEX / OBROUND
+    kamm_geometry: Optional[str] = None
+    kamm_seal_width_mm: Optional[float] = None
+    kamm_crossbar: Optional[str] = None
     # DJI
     dji_filler: Optional[str] = None
     dji_rib: Optional[str] = None

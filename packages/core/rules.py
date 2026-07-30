@@ -274,7 +274,20 @@ _SW_FILLER_ALIASES = {
     'MICA': 'MICA', 'FLEXIBLE MICA': 'MICA', 'PHLOGOPITE MICA': 'MICA',
     'VERM': 'VERMICULITE', 'VERMICULITE': 'VERMICULITE',
     'GF': 'GLASS FIBER', 'GLASS FIBER': 'GLASS FIBER', 'GLASS FIBRE': 'GLASS FIBER', 'FIBERGLASS': 'GLASS FIBER',
+    # RULE Z Part 4 — filler fidelity: a stated filler is copied exactly.
+    'GRAPHITE TAPE': 'GRAPHITE TAPE',
+    'STANDARD PURITY GRAPHITE': 'STANDARD PURITY GRAPHITE',
+    'EXFOLIATED EXPANDED GRAPHITE FILLER': 'EXFOLIATED EXPANDED GRAPHITE',
+    'NON-ASBESTOS': 'CNAF', 'NON ASBESTOS FIBRE': 'CNAF',
     'NONE': None,
+}
+
+# RULE Z Part 9.5 — transcription damage seen in the source set.
+_SW_TRANSCRIPTION_FIXES = {
+    'TITATNIUM': 'TITANIUM',
+    'TITANIUM GRADE 2': 'TITANIUM GR.2',
+    'GROOOVED': 'GROOVED',
+    'LOSSE': 'LOOSE',
 }
 
 
@@ -438,8 +451,18 @@ _B1647_FLAG = (
 )
 
 
-def _set_b1647_standard(item: dict, flags: list, applied_defaults: list) -> None:
-    """Normalize B16.47 standard and flag if series A/B not specified."""
+def _set_b1647_standard(
+    item: dict,
+    flags: list,
+    applied_defaults: list,
+    default_series: str = 'B',
+) -> None:
+    """Normalize B16.47 standard and apply the house Series default.
+
+    The default is family-specific: RULE Z Part 5 defaults SPW to SERIES A,
+    RULE Y Part 8 defaults KAMM to SERIES B. Either way, a defaulted series is
+    a GGPL choice and produces a customer-facing register line.
+    """
     std = (item.get('standard') or '').upper()
     # Also check the dedicated series field set by regex_extractor
     series_field = (item.get('series') or '').upper()
@@ -451,12 +474,110 @@ def _set_b1647_standard(item: dict, flags: list, applied_defaults: list) -> None
         item['standard'] = 'ASME B16.47 (SERIES-B)'
         item['series'] = 'B'
         return
-    # GGPL default when series unstated: quote Series B (MSS SP-44 lineage,
-    # the common Indian-market case) and flag for confirmation.
-    item['standard'] = 'ASME B16.47 (SERIES-B)'
-    item['series'] = 'B'
+    series = 'A' if str(default_series).upper() == 'A' else 'B'
+    item['standard'] = f'ASME B16.47 (SERIES-{series})'
+    item['series'] = series
+    applied_defaults.append(f'B16.47 series defaulted to SERIES-{series} (house practice)')
+    # The _B1647_FLAG below already stops the row; the register line is the
+    # customer-facing half and must not double-flag.
+    _add_item_deviation(item, flags, f'WE ARE PROCEEDING AS "SERIES-{series}"', blocking=False)
     if _B1647_FLAG not in flags:
         flags.append(_B1647_FLAG)  # Contains "missing critical" → triggers STATUS_MISSING
+
+
+# RULE Z Part 7 — verbatim house register phrases.
+DEV_SPW_STD_THK = 'WE ARE PROCEEDING STANDARD THICKNESS AS "4.5MM"'
+DEV_QTY_MISSING = 'KINDLY PROVIDE QUANTITY'
+
+
+def _reject_non_gasket_thickness(item: dict, flags: list, raw_desc_upper: str) -> None:
+    """RULE Z Part 4 — a figure next to a ring, or a compressed/seated service
+    dimension, is not the gasket thickness. Move it to the notes and let the
+    4.5MM default stand.
+    """
+    thk = item.get('thickness_mm')
+    if not thk:
+        return
+    try:
+        thk_val = float(thk)
+    except (TypeError, ValueError):
+        return
+
+    # RULE Z Part 4 / 9.5 — `635` is 6.35MM with the decimal lost in
+    # transcription. No spiral wound gasket is 635MM thick.
+    if thk_val >= 100:
+        recovered = thk_val / 100 if thk_val < 1000 else None
+        if recovered and 1 <= recovered <= 12:
+            item['thickness_mm'] = round(recovered, 2)
+            flags.append(
+                f'THICKNESS {thk_val:g} READ AS {recovered:g}MM — DECIMAL LOST IN TRANSCRIPTION')
+            thk_val = recovered
+        else:
+            item['thickness_mm'] = None
+            flags.append(f'THICKNESS {thk_val:g}MM IS NOT CREDIBLE FOR A SPIRAL WOUND GASKET — VERIFY')
+            return
+
+    num = re.escape(f'{thk_val:g}')
+
+    # "3.2 compressed", "seated thickness 3.2" — a service dimension.
+    service_re = (
+        r'(?:COMPRESS(?:ED)?|SEATED|IN\s+SERVICE|WORKING)\s*(?:THK|THICKNESS)?\s*[:=]?\s*'
+        + num
+        + r'|' + num + r'\s*(?:MM)?\s*(?:COMPRESS(?:ED)?|SEATED)'
+    )
+    if re.search(service_re, raw_desc_upper):
+        item['thickness_mm'] = None
+        flags.append(
+            f'{thk_val:g}MM IS A COMPRESSED/SEATED SERVICE DIMENSION — '
+            f'GASKET QUOTED AT STANDARD THICKNESS')
+        return
+
+    # A ring thickness quoted beside the gasket (3.2 / 0.125" are the common
+    # centering-ring gauges). Only reject when the figure is explicitly tied to
+    # a ring; a bare 3.2MM gasket is legitimate.
+    ring_re = (
+        r'(?:CENTERING|CENTRING|OUTER|INNER)\s+RING\s+(?:THK|THICKNESS)\s*[:=]?\s*' + num
+        + r'|' + num + r'\s*MM\s+(?:THK\s+)?(?:CENTERING|CENTRING|OUTER|INNER)\s+RING'
+    )
+    if re.search(ring_re, raw_desc_upper):
+        item['thickness_mm'] = None
+        flags.append(f'{thk_val:g}MM IS THE RING THICKNESS — GASKET QUOTED AT STANDARD THICKNESS')
+
+
+def _split_element_vs_overall_dims(item: dict, flags: list, raw_desc_upper: str) -> None:
+    """RULE Z Part 6 — customers supply four diameters; GGPL quotes the sealing
+    element.
+
+        OROD 576  = outer ring OD      -> notes
+        GOD  404  = gasket/winding OD  -> od_mm   (quoted)
+        GID  330  = gasket/winding ID  -> id_mm   (quoted)
+        IRID 310  = inner ring ID      -> notes
+    """
+    labelled = dict(re.findall(
+        r'\b(OROD|GOD|GID|IRID)\s*[:=]?\s*(\d+(?:\.\d+)?)', raw_desc_upper))
+    if not labelled:
+        return
+
+    if 'GOD' in labelled:
+        item['od_mm'] = float(labelled['GOD'])
+    if 'GID' in labelled:
+        item['id_mm'] = float(labelled['GID'])
+    if 'GOD' in labelled or 'GID' in labelled:
+        item['size_type'] = 'OD_ID'
+        # These are element dims by construction — the Rule J-2 confirmation
+        # does not apply.
+        item['dims_are_element'] = True
+
+    ring_dims = [f'{k} {labelled[k]}' for k in ('OROD', 'IRID') if k in labelled]
+    if ring_dims:
+        flags.append(f'OVERALL RING DIMS (NOT QUOTED): {" / ".join(ring_dims)}')
+
+    ring_thk = re.search(
+        r'(?:CENTERING|CENTRING|OUTER|INNER)\s+RING\s+THICKNESS\s*[:=]?\s*(\d+(?:\.\d+)?)',
+        raw_desc_upper,
+    )
+    if ring_thk:
+        flags.append(f'RING THICKNESS: {ring_thk.group(1)}MM (NOT THE GASKET THICKNESS)')
 
 
 def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
@@ -467,6 +588,9 @@ def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
     outer_ring = _norm_ring(item.get('sw_outer_ring'))
     inner_ring = _norm_ring(item.get('sw_inner_ring'))
     raw_desc_upper = (item.get('raw_description') or item.get('description') or '').upper()
+
+    # RULE Z Part 6 — resolve the four-diameter form before anything reads OD/ID.
+    _split_element_vs_overall_dims(item, flags, raw_desc_upper)
 
     # If GPT-4o set moc directly but didn't fill the dedicated ring fields,
     # try to recover inner/outer ring from the moc string before we rebuild it.
@@ -600,14 +724,30 @@ def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
         flags.append('Missing critical field: winding material (spiral wound)')
         item['escalation'] = ESC_DATASHEET
 
-    # Default thickness to 4.5mm
+    # --- RULE Z Part 4 — thickness, and the figures that are NOT the thickness -
+    # 4.5MM in 20,828 of 21,814 rows. A ring thickness or a compressed/seated
+    # service dimension standing next to the gasket must never become the
+    # quoted thickness.
+    _reject_non_gasket_thickness(item, flags, raw_desc_upper)
+
     if not item.get('thickness_mm'):
         item['thickness_mm'] = 4.5
         applied_defaults.append('thickness defaulted to 4.5mm (spiral wound)')
+        _add_item_deviation(item, flags, DEV_SPW_STD_THK, blocking=False)
 
     # Echo LOW STRESS construction note when the enquiry states it
-    if not item.get('special') and re.search(r'LOW\s+STRESS', raw_desc_upper):
+    if not item.get('special') and re.search(r'LOW\s+STRESS|LOW\s+SEATING\s+STRESS', raw_desc_upper):
         item['special'] = 'LOW STRESS'
+        item['special_low_stress'] = True
+
+    # RULE Z Part 5 — a quoted molybdenum content qualifies the standard slot.
+    mo_match = re.search(
+        r'(\d+(?:\.\d+)?)\s*%?\s*MO\w*\s*(?:TO|-|–)\s*(\d+(?:\.\d+)?)\s*%\s*MOLL?Y?',
+        raw_desc_upper,
+    )
+    if mo_match:
+        item['standard_qualifier'] = (
+            f'( {mo_match.group(1)} %MO TO {mo_match.group(2)}% MOLLY CONTENT )')
 
     # No face type for spiral wound
     item['face_type'] = None
@@ -617,6 +757,24 @@ def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
     # so the correct gasket standard (B16.20) is applied below.
     if (item.get('standard') or '').upper() in ('ASME B16.5', 'B16.5'):
         item['standard'] = None
+
+    # RULE Z Part 9.3/9.4 + Part 5 — standards that cannot appear on an SPW line.
+    # B16.21 is the sheet-gasket standard (67 such rows in the source set) and
+    # API 6A/6B is the RTJ standard; Series belongs to B16.47, never B16.20.
+    std_now = (item.get('standard') or '').upper().replace(' ', '')
+    if not is_non_standard(item.get('standard')):
+        if re.search(r'B16\.?21', std_now):
+            item['standard'] = 'ASME B16.20'
+            applied_defaults.append('B16.21 is a sheet-gasket standard — corrected to ASME B16.20 (SPW)')
+        elif re.search(r'API6[AB]', std_now):
+            item['standard'] = None
+            applied_defaults.append('API 6A/6B is an RTJ standard — cleared on a spiral wound line')
+        elif re.search(r'B16\.?20\(SERIES-?([AB])\)', std_now):
+            series = re.search(r'B16\.?20\(SERIES-?([AB])\)', std_now).group(1)
+            item['standard'] = f'ASME B16.47 (SERIES-{series})'
+            item['series'] = series
+            applied_defaults.append(
+                f'Series belongs to B16.47, not B16.20 — corrected to ASME B16.47 (SERIES-{series})')
 
     # Standard: EN 1514-2 for PN-rated; B16.47 always enforced for ≥26" NPS (even if
     # customer stated B16.20 — GGPL convention overrides customer spec for large bore).
@@ -628,7 +786,8 @@ def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
             item['standard'] = 'EN 1514-2'
             applied_defaults.append('standard defaulted to EN 1514-2 (SPW on PN-rated flanges)')
     elif size_val is not None and size_val >= 26:
-        _set_b1647_standard(item, flags, applied_defaults)
+        # RULE Z Part 5 — SPW house default is SERIES A (KAMM defaults to B).
+        _set_b1647_standard(item, flags, applied_defaults, default_series='A')
     elif item.get('size_type') == 'OD_ID' and not item.get('rating'):
         # RULE V OD×ID law (W3 world): a dims-only SPW has no size+class to key
         # a dimensional table — no standard is defaulted (KAMM/DJI already
@@ -666,7 +825,11 @@ def _apply_sw_rules(item: dict, flags: list, applied_defaults: list) -> None:
                 r'|OVER\s+(?:THE\s+)?(?:CENTERING|CENTRING|OUTER|INNER)\s+RING',
                 raw_desc_upper,
             ))
-            if not has_drawing and not text_disambiguates and FLAG_SW_ELEMENT_VS_OVERALL not in flags:
+            # Labelled GOD/GID dims are element dims by construction (Rule Z
+            # Part 6) — there is nothing left to confirm.
+            if (not has_drawing and not text_disambiguates
+                    and not item.get('dims_are_element')
+                    and FLAG_SW_ELEMENT_VS_OVERALL not in flags):
                 flags.append(FLAG_SW_ELEMENT_VS_OVERALL)
 
 
@@ -1072,6 +1235,37 @@ def _recover_kamm_fields_from_description(item: dict) -> None:
     cover_thk_match = re.search(r'\bWITH\s+(?P<cover>\d+(?:[.,]\d+)?)\s*MM\s+(?:GRAPHITE|PTFE|MICA)\b', upper)
     cover_thk = _kamm_number(cover_thk_match.group('cover')) if cover_thk_match else None
 
+    # RULE Y Part 2 — "(3.2 CORE + 0.5 FACING) THK": core and layer stated
+    # together in brackets. TOTAL = CORE + 2 x FACING.
+    cf_match = re.search(
+        r'\(\s*(?P<core>\d+(?:[.,]\d+)?)\s*(?:MM\s*)?CORE\s*\+\s*'
+        r'(?P<facing>\d+(?:[.,]\d+)?)\s*(?:MM\s*)?(?:FACING|LAYER|COVERING)\s*\)',
+        upper,
+    )
+    if cf_match:
+        core_thk = _kamm_number(cf_match.group('core'))
+        cover_thk = _kamm_number(cf_match.group('facing'))
+        total_thk = None  # recomputed from the pair by the thickness engine
+
+    # "{n}T" = total thickness in MM (e.g. "4.5T SOFT IRON GASKET").
+    if total_thk is None:
+        t_match = re.search(r'\b(?P<t>\d+(?:[.,]\d+)?)\s*T\b(?!\w)', upper)
+        if t_match and not re.search(r'\bTHK\b|\bTHICK', upper[:t_match.start()]):
+            total_thk = _kamm_number(t_match.group('t'))
+
+    # "0.5 mm Graphite/PTFE covering layers" — layer stated without the CORE pair.
+    if cover_thk is None:
+        layer_match = re.search(
+            r'\b(?P<cover>\d+(?:[.,]\d+)?)\s*MM\s+(?:[A-Z/ ]{0,20}?)'
+            r'(?:GRAPHITE|PTFE|EPTFE|MICA)[A-Z/ ]{0,20}?\s*(?:COVERING\s+)?LAYERS?\b',
+            upper,
+        )
+        if layer_match:
+            cover_thk = _kamm_number(layer_match.group('cover'))
+
+    if cover_thk is not None:
+        item['kamm_layer_thk'] = cover_thk
+
     if total_thk is None and core_thk is not None and cover_thk is not None:
         total_thk = core_thk + (2 * cover_thk)
     if total_thk is not None:
@@ -1107,6 +1301,159 @@ def _recover_kamm_fields_from_description(item: dict) -> None:
     if item.get('kamm_rib'):
         _append_kamm_special(item, f'B={item["kamm_rib"]}')
 
+    # --- RULE Y Part 2 — three bare numbers = OD / ID / SEAL WIDTH -----------
+    # "1216 1184 16 SS 347 KAMM PROFILE". (OD-ID)/2 must confirm the width,
+    # otherwise the third number is something else and is left alone.
+    if not item.get('od_mm') and not item.get('id_mm'):
+        triple = re.match(
+            r'^\s*(?P<a>\d{2,5}(?:\.\d+)?)\s+(?P<b>\d{2,5}(?:\.\d+)?)\s+(?P<c>\d{1,3}(?:\.\d+)?)\b',
+            upper,
+        )
+        if triple:
+            a, b, c = (_kamm_number(triple.group(g)) for g in ('a', 'b', 'c'))
+            if a and b and c and a > b and abs(((a - b) / 2) - c) < 0.51:
+                item['od_mm'], item['id_mm'] = a, b
+                item['kamm_seal_width_mm'] = c
+                item['size_type'] = 'OD_ID'
+
+    # --- RULE Y Part 7 — geometry variants ----------------------------------
+    if re.search(r'\bCONVEX\b|\bCROWNED\b', upper):
+        item['kamm_geometry'] = 'CONVEX'
+    elif re.search(r'\bOBROUND\b|\bRACETRACK\b|\bMANWAY\b', upper):
+        item['kamm_geometry'] = 'OBROUND'
+    elif re.search(r'\bOVAL\b', upper):
+        item['kamm_geometry'] = 'OVAL'
+
+    if not item.get('kamm_rib') and re.search(r'\bW/\s*RIB\b|\bWITH\s+RIB\b', upper):
+        item['kamm_rib'] = 'WITH RIB'
+
+    crossbar = re.search(
+        r'\b(?P<n>\d+)?\s*CROSS\s*BARS?\b(?:[^.]{0,20}?(?P<t>\d+(?:\.\d+)?)\s*MM\s*THK)?'
+        r'|\bPASS\s+PARTITIONS?\b',
+        upper,
+    )
+    if crossbar and not item.get('kamm_crossbar'):
+        count = crossbar.groupdict().get('n')
+        thk = crossbar.groupdict().get('t')
+        parts = [p for p in (
+            f'{count} CROSSBAR' if count else 'CROSSBAR',
+            f'{thk}MM THK' if thk else '',
+        ) if p]
+        item['kamm_crossbar'] = ' '.join(parts)
+
+
+# --- RULE Y Part 4 — the thickness engine (total <-> core) -------------------
+#
+# A kammprofile is core + one covering layer per side: TOTAL = CORE + 2 x LAYER.
+# The GGPL string must always carry ({core}MM CORE THK).
+
+# GGPL builds kammprofile cores from its own stock thicknesses. A customer core
+# GGPL does not stock is supplied as the nearest stock core and the total is
+# recomputed — house practice, not an error (Rule Y Part 4.1).
+_KAMM_CORE_STOCK = (2.0, 3.0, 3.2, 3.3, 3.5, 4.0, 5.0)
+_KAMM_STD_FACING = 0.5   # MM per side
+
+# Rule Y Part 4.1 lists 3.5 as an observed stock core *and* states that a
+# customer-stated `(3.5 CORE + 0.5 FACING)` is supplied as GGPL's 3.2MM core
+# for a 4.2MM total. Both hold, because they are different pathways: a 3.5 core
+# is what GGPL derives from a 4.5MM total (Part 4.2, 10 rows), but a core the
+# customer states alongside a facing is built to this map. Keep them separate.
+_KAMM_STATED_CORE_SUBSTITUTION = {3.5: 3.2}
+
+DEV_KAMM_THK = (
+    'WE ARE PROCEEDING WITH GASKET THICKNESS AS {total}MM '
+    '(CORE THICKNESS AS {core}MM) AS PER MANUFACTURING PRACTICE'
+)
+# Three cores appear against a 4.5MM total in house data — 3.5 (0.5 facing),
+# 3.3 (0.6) and 3.0 (0.75). Apply 3.5 and say so (Rule Y Part 4.2).
+FLAG_KAMM_LAYER_AMBIGUOUS = (
+    'LAYER THK NOT STATED — 0.5MM/SIDE APPLIED (CORE {core}MM). CONFIRM IF 0.6 OR 0.75MM.'
+)
+FLAG_KAMM_THIN_CORE = 'CONFIRM GROOVE DEPTH / SPACE LIMIT'
+
+
+def _fmt_mm(value: float) -> str:
+    """Trim trailing zeros: 4.0 -> '4', 4.20 -> '4.2'."""
+    return f'{float(value):g}'
+
+
+def _nearest_kamm_core(core: float) -> float:
+    """Nearest GGPL stock core; ties resolve downward (the buildable side)."""
+    return min(_KAMM_CORE_STOCK, key=lambda stock: (abs(stock - core), stock))
+
+
+def _apply_kamm_thickness_engine(item: dict, flags: list, applied_defaults: list) -> None:
+    """Resolve total <-> core, substitute non-stock cores, and emit the register
+    line for every value GGPL chose rather than the customer.
+    """
+    total = _kamm_number(item.get('thickness_mm'))
+    core = _kamm_number(item.get('kamm_core_thk'))
+    facing = _kamm_number(item.get('kamm_layer_thk')) or _KAMM_STD_FACING
+
+    if core is None and total is None:
+        return
+
+    # A core can never equal or exceed the total — a kammprofile always carries a
+    # covering layer per side. Such a pair is a mis-parse, so the core is dropped
+    # and re-derived from the total below.
+    if core is not None and total is not None and core >= total - 0.01:
+        core = None
+
+    substituted = False
+    if core is not None:
+        # Core stated — honour it only if GGPL stocks it, and apply the confirmed
+        # stated-core substitutions first.
+        for stated, built in _KAMM_STATED_CORE_SUBSTITUTION.items():
+            if abs(core - stated) < 0.01:
+                core = built
+                substituted = True
+                applied_defaults.append(
+                    f'stated {stated:g}MM core supplied as GGPL {built:g}MM stock core')
+                break
+        stock_core = _nearest_kamm_core(core)
+        if abs(stock_core - core) > 0.01:
+            applied_defaults.append(
+                f'core {_fmt_mm(core)}MM is not GGPL stock — supplied as '
+                f'{_fmt_mm(stock_core)}MM stock core (manufacturing practice)'
+            )
+            core = stock_core
+            substituted = True
+        # Total is always recomputed from the core actually being built.
+        recomputed = round(core + 2 * facing, 3)
+        if total is None or substituted or abs(recomputed - total) > 0.01:
+            if total is not None and abs(recomputed - total) > 0.01 and not substituted:
+                # Customer's own core + total disagree; trust the pair as stated.
+                recomputed = total
+            total = recomputed
+    else:
+        # Total only — back-derive the core (0.5MM layer per side, GGPL standard).
+        core = round(total - 2 * _KAMM_STD_FACING, 3)
+        if abs(total - 4.5) < 0.01:
+            # The 4.5MM ambiguity: 3.5 core is the house pick, but say so.
+            core = 3.5
+            _add_item_deviation(item, flags, FLAG_KAMM_LAYER_AMBIGUOUS.format(core=_fmt_mm(core)))
+        stock_core = _nearest_kamm_core(core)
+        if abs(stock_core - core) > 0.01:
+            core = stock_core
+            total = round(core + 2 * _KAMM_STD_FACING, 3)
+            substituted = True
+        applied_defaults.append(
+            f'core thickness derived as {_fmt_mm(core)}MM from {_fmt_mm(total)}MM total '
+            f'({_fmt_mm(_KAMM_STD_FACING)}MM layer per side)'
+        )
+
+    item['thickness_mm'] = total
+    item['kamm_core_thk'] = core
+
+    if substituted:
+        # Accepted house practice — told to the customer, but not a review stop.
+        _add_item_deviation(item, flags, DEV_KAMM_THK.format(
+            total=_fmt_mm(total), core=_fmt_mm(core)), blocking=False)
+
+    # Thin-core caution: manufacturable but weak (Rule Y Part 4.2).
+    if core < 3.0:
+        _add_item_deviation(item, flags, f'{_fmt_mm(core)}MM CORE — {FLAG_KAMM_THIN_CORE}')
+
 
 def _apply_kamm_rules(item: dict, flags: list, applied_defaults: list) -> None:
     _recover_kamm_fields_from_description(item)
@@ -1136,9 +1483,51 @@ def _apply_kamm_rules(item: dict, flags: list, applied_defaults: list) -> None:
     elif not item.get('moc'):
         flags.append('KAMM: winding material not identified — verify SS316/SS304/etc.')
 
-    if not item.get('thickness_mm'):
+    if not item.get('thickness_mm') and not item.get('kamm_core_thk'):
         item['thickness_mm'] = 4.5
         applied_defaults.append('thickness defaulted to 4.5mm (KAMM)')
+
+    # RULE Y Part 4 — resolve total <-> core and substitute non-stock cores.
+    # Every KAMM line must carry ({core}MM CORE THK); this is what fills it.
+    _apply_kamm_thickness_engine(item, flags, applied_defaults)
+
+    # RULE Y Part 6 — ring logic. On a W1 flange item (size + class) with the
+    # customer silent on rings, GGPL's default construction is an integral outer
+    # ring. W3 equipment gaskets sitting in a groove get no ring unless stated.
+    is_w1 = item.get('size_type') != 'OD_ID' and bool(item.get('rating'))
+    if is_w1 and not inner_ring and not outer_ring and not item.get('kamm_integral_outer_ring'):
+        raw_desc_upper = (item.get('raw_description') or item.get('description') or '').upper()
+        excludes_ring = bool(re.search(
+            r'W/?O\.?\s+(?:OUTER|OR|CENTERING|RING)|WITHOUT\s+(?:OUTER|OR|CENTERING|RING)'
+            r'|NO\s+(?:OUTER|CENTERING)\s+RING',
+            raw_desc_upper,
+        ))
+        if not excludes_ring:
+            item['kamm_integral_outer_ring'] = 'INTEGRAL'
+            applied_defaults.append('integral outer ring applied (GGPL default for flange KAMM)')
+
+    # RULE Y Part 7 — never invent a crown, rib or crossbar count; these come
+    # from the drawing or a confirmation.
+    raw_upper = (item.get('raw_description') or item.get('description') or '').upper()
+    has_drawing = bool(re.search(r'\bDRAWING\b|\bDRG\b|\bDWG\b|\bSK-\w+', raw_upper))
+    geometry = item.get('kamm_geometry')
+    if geometry == 'CONVEX':
+        _add_item_deviation(
+            item, flags,
+            'CONVEX / CROWNED PROFILE — CONFIRM CROWN GEOMETRY AGAINST DRAWING; TOOLING CHECK')
+    if geometry in ('OVAL', 'OBROUND') and not has_drawing and not item.get('kamm_seal_width_mm'):
+        item['escalation'] = ESC_DRAWING_DIMS
+    if item.get('kamm_crossbar') and not has_drawing:
+        # Crossbar layout is drawing-governed — echo the spec, do not invent it.
+        item['escalation'] = ESC_DRAWING
+    # A rib the customer stated is simply carried. It is the *absence* of a rib
+    # statement on an exchanger item that needs confirming (Rule Y Part 7).
+    is_exchanger = bool(re.search(
+        r'\bEXCHANGER\b|\bCH\.?\s*CVR\b|\bCHANNEL\s+COVER\b|\bTUBE\s*SHEET\b|\bSHELL\b',
+        raw_upper,
+    ))
+    if is_exchanger and not item.get('kamm_rib') and not has_drawing:
+        _add_item_deviation(item, flags, 'KINDLY CONFIRM RIB DETAILS', blocking=False)
 
     # No standard for custom OD/ID KAMM; only for NPS-rated KAMM
     if item.get('size_type') != 'OD_ID' and not item.get('standard'):
@@ -1148,7 +1537,8 @@ def _apply_kamm_rules(item: dict, flags: list, applied_defaults: list) -> None:
             item['standard'] = 'EN 1514-6'
             applied_defaults.append('standard defaulted to EN 1514-6 (KAMM on PN-rated flanges)')
         elif size_val is not None and size_val >= 26:
-            _set_b1647_standard(item, flags, applied_defaults)
+            # RULE Y Part 8 — house practice for KAMM is SERIES B (SPW defaults A).
+            _set_b1647_standard(item, flags, applied_defaults, default_series='B')
         else:
             item['standard'] = 'ASME B16.20'
             applied_defaults.append('standard defaulted to ASME B16.20')
@@ -1757,11 +2147,61 @@ def _apply_class_gap_rules(item: dict, flags: list, applied_defaults: list) -> N
         flags.append('Class 2500 does not exist at NPS ≥14 (ASME B16.5) — confirm flange spec')
 
 
-def _add_item_deviation(item: dict, flags: list, note: str) -> None:
+def _add_item_deviation(item: dict, flags: list, note: str, blocking: bool = True) -> None:
+    """Record a customer-facing deviation line.
+
+    `blocking` also raises a flag, which moves the row to `check` for operator
+    review. Accepted house practice (a stock-core substitution, a defaulted
+    series) is still told to the customer but does not stop the row — Rule Y
+    Part 4.1 is explicit that a stock substitution is practice, not an error.
+    """
     notes = item.setdefault('deviation_notes', [])
     if note not in notes:
         notes.append(note)
-        flags.append(f'DEVIATION: {note}')
+        if blocking:
+            flags.append(f'DEVIATION: {note}')
+
+
+def _emit_material_register_lines(item: dict, flags: list, applied_defaults: list) -> None:
+    """RULE Z Part 7 — the verbatim house register.
+
+    Turn the material/filler defaults GGPL applied into the customer-facing
+    phrases the deviation register actually uses. The single most common line
+    in the source set (467 occurrences) is the winding+IR / outer-ring pair.
+    """
+    if item.get('gasket_type') not in ('SPIRAL_WOUND', 'KAMM'):
+        return
+    defaults = ' '.join(applied_defaults or []).lower()
+    if not defaults:
+        return
+
+    winding = item.get('sw_winding_material')
+    inner = item.get('sw_inner_ring')
+    outer = item.get('sw_outer_ring')
+
+    ir_defaulted = 'inner ring defaulted' in defaults or 'inner ring added' in defaults
+    or_defaulted = 'outer ring defaulted' in defaults
+
+    if ir_defaulted and or_defaulted and winding and outer:
+        _add_item_deviation(
+            item, flags,
+            f'We are proceeding Winding & Inner ring material as "{winding}" '
+            f'and Outer ring material as "{outer}"',
+            blocking=False)
+    elif ir_defaulted and inner:
+        _add_item_deviation(
+            item, flags,
+            f'WE ARE PROCEEDING INNER RING MATERIAL AS "{inner}"',
+            blocking=False)
+    elif or_defaulted and outer:
+        _add_item_deviation(
+            item, flags, f'WE ARE PROCEEDING OUTER RING AS "{outer}"', blocking=False)
+
+    if 'filler defaulted' in defaults and item.get('sw_filler'):
+        _add_item_deviation(
+            item, flags,
+            f'We are proceeding Filler material as "{item["sw_filler"].title()}"',
+            blocking=False)
 
 
 def apply_rules(item: dict) -> dict:
@@ -2114,6 +2554,9 @@ def apply_rules(item: dict) -> dict:
         flags.extend([f'Missing critical field: {f}' for f in missing_critical])
 
     if not item.get('quantity'):
+        # RULE Z Part 8 — a missing quantity does not stop the quote. The line is
+        # quoted and the customer is asked for the number (136 rows in the set).
+        _add_item_deviation(item, flags, DEV_QTY_MISSING, blocking=False)
         flags.append('Quantity not provided')
 
     # --- Assign status ---
@@ -2134,9 +2577,19 @@ def apply_rules(item: dict) -> dict:
     else:
         item['status'] = STATUS_READY
 
-    # Per-line deviation channel (brand translations, standard overrides, ...)
-    if item.get('deviation_notes'):
-        item['deviation'] = ' | '.join(item['deviation_notes'])
+    # RULE Z Part 7 — every default the code applied produces one register line.
+    # Materials, filler, thickness, series, rating: if GGPL chose it, the
+    # customer is told. This is the customer-facing half of applied_defaults.
+    _emit_material_register_lines(item, flags, applied_defaults)
+
+    # Per-line deviation channel (brand translations, standard overrides,
+    # material/thickness register lines). An operator who edited the Deviation
+    # cell in the portal owns it — a recompute must not overwrite their wording.
+    if 'deviation' not in set(item.get('manual_fields') or []):
+        if item.get('deviation_notes'):
+            item['deviation'] = ' | '.join(item['deviation_notes'])
+        else:
+            item['deviation'] = ''
 
     item['flags'] = flags
     return item

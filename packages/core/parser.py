@@ -455,7 +455,18 @@ def _infer_gasket_type(description: str) -> str | None:
         return 'RTJ'
     if re.search(r'\bR\s*-\s*\d{1,3}\b', raw) and re.search(r'\bGASKET\b|\bGSKT\b|\bRNG\b', raw):
         return 'RTJ'
-    if re.search(r'\bKAMMPROFILE\b|\bKAMPROFILE\b|\bKAMM\s*PROFILE\b|\bCAMPROFILE\b|\bCAM\s*PROFILE\b|\bPROFILE\s+GASKET\b|\bGROOVED\s+PROFILE\b|\bGROOVED\s+METAL\b|SKAG|\bKMP\b|\bSERRATED\b', raw):
+    # RULE Y Part 1 — KAMM detection (ISK and RTJ excepted, KAMM wins over SPW).
+    # `PROFILE GASKET` is ALWAYS KAMM, even with an FKM/rubber facing.
+    # `MET GRVD` / `GRVD` in a short text = grooved metal = KAMM.
+    if re.search(
+        r'\bKAMMPROFILE\b|\bKAMPROFILE\b|\bKAMM\s*PROFILE\b|\bCAMPROFILE\b|\bCAM\s*PROFILE\b'
+        r'|\bPROFILE\s+GASKET\b|\bGROOVED\s+PROFILE\b|\bGROOVED\s+METAL\b|SKAG|\bKMP\b'
+        r'|\bSERRATED\s+METAL\b|\bSERRATED\b|\bKAMM\b|\bCAMP\b'
+        r'|\bMET\s*GRVD\b|\bGRVD\b|\bMETAL\s+GROOVED\b'
+        # Brand styles that denote a grooved-metal construction
+        r'|\bFLEXPRO\b|\bKAMMPRO\b|\bMAXIPROFILE\b|\bLEADER[-\s]?KAM\b|\bMETAKAMM\b',
+        raw,
+    ):
         return 'KAMM'
     if re.search(r'\bDOUBLE[\s\-]?JACKET(?:ED)?\b|\bJACKETED\b|\bJACKET\s+GASKET\b|\bCOPPER\s+JACKET\b', raw):
         return 'DJI'
@@ -799,6 +810,19 @@ def _extract_spw_components(description: str) -> dict:
             result['sw_winding_material'] = winding
             break
 
+    # RULE Z Part 1 / worked example C — ERP style codes carry the grade inline:
+    # "TYPE SPV2F316L/GRAPH" is an SS316L winding with a graphite filler. The
+    # grade is glued to the code, so no material-token regex above reaches it.
+    if not winding:
+        erp = re.search(
+            r'\b(?:TYPE\s*)?(?:SPV\d*[A-Z]*|CGI|CG|RWI|RW|WRI|WR|913M?)\s*'
+            r'(3\d{2}L?H?)\b',
+            text, re.IGNORECASE,
+        )
+        if erp:
+            winding = f'SS{erp.group(1).upper()}'
+            result['sw_winding_material'] = winding
+
     if inner:
         result['sw_inner_ring'] = inner
     if outer:
@@ -1039,8 +1063,9 @@ def _extract_kamm_components(description: str) -> dict:
     core_thk = re.search(r'\bCORE\s+THK\s*[:=]?\s*(\d+(?:\.\d+)?)\s*MM\b|\((\d+(?:\.\d+)?)\s*MM\s+CORE\s+THK\)', text, re.IGNORECASE)
     if core_thk:
         result['kamm_core_thk'] = float(core_thk.group(1) or core_thk.group(2))
-    elif result.get('size_type') == 'OD_ID' and result.get('kamm_core_material'):
-        result['kamm_core_thk'] = 4.0
+    # A core thickness is never guessed here. RULE Y Part 4 derives it from the
+    # total (core = total - 2 x layer) and checks it against GGPL stock; the old
+    # flat 4.0MM fallback fabricated a core unrelated to the stated total.
 
     if re.search(r'\bINTEGRAL\s+(?:OUTER\s+)?RING\b', text, re.IGNORECASE):
         result['kamm_integral_outer_ring'] = True

@@ -4,7 +4,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
-from core.formatter import format_description
+from core.formatter import describe_item
 from core.rules import apply_rules
 
 from app.db import repo
@@ -543,7 +543,7 @@ def bulk_recompute(
     recomputed: list[dict] = []
     for row in source_rows:
         item = apply_rules(dict(row))
-        item["ggpl_description"] = format_description(item)
+        item["ggpl_description"] = describe_item(item)
         recomputed.append(item)
 
     if payload.rows is None:
@@ -813,7 +813,18 @@ def advance_workflow(
             )
         stage_meta["pricing_route"] = "international" if market == "export" else "domestic"
     comment = (payload.comment or "").strip()
+    # Some handoffs are meaningless without a note (the pricing formula, the
+    # reviewer's error list) — block them instead of moving silently.
+    if transition.get("require_comment") and not comment:
+        raise HTTPException(status_code=422, detail=str(transition["require_comment"]))
     stage_meta["workflow_comment"] = comment
+    # The open-pricing note IS the pricing formula. workflow_comment is
+    # overwritten by every later transition, so keep a durable copy that
+    # estimation can read for the whole life of the enquiry.
+    if payload.action == "open_pricing":
+        stage_meta["pricing_formula"] = comment
+        stage_meta["pricing_formula_by"] = user.name or user.user_id
+        stage_meta["pricing_formula_at"] = now_iso()
     detail = f"{transition['label']} — {comment}" if comment else transition["label"]
     stage_meta = append_activity(
         stage_meta,
