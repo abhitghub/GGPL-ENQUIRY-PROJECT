@@ -44,7 +44,8 @@ def test_oring_rules_recover_id_cross_section_material_and_pressure():
         assert item["pressure_rating"] == "250 BAR"
         assert item["size"] is None
         assert item["rating"] is None
-        assert item["standard"] is None
+        # RULE V Part 2 — an O-ring is sized by ID x CS; no standard governs it
+        assert item["standard"] == "NON STANDARD"
         assert item["ggpl_description"] == expected_description
 
 

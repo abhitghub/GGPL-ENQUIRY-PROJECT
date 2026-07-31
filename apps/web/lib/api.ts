@@ -886,6 +886,129 @@ export async function putAccessSettingsRemote(payload: AccessSettings): Promise<
   );
 }
 
+// --- Learned descriptions (Rule L: the portal learns from the team's fixes) ---
+
+export type LearnedStatus = "pending" | "approved" | "rejected";
+
+export type LearnedDescription = {
+  id: string;
+  org_id: string;
+  fingerprint: string;
+  /** The customer wording this entry answers. */
+  source_text: string;
+  ggpl_description: string;
+  /** Classified construction the entry also restores (gasket_type, moc, ...). */
+  fields: Record<string, unknown>;
+  /** Empty means the entry answers this wording for every customer. */
+  customer: string;
+  status: LearnedStatus;
+  source: "edit" | "manual" | "import";
+  note: string;
+  created_by: string;
+  approved_by: string;
+  hit_count: number;
+  last_applied_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TeachDescriptionInput = {
+  source_text?: string;
+  ggpl_description?: string;
+  fields?: Record<string, unknown>;
+  customer?: string;
+  note?: string;
+  /** Teach straight off a quote row instead of passing the text by hand. */
+  quote_id?: string;
+  item_index?: number;
+  /** Save into permanent memory; downgraded to pending without the capability. */
+  approve?: boolean;
+};
+
+export type LearningSettings = {
+  auto_capture: boolean;
+  apply_pending: boolean;
+  suggest_similar: boolean;
+};
+
+export async function listLearnedDescriptions(params?: { q?: string; status?: LearnedStatus }): Promise<LearnedDescription[]> {
+  const query = new URLSearchParams();
+  if (params?.q) query.set("q", params.q);
+  if (params?.status) query.set("status", params.status);
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return parse<LearnedDescription[]>(
+    await apiFetch(`${API_BASE}/api/v1/learned-descriptions${suffix}`, { headers: headers() }),
+  );
+}
+
+export async function teachLearnedDescription(payload: TeachDescriptionInput): Promise<LearnedDescription> {
+  return parse<LearnedDescription>(
+    await apiFetch(`${API_BASE}/api/v1/learned-descriptions`, {
+      method: "POST",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export async function patchLearnedDescription(
+  id: string,
+  payload: Partial<Pick<LearnedDescription, "ggpl_description" | "fields" | "customer" | "note" | "status">>,
+): Promise<LearnedDescription> {
+  return parse<LearnedDescription>(
+    await apiFetch(`${API_BASE}/api/v1/learned-descriptions/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export async function setLearnedDescriptionVerdict(id: string, verdict: "approve" | "reject"): Promise<LearnedDescription> {
+  return parse<LearnedDescription>(
+    await apiFetch(`${API_BASE}/api/v1/learned-descriptions/${encodeURIComponent(id)}/${verdict}`, {
+      method: "POST",
+      headers: headers(),
+    }),
+  );
+}
+
+export async function deleteLearnedDescription(id: string): Promise<void> {
+  await parse<{ message: string }>(
+    await apiFetch(`${API_BASE}/api/v1/learned-descriptions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: headers(),
+    }),
+  );
+}
+
+export async function lookupLearnedDescription(
+  sourceText: string,
+  customer = "",
+): Promise<{ matched: boolean; kind: string; entry: LearnedDescription | null }> {
+  return parse<{ matched: boolean; kind: string; entry: LearnedDescription | null }>(
+    await apiFetch(`${API_BASE}/api/v1/learned-descriptions/lookup`, {
+      method: "POST",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ source_text: sourceText, customer }),
+    }),
+  );
+}
+
+export async function getLearningSettings(): Promise<LearningSettings> {
+  return parse<LearningSettings>(await apiFetch(`${API_BASE}/api/v1/learning-settings`, { headers: headers() }));
+}
+
+export async function putLearningSettings(payload: Partial<LearningSettings>): Promise<LearningSettings> {
+  return parse<LearningSettings>(
+    await apiFetch(`${API_BASE}/api/v1/learning-settings`, {
+      method: "PUT",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
 export async function getBusinessMasterData(): Promise<BusinessMasterData> {
   return parse<BusinessMasterData>(await apiFetch(`${API_BASE}/api/v1/customers`, { headers: headers() }));
 }

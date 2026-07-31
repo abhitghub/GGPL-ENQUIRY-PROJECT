@@ -437,6 +437,67 @@ def test_retired_step_ids_keep_flowing(granular):
     assert _stage(_act(client, org, "estimation", qid, "send_to_technical_review")) == "technical_review_pending"
 
 
+# Estimation, Jagadeeshan (management) and admin are the three parties that
+# correct enquiry specs. Seeded ids: estimation / jagadeeshan / shashnam.
+_SPEC_EDITORS = ["estimation", "jagadeeshan", "shashnam"]
+
+
+@pytest.mark.parametrize("editor", _SPEC_EDITORS)
+def test_spec_editors_can_fix_columns_at_any_stage(granular, editor):
+    """A wrong column is estimation's (or management's, or admin's) to fix
+    whenever it is spotted — including while the enquiry sits on another team's
+    stage. Editing the line items must not require owning the current step, and
+    the corrected columns must show up in the recomputed GGPL description."""
+    client = TestClient(app)
+    org = f"org-gw-edit-{editor}-{uuid.uuid4().hex}"
+    qid = _create_enquiry(client, org)
+
+    # A row the engine cannot describe yet: it escalates to "provide datasheet".
+    seeded = client.patch(
+        f"/api/v1/quotes/{qid}",
+        headers=_headers(org, "estimation"),
+        json={"items": [{"line_no": 1, "quantity": 2, "uom": "NOS", "is_gasket": True,
+                         "raw_description": "SPIRAL WOUND GASKET ASME B16.20"}]},
+    )
+    assert seeded.status_code == 200, seeded.text
+    first = client.post(
+        f"/api/v1/quotes/{qid}/items/bulk-recompute",
+        headers=_headers(org, "estimation"),
+        json={"rows": seeded.json()["items"]},
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()[0]["escalation"]  # nothing to describe yet
+
+    # Park it on technical review — a stage none of the three editors owns.
+    _act(client, org, "estimation", qid, "begin_spec_check")
+    assert _stage(_act(client, org, "estimation", qid, "send_to_technical_review")) == "technical_review_pending"
+
+    # The editor can still open the record and correct its columns.
+    row = {**first.json()[0], "size": '2"', "rating": "300#", "moc": "SS316",
+           "sw_winding_material": "SS316", "sw_filler": "GRAPHITE", "sw_outer_ring": "CS",
+           "manual_fields": ["size", "rating", "moc", "sw_winding_material", "sw_filler", "sw_outer_ring"]}
+    patched = client.patch(f"/api/v1/quotes/{qid}", headers=_headers(org, editor), json={"items": [row]})
+    assert patched.status_code == 200, f"{editor} could not edit the columns: {patched.text}"
+
+    # ...and the correction reaches the GGPL description instead of being masked
+    # by the escalation phrase the row was carrying.
+    recomputed = client.post(
+        f"/api/v1/quotes/{qid}/items/bulk-recompute",
+        headers=_headers(org, editor),
+        json={"rows": patched.json()["items"]},
+    )
+    assert recomputed.status_code == 200, recomputed.text
+    described = recomputed.json()[0]
+    assert not described.get("escalation")
+    assert "SS316" in described["ggpl_description"] and "300#" in described["ggpl_description"]
+
+    # Editing specs is not a workflow handoff: the enquiry has not moved, and
+    # the editor still cannot advance it out of technical review's turn.
+    assert _stage(patched) == "technical_review_pending"
+    if editor == "estimation":
+        _act_blocked(client, org, editor, qid, "return_tr_spec")
+
+
 def test_granular_is_superset_of_legacy(granular):
     """With the flag on, legacy actions/stages/ownership remain valid alongside
     the granular ones, so the existing (unmodified) screens and any in-flight

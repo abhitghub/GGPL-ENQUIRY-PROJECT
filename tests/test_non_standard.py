@@ -28,7 +28,9 @@ def test_soft_cut_od_id_non_standard_drops_asme_tag():
         "moc": "SOFT IRON",
         "raw_description": "GSKT,PLUG,35ODX30IDX2MM,SOFT IRON",
     }
-    assert _process(base)["ggpl_description"].endswith("ASME B16.21")
+    # Dims-only: RULE V Part 5.0 already suppresses the tag without an operator
+    # having to mark the row (see test_rule_v_j2).
+    assert "ASME" not in _process(base)["ggpl_description"]
     item = _process({**base, "standard": "Non standard"})
     assert item["standard"] == "NON STANDARD"
     assert item["ggpl_description"] == "SIZE : OD 35MM X ID 30MM X 3MM THK, SOFT IRON"

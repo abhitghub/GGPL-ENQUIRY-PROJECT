@@ -97,8 +97,11 @@ SOURCE_IMPORT = 'import'
 # `#` `%` and `+` are kept: they carry meaning in sizes, ratings and grades
 # (1-1/2", 150#, 2.5MM, SS316L+GRAPHITE, 2%MO).
 _SEPARATORS = re.compile(r'[^A-Z0-9./\-#%+]+')
-_TRAILING_ZERO_DECIMAL = re.compile(r'\b(\d+)\.(\d*?)0+\b')
-_BARE_DECIMAL_POINT = re.compile(r'\b(\d+)\.(?=\D|$)')
+# `4.50MM` -> `4.5MM`, `150.00 NB` -> `150 NB`. The leading guard keeps standard
+# citations intact: the `16` of `B16.20` is preceded by a letter, so B16.20 never
+# collapses to B16.2.
+_TRAILING_ZERO_DECIMAL = re.compile(r'(?<![A-Z0-9.])(\d+)\.(\d*?)0+(?!\d)')
+_BARE_DECIMAL_POINT = re.compile(r'(?<![A-Z0-9.])(\d+)\.(?!\d)')
 _UNICODE_FOLD = {
     '‘': "'", '’': "'", '“': '"', '”': '"',
     '–': '-', '—': '-', '−': '-',

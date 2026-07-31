@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   ArrowRight,
   Ban,
+  BrainCircuit,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -95,6 +96,7 @@ import {
   resolveOutlookMessage,
   reviewLoopThread,
   rfiDraft,
+  teachLearnedDescription,
   toNumber,
   workflowNoteRequirement,
 } from "@/lib/api";
@@ -1477,6 +1479,102 @@ function Field({
   );
 }
 
+type LearnedFrom = { status?: string; scope?: string; match?: string; taught_by?: string };
+type LearnedSuggestion = { ggpl_description?: string; source_text?: string; scope?: string };
+
+/**
+ * Where this row's GGPL description came from, and how to teach the portal.
+ *
+ * Three states: the description was answered from memory (say so, and by whom);
+ * the wording only resembles something corrected before (offer the suggestion,
+ * never apply it silently); or the portal has nothing on this wording (offer to
+ * save what the operator wrote).
+ */
+function PortalMemoryNote({
+  item,
+  customer,
+  canEdit,
+  busy,
+  onTeach,
+  onApplySuggestion,
+}: {
+  item: GasketItem;
+  customer: string;
+  canEdit: boolean;
+  busy: boolean;
+  onTeach: (scope: "all" | "customer") => void;
+  onApplySuggestion: () => void;
+}) {
+  const learnedFrom = (item.learned_from ?? null) as LearnedFrom | null;
+  const suggestion = (item.learned_suggestion ?? null) as LearnedSuggestion | null;
+  const hasWording = Boolean(getString(item.raw_description).trim());
+  const hasDescription = Boolean(getString(item.ggpl_description).trim());
+
+  return (
+    <div className="space-y-2 rounded-md border bg-muted/20 p-3">
+      {learnedFrom ? (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <Badge variant={learnedFrom.status === "approved" ? "secondary" : "warning"}>
+            {learnedFrom.status === "approved" ? "From portal memory" : "From portal memory · awaiting approval"}
+          </Badge>
+          <span className="text-muted-foreground">
+            {learnedFrom.scope && learnedFrom.scope !== "all" ? `${learnedFrom.scope} · ` : ""}
+            {learnedFrom.taught_by ? `taught by ${learnedFrom.taught_by}` : "taught by the team"}
+          </span>
+        </div>
+      ) : (
+        <div className="text-xs text-muted-foreground">
+          The portal has nothing saved for this wording — it was described by the rules engine.
+        </div>
+      )}
+
+      {suggestion ? (
+        <div className="space-y-1.5 rounded-md border bg-background p-2">
+          <div className="text-xs font-medium">Similar wording was corrected before</div>
+          <div className="break-words text-xs text-muted-foreground">{suggestion.source_text}</div>
+          <div className="break-words text-xs font-medium">{suggestion.ggpl_description}</div>
+          <Button size="sm" variant="outline" onClick={onApplySuggestion} disabled={!canEdit}>
+            Use this description
+          </Button>
+        </div>
+      ) : null}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => onTeach("all")}
+          disabled={!canEdit || busy || !hasWording || !hasDescription}
+          title={
+            !hasWording
+              ? "This row has no customer wording to match on"
+              : !hasDescription
+                ? "Fill in the GGPL description first"
+                : "Answer this customer wording this way on every future enquiry"
+          }
+        >
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />}
+          Teach the portal — all customers
+        </Button>
+        {customer ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => onTeach("customer")}
+            disabled={!canEdit || busy || !hasWording || !hasDescription}
+            title={`Answer this wording this way for ${customer} only`}
+          >
+            {customer} only
+          </Button>
+        ) : null}
+      </div>
+      <div className="text-xs text-muted-foreground">
+        Saves it permanently, so this wording never has to be corrected again.
+      </div>
+    </div>
+  );
+}
+
 function CompactMetric({
   icon,
   label,
@@ -1605,6 +1703,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [draftScrollTop, setDraftScrollTop] = React.useState(0);
   const [undoItems, setUndoItems] = React.useState<{ label: string; items: GasketItem[]; local?: boolean } | null>(null);
   const [hasUnsavedLocalEdits, setHasUnsavedLocalEdits] = React.useState(false);
+  // Row index currently being saved into the portal's description memory.
+  const [teachingRow, setTeachingRow] = React.useState<number | null>(null);
   const [autoUpdateRows, setAutoUpdateRows] = React.useState<Set<number>>(new Set());
   const [activeCell, setActiveCell] = React.useState<GridCell | null>(null);
   const [editingCell, setEditingCell] = React.useState<GridCell | null>(null);
@@ -3013,6 +3113,54 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     }
   }
 
+  /**
+   * Save this row's GGPL description into the portal's memory, so the same
+   * customer wording is answered this way on every future enquiry.
+   *
+   * Corrections are already captured automatically when a quote is saved; this
+   * is the deliberate version, for a gasket the engine has no format for — there,
+   * waiting for someone to notice a pending capture is the wrong flow. Unsaved
+   * edits are pushed first: the server teaches from the STORED row.
+   *
+   * Defaults to org-wide: the same wording deserves the same answer whoever sends
+   * it. Narrowing an entry to one customer is done from Settings.
+   */
+  async function teachPortalFromRow(rowIndex: number, scope: "all" | "customer" = "all") {
+    if (!quote || !canEditLineItems) return;
+    const row = items[rowIndex];
+    if (!row) return;
+    if (!getString(row.raw_description).trim()) {
+      toast.error("This row has no customer wording for the portal to match on");
+      return;
+    }
+    if (!getString(row.ggpl_description).trim()) {
+      toast.error("Enter the GGPL description before saving it to the portal");
+      return;
+    }
+    setTeachingRow(rowIndex);
+    try {
+      if (hasUnsavedLocalEdits) {
+        const saved = await savePatch({ items } as Partial<Quote>, "Line items saved");
+        if (!saved) return;
+      }
+      const entry = await teachLearnedDescription({
+        quote_id: quote.id,
+        item_index: rowIndex,
+        customer: scope === "customer" ? quote.customer : "",
+        approve: true,
+      });
+      toast.success(
+        entry.status === "approved"
+          ? `Saved permanently — the portal will answer this wording for ${entry.customer || "every customer"}`
+          : "Sent for approval — in use now, pending review by estimation",
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not save the description to the portal");
+    } finally {
+      setTeachingRow(null);
+    }
+  }
+
   function updateExtractionSummaryNote(itemKey: string, noteField: "note1" | "note2", note: string) {
     if (!quote || !canEditLineItems) return;
     const nextNotes = {
@@ -3387,6 +3535,34 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     if (AUTO_UPDATE_FIELDS.has(field)) {
       queueAutoUpdateRows([index]);
     }
+  }
+
+  /**
+   * Take the suggestion the portal attached to a row whose wording only RESEMBLES
+   * something the team corrected before. A near match is never applied on its own
+   * — accepting it is the operator's call, and doing so marks the fields as
+   * manual so a later recompute cannot walk it back.
+   */
+  function applyLearnedSuggestion(index: number) {
+    if (!canEditLineItems) return;
+    const suggestion = items[index]?.learned_suggestion as
+      | { ggpl_description?: string; fields?: Record<string, unknown> }
+      | undefined;
+    if (!suggestion) return;
+    invalidateMaterialPlan();
+    const next = [...items];
+    let row = next[index] ?? blankItem(index + 1);
+    for (const [field, value] of Object.entries(suggestion.fields ?? {})) {
+      row = setItemValue(row, field, String(value ?? ""));
+    }
+    if (suggestion.ggpl_description) {
+      row = setItemValue(row, "ggpl_description", suggestion.ggpl_description);
+    }
+    const { learned_suggestion: _dropped, ...applied } = row;
+    next[index] = applied;
+    setQuote((current) => (current ? { ...current, items: next } : current));
+    setHasUnsavedLocalEdits(true);
+    toast.success("Suggestion applied to this row");
   }
 
   function addBlankRow() {
@@ -6603,6 +6779,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                         value={getString(selectedItem.ggpl_description)}
                         onChange={(value) => updateItem(selectedRowIndex, "ggpl_description", value)}
                         textarea
+                      />
+                      <PortalMemoryNote
+                        item={selectedItem}
+                        customer={quote?.customer ?? ""}
+                        canEdit={canEditLineItems}
+                        busy={teachingRow === selectedRowIndex}
+                        onTeach={(scope) => void teachPortalFromRow(selectedRowIndex, scope)}
+                        onApplySuggestion={() => applyLearnedSuggestion(selectedRowIndex)}
                       />
                       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
                         <Field label="Quantity" value={getString(selectedItem.quantity)} onChange={(value) => updateItem(selectedRowIndex, "quantity", value)} type="number" />

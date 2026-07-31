@@ -11,6 +11,7 @@ import secrets
 import threading
 import time
 import uuid
+from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,10 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.schemas.access_settings import AccessSettings
 from app.schemas.customers import CustomerSettings
+from app.schemas.description_memory import (
+    LearnedDescriptionRead,
+    LearningSettings,
+)
 from app.config import get_settings
 from app.schemas.common import StageHistoryEntry
 from app.schemas.jobs import JobRead
@@ -521,6 +526,9 @@ DEFAULT_ACCESS_SETTINGS = AccessSettings(
         "estimation": _permissions([
             "view_dashboard", "view_enquiry", "view_doc_assistant", "view_history",
             "create_enquiry", "edit_sales_details", "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
+            # Estimation owns the GGPL wording, so it also owns what the portal
+            # is taught about it.
+            "manage_description_memory",
         ]),
         # Technical review is a REVIEW-ONLY role: read the specs, then either pass
         # the enquiry to pricing or return it to estimation with the error list.
@@ -561,6 +569,87 @@ def _access_settings_with_defaults(value: dict[str, Any] | AccessSettings | None
         }
     role_permissions["admin"] = _permissions(ALL_CAPABILITIES)
     return AccessSettings(with_whom_options=list(options), role_permissions=role_permissions)
+
+#: An org's memory is loaded whole and indexed in process, so it is bounded.
+#: Well past any realistic curated set; a larger store would need paging.
+MAX_LEARNED_DESCRIPTIONS_PER_ORG = 20000
+
+DEFAULT_LEARNING_SETTINGS = LearningSettings()
+
+
+def _learned_defaults(row: dict[str, Any]) -> dict[str, Any]:
+    """Fill in fields added after a row was first written."""
+    data = dict(row)
+    data.setdefault("fields", {})
+    data.setdefault("customer", "")
+    data.setdefault("status", "pending")
+    data.setdefault("source", "edit")
+    data.setdefault("note", "")
+    data.setdefault("created_by", "")
+    data.setdefault("approved_by", "")
+    data.setdefault("hit_count", 0)
+    data.setdefault("last_applied_at", None)
+    return data
+
+
+def _learned_public(row: dict[str, Any]) -> LearnedDescriptionRead:
+    data = _learned_defaults(row)
+    return LearnedDescriptionRead(
+        id=str(data["id"]),
+        org_id=str(data["org_id"]),
+        fingerprint=str(data.get("fingerprint") or ""),
+        source_text=str(data.get("source_text") or ""),
+        ggpl_description=str(data.get("ggpl_description") or ""),
+        fields=dict(data.get("fields") or {}),
+        customer=str(data.get("customer") or ""),
+        status=str(data.get("status") or "pending"),
+        source=str(data.get("source") or "edit"),
+        note=str(data.get("note") or ""),
+        created_by=str(data.get("created_by") or ""),
+        approved_by=str(data.get("approved_by") or ""),
+        hit_count=int(data.get("hit_count") or 0),
+        last_applied_at=_parse_dt(data["last_applied_at"]) if data.get("last_applied_at") else None,
+        created_at=_parse_dt(data["created_at"]),
+        updated_at=_parse_dt(data["updated_at"]),
+    )
+
+
+#: Annotations a re-teach must not blank out. A curator's note survives an
+#: operator's later re-save of the same wording; clearing one is done through
+#: PATCH, which sends the field deliberately.
+_LEARNED_PRESERVED_WHEN_EMPTY = ("note",)
+
+
+def _learned_merge(existing: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """Field changes to apply when a wording already in memory is taught again.
+
+    An entry already approved stays approved: an operator's incidental re-save
+    must not demote a curated rule back into the pending queue.
+    """
+    changes = {
+        key: value
+        for key, value in payload.items()
+        if value is not None
+        and key not in ("id", "org_id", "created_at")
+        and not (key in _LEARNED_PRESERVED_WHEN_EMPTY and value == "")
+    }
+    if existing.get("status") == "approved" and payload.get("status") == "pending":
+        changes["status"] = "approved"
+        changes.pop("approved_by", None)
+    return changes
+
+
+def _learned_scope_key(customer: Any) -> str:
+    """Scope identity of an entry. Must match the index's customer folding in
+    core.description_memory so 'Toyo  Engineering' and 'TOYO ENGINEERING' are
+    one scope here and one bucket there."""
+    return " ".join(str(customer or "").strip().upper().split())
+
+
+def _learned_sort_key(entry: LearnedDescriptionRead) -> tuple:
+    """Newest first, with the pending queue surfaced above settled entries."""
+    return (0 if entry.status == "pending" else 1, -entry.updated_at.timestamp())
+
 
 ENQUIRY_NO_PATTERN = re.compile(r"^enq-(\d+)$", re.IGNORECASE)
 
@@ -700,19 +789,26 @@ def _quote_visible_to_viewer(
 class LocalJsonRepository:
     """Persistent local fallback used when Postgres is unavailable."""
 
+    STORES = (
+        "quotes",
+        "jobs",
+        "exports",
+        "doc_sessions",
+        "app_users",
+        "app_settings",
+        "notifications",
+        "learned_descriptions",
+    )
+
     def __init__(self, path: Path) -> None:
         self._path = path
         self._lock = threading.RLock()
-        self._state = {
-            "quotes": {},
-            "jobs": {},
-            "exports": {},
-            "doc_sessions": {},
-            "app_users": {},
-            "app_settings": {},
-            "notifications": {},
-        }
+        self._state = self._empty_state()
         self._load()
+
+    @classmethod
+    def _empty_state(cls) -> dict[str, dict]:
+        return {name: {} for name in cls.STORES}
 
     def _load(self) -> None:
         if not self._path.exists():
@@ -720,20 +816,27 @@ class LocalJsonRepository:
         try:
             self._state.update(json.loads(self._path.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError):
-            self._state = {"quotes": {}, "jobs": {}, "exports": {}, "doc_sessions": {}, "app_users": {}, "app_settings": {}, "notifications": {}}
+            self._state = self._empty_state()
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._state, indent=2, sort_keys=True), encoding="utf-8")
-        # On Windows the target can be transiently locked by sync/antivirus
-        # tools (e.g. OneDrive) — retry the atomic swap briefly before failing.
+        payload = json.dumps(self._state, indent=2, sort_keys=True)
+        # The scratch file is named per writer, not shared: on one fixed name two
+        # saves racing each other have the first swap delete the file the second
+        # is about to move (FileNotFoundError), and a predictable path is also the
+        # one a sync client is most likely to grab mid-write.
+        tmp = self._path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
+        # On Windows either half of this can fail transiently while sync/antivirus
+        # tools (e.g. OneDrive) hold a handle — rewrite and retry briefly, since a
+        # lost temp file has to be recreated before the swap can be retried.
         for attempt in range(5):
             try:
+                tmp.write_text(payload, encoding="utf-8")
                 tmp.replace(self._path)
                 return
-            except PermissionError:
+            except (PermissionError, FileNotFoundError):
                 if attempt == 4:
+                    tmp.unlink(missing_ok=True)
                     raise
                 time.sleep(0.05 * (attempt + 1))
 
@@ -971,6 +1074,139 @@ class LocalJsonRepository:
         rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
         matched = [_notification_public(row) for row in rows if _notification_matches(row, user_id=user_id, role=role)]
         return matched[: max(1, limit)]
+
+    def get_learning_settings(self, org_id: str) -> LearningSettings:
+        with self._lock:
+            value = self._state.setdefault("app_settings", {}).get(f"{org_id}:learning")
+        return LearningSettings(**deepcopy(value or {}))
+
+    def update_learning_settings(self, org_id: str, settings: LearningSettings) -> LearningSettings:
+        with self._lock:
+            data = settings.model_dump(mode="json")
+            self._state.setdefault("app_settings", {})[f"{org_id}:learning"] = data
+            self._save()
+        return LearningSettings(**data)
+
+    def list_learned_descriptions(self, org_id: str) -> list[LearnedDescriptionRead]:
+        with self._lock:
+            rows = [
+                _learned_public(deepcopy(row))
+                for row in self._state.setdefault("learned_descriptions", {}).values()
+                if row.get("org_id") == org_id
+            ]
+        return sorted(rows, key=_learned_sort_key)
+
+    def get_learned_description(self, org_id: str, entry_id: str) -> LearnedDescriptionRead | None:
+        with self._lock:
+            row = self._state.setdefault("learned_descriptions", {}).get(entry_id)
+            if not row or row.get("org_id") != org_id:
+                return None
+            return _learned_public(deepcopy(row))
+
+    def upsert_learned_description(self, org_id: str, payload: dict[str, Any]) -> LearnedDescriptionRead:
+        """Insert, or fold into the existing entry for the same wording+scope.
+
+        Re-teaching a wording must not pile up duplicates: the newest correction
+        replaces the stored one. An entry already approved stays approved when a
+        later edit repeats it, so an operator's incidental re-save cannot demote
+        a curated rule back into the pending queue.
+        """
+        now = _now()
+        key_fingerprint = str(payload.get("fingerprint") or "")
+        scope = _learned_scope_key(payload.get("customer"))
+        with self._lock:
+            store = self._state.setdefault("learned_descriptions", {})
+            existing = next(
+                (
+                    row
+                    for row in store.values()
+                    if row.get("org_id") == org_id
+                    and str(row.get("fingerprint") or "") == key_fingerprint
+                    and _learned_scope_key(row.get("customer")) == scope
+                ),
+                None,
+            )
+            if existing is not None:
+                merged = _learned_defaults(existing)
+                merged.update(_learned_merge(existing, payload))
+                merged["org_id"] = org_id
+                merged["id"] = existing["id"]
+                merged["created_at"] = existing.get("created_at") or now.isoformat()
+                merged["updated_at"] = now.isoformat()
+                store[str(existing["id"])] = merged
+                self._save()
+                return _learned_public(deepcopy(merged))
+
+            entry_id = str(uuid.uuid4())
+            row = _learned_defaults(
+                {
+                    **payload,
+                    "id": entry_id,
+                    "org_id": org_id,
+                    "created_at": now.isoformat(),
+                    "updated_at": now.isoformat(),
+                }
+            )
+            store[entry_id] = row
+            self._prune_learned_descriptions(org_id)
+            self._save()
+            return _learned_public(deepcopy(row))
+
+    def _prune_learned_descriptions(self, org_id: str) -> None:
+        """Drop the oldest rejected/pending rows once an org exceeds the cap.
+        Approved entries are curated knowledge and are never evicted."""
+        store = self._state.setdefault("learned_descriptions", {})
+        org_rows = [row for row in store.values() if row.get("org_id") == org_id]
+        overflow = len(org_rows) - MAX_LEARNED_DESCRIPTIONS_PER_ORG
+        if overflow <= 0:
+            return
+        evictable = sorted(
+            (row for row in org_rows if row.get("status") != "approved"),
+            key=lambda row: str(row.get("updated_at") or ""),
+        )
+        for row in evictable[:overflow]:
+            store.pop(str(row.get("id")), None)
+
+    def patch_learned_description(
+        self, org_id: str, entry_id: str, changes: dict[str, Any]
+    ) -> LearnedDescriptionRead | None:
+        with self._lock:
+            row = self._state.setdefault("learned_descriptions", {}).get(entry_id)
+            if not row or row.get("org_id") != org_id:
+                return None
+            row.update(changes)
+            row["updated_at"] = _now().isoformat()
+            self._save()
+            return _learned_public(deepcopy(row))
+
+    def delete_learned_description(self, org_id: str, entry_id: str) -> bool:
+        with self._lock:
+            store = self._state.setdefault("learned_descriptions", {})
+            row = store.get(entry_id)
+            if not row or row.get("org_id") != org_id:
+                return False
+            del store[entry_id]
+            self._save()
+            return True
+
+    def record_learned_hits(self, org_id: str, entry_ids: list[str]) -> None:
+        """Count applications, so curation can see which rules actually fire."""
+        counts = Counter(entry_ids)
+        if not counts:
+            return
+        now = _now().isoformat()
+        with self._lock:
+            store = self._state.setdefault("learned_descriptions", {})
+            touched = False
+            for entry_id, hits in counts.items():
+                row = store.get(entry_id)
+                if not row or row.get("org_id") != org_id:
+                    continue
+                row["hit_count"] = int(row.get("hit_count") or 0) + hits
+                row["last_applied_at"] = now
+                touched = True
+            if touched:
+                self._save()
 
     def get_customer_settings(self, org_id: str) -> CustomerSettings:
         with self._lock:
@@ -1283,6 +1519,14 @@ class PostgresRepository:
                 ))
                 conn.execute(text("create index if not exists app_users_org_email_idx on app_users (org_id, email)"))
                 conn.execute(text("create index if not exists work_notifications_org_created_idx on work_notifications (org_id, created_at desc)"))
+                conn.execute(text(
+                    "create index if not exists learned_descriptions_org_fingerprint_idx "
+                    "on learned_descriptions (org_id, fingerprint)"
+                ))
+                conn.execute(text(
+                    "create index if not exists learned_descriptions_org_updated_idx "
+                    "on learned_descriptions (org_id, updated_at desc)"
+                ))
 
     def _quote_from_row(self, row: Any) -> QuoteRead:
         data = dict(row._mapping if hasattr(row, "_mapping") else row)
@@ -1649,6 +1893,164 @@ class PostgresRepository:
             rows = [dict(row._mapping) for row in conn.execute(stmt)]
         matched = [_notification_public(row) for row in rows if _notification_matches(row, user_id=user_id, role=role)]
         return matched[: max(1, limit)]
+
+    def get_learning_settings(self, org_id: str) -> LearningSettings:
+        stmt = select(app_settings_table.c.value).where(
+            app_settings_table.c.org_id == _tenant_uuid(org_id),
+            app_settings_table.c.key == "learning",
+        )
+        with self._engine.begin() as conn:
+            value = conn.execute(stmt).scalar_one_or_none()
+        return LearningSettings(**dict(value or {}))
+
+    def update_learning_settings(self, org_id: str, settings: LearningSettings) -> LearningSettings:
+        org_uuid = _tenant_uuid(org_id)
+        value = settings.model_dump(mode="json")
+        with self._engine.begin() as conn:
+            existing = conn.execute(
+                select(app_settings_table.c.key).where(
+                    app_settings_table.c.org_id == org_uuid,
+                    app_settings_table.c.key == "learning",
+                )
+            ).first()
+            if existing:
+                conn.execute(
+                    update(app_settings_table)
+                    .where(app_settings_table.c.org_id == org_uuid, app_settings_table.c.key == "learning")
+                    .values(value=value, updated_at=_now())
+                )
+            else:
+                conn.execute(
+                    insert(app_settings_table).values(
+                        org_id=org_uuid, key="learning", value=value, updated_at=_now()
+                    )
+                )
+        return LearningSettings(**value)
+
+    def list_learned_descriptions(self, org_id: str) -> list[LearnedDescriptionRead]:
+        stmt = (
+            select(learned_descriptions_table)
+            .where(learned_descriptions_table.c.org_id == _tenant_uuid(org_id))
+            .order_by(learned_descriptions_table.c.updated_at.desc())
+            .limit(MAX_LEARNED_DESCRIPTIONS_PER_ORG)
+        )
+        with self._engine.begin() as conn:
+            rows = [_learned_public(dict(row._mapping)) for row in conn.execute(stmt)]
+        return sorted(rows, key=_learned_sort_key)
+
+    def get_learned_description(self, org_id: str, entry_id: str) -> LearnedDescriptionRead | None:
+        entry_uuid = _uuid(entry_id)
+        if entry_uuid is None:
+            return None
+        stmt = select(learned_descriptions_table).where(
+            learned_descriptions_table.c.org_id == _tenant_uuid(org_id),
+            learned_descriptions_table.c.id == entry_uuid,
+        )
+        with self._engine.begin() as conn:
+            row = conn.execute(stmt).first()
+        return _learned_public(dict(row._mapping)) if row else None
+
+    def upsert_learned_description(self, org_id: str, payload: dict[str, Any]) -> LearnedDescriptionRead:
+        """Insert, or fold into the existing entry for the same wording+scope.
+        See LocalJsonRepository.upsert_learned_description for the merge rules."""
+        org_uuid = _tenant_uuid(org_id)
+        now = _now()
+        key_fingerprint = str(payload.get("fingerprint") or "")
+        scope = _learned_scope_key(payload.get("customer"))
+        with self._engine.begin() as conn:
+            candidates = conn.execute(
+                select(learned_descriptions_table).where(
+                    learned_descriptions_table.c.org_id == org_uuid,
+                    learned_descriptions_table.c.fingerprint == key_fingerprint,
+                )
+            ).all()
+            existing = next(
+                (
+                    dict(row._mapping)
+                    for row in candidates
+                    if _learned_scope_key(dict(row._mapping).get("customer")) == scope
+                ),
+                None,
+            )
+            if existing is not None:
+                changes = _learned_merge(existing, payload)
+                changes["updated_at"] = now
+                conn.execute(
+                    update(learned_descriptions_table)
+                    .where(learned_descriptions_table.c.id == existing["id"])
+                    .values(**changes)
+                )
+                merged = {**existing, **changes}
+                return _learned_public(merged)
+
+            entry_id = uuid.uuid4()
+            row = _learned_defaults({**payload, "id": entry_id, "org_id": org_uuid})
+            row["created_at"] = now
+            row["updated_at"] = now
+            conn.execute(insert(learned_descriptions_table).values(**row))
+        return _learned_public(row)
+
+    def patch_learned_description(
+        self, org_id: str, entry_id: str, changes: dict[str, Any]
+    ) -> LearnedDescriptionRead | None:
+        entry_uuid = _uuid(entry_id)
+        if entry_uuid is None:
+            return None
+        org_uuid = _tenant_uuid(org_id)
+        with self._engine.begin() as conn:
+            existing = conn.execute(
+                select(learned_descriptions_table).where(
+                    learned_descriptions_table.c.org_id == org_uuid,
+                    learned_descriptions_table.c.id == entry_uuid,
+                )
+            ).first()
+            if not existing:
+                return None
+            values = {**changes, "updated_at": _now()}
+            conn.execute(
+                update(learned_descriptions_table)
+                .where(learned_descriptions_table.c.id == entry_uuid)
+                .values(**values)
+            )
+            return _learned_public({**dict(existing._mapping), **values})
+
+    def delete_learned_description(self, org_id: str, entry_id: str) -> bool:
+        entry_uuid = _uuid(entry_id)
+        if entry_uuid is None:
+            return False
+        with self._engine.begin() as conn:
+            result = conn.execute(
+                delete(learned_descriptions_table).where(
+                    learned_descriptions_table.c.org_id == _tenant_uuid(org_id),
+                    learned_descriptions_table.c.id == entry_uuid,
+                )
+            )
+        return bool(result.rowcount)
+
+    def record_learned_hits(self, org_id: str, entry_ids: list[str]) -> None:
+        """Count applications, so curation can see which rules actually fire.
+
+        Counted per entry, not per statement: one learned rule can answer hundreds
+        of rows in a single enquiry, and that must not become hundreds of UPDATEs.
+        """
+        counts = Counter(value for value in (_uuid(entry_id) for entry_id in entry_ids) if value is not None)
+        if not counts:
+            return
+        now = _now()
+        org_uuid = _tenant_uuid(org_id)
+        with self._engine.begin() as conn:
+            for entry_uuid, hits in counts.items():
+                conn.execute(
+                    update(learned_descriptions_table)
+                    .where(
+                        learned_descriptions_table.c.org_id == org_uuid,
+                        learned_descriptions_table.c.id == entry_uuid,
+                    )
+                    .values(
+                        hit_count=learned_descriptions_table.c.hit_count + hits,
+                        last_applied_at=now,
+                    )
+                )
 
     def get_customer_settings(self, org_id: str) -> CustomerSettings:
         org_uuid = _tenant_uuid(org_id)

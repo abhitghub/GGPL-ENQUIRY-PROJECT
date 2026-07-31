@@ -23,6 +23,7 @@ from app.schemas.quotes import (
     StageAdvanceRequest,
     WorkflowActionRequest,
 )
+from app.services import description_memory
 from app.services.approved_quote_cache import cache_final_approved_quote
 from app.services.enquiry_register import (
     REGISTER_FILENAME,
@@ -486,6 +487,14 @@ def patch_quote(
     new_owner = str((quote.stage_meta or {}).get("owner_id") or "").strip()
     if new_owner and new_owner != str((current.stage_meta or {}).get("owner_id") or "").strip():
         notify_assignment(user, quote, new_owner)
+    # The portal also saves line edits through the whole-quote patch, so this is
+    # the second place a GGPL correction can arrive.
+    if authorized_payload.items is not None:
+        description_memory.capture_item_edits(
+            user,
+            before=[dict(item) for item in current.items],
+            after=[dict(item) for item in quote.items],
+        )
     return quote
 
 
@@ -532,6 +541,14 @@ def bulk_items(
         raise
     if not updated:
         raise HTTPException(status_code=404, detail="Quote not found")
+    # A GGPL description the team just fixed is knowledge, not a one-off edit:
+    # remember it against this customer wording so the next enquiry carrying the
+    # same wording is answered correctly without anyone touching it.
+    description_memory.capture_item_edits(
+        user,
+        before=[dict(item) for item in quote.items],
+        after=items,
+    )
     return updated
 
 
@@ -557,6 +574,10 @@ def bulk_recompute(
         item["ggpl_description"] = describe_item(item)
         recomputed.append(item)
 
+    # Re-running the rules engine would otherwise undo every correction the team
+    # has ever made to these wordings; memory is what makes a recompute safe.
+    description_memory.apply_memory(user.org_id, recomputed, customer=quote.customer)
+
     if payload.rows is None:
         for index, item in zip(target_indices, recomputed):
             if 0 <= index < len(items):
@@ -581,7 +602,7 @@ def reprocess_text(
     user: CurrentUser = Depends(get_current_user),
 ) -> list[dict]:
     require_capability(user, "edit_line_items")
-    _quote_or_404(user, quote_id)
+    quote = _quote_or_404(user, quote_id)
     if not payload.descriptions:
         return []
     from app.services.extraction_runner import run_extraction_job
@@ -594,6 +615,7 @@ def reprocess_text(
         source_type=payload.source_type,
         api_key=payload.api_key,
         quote_id=None,
+        customer=quote.customer,
     )
     finished = repo.get_job(user.org_id, job.id)
     if not finished or finished.status == "failed":
