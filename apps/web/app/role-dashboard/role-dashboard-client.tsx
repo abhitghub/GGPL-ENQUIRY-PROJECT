@@ -59,12 +59,6 @@ function workflowNote(quote: Quote): string {
   return typeof meta.workflow_comment === "string" ? meta.workflow_comment : "";
 }
 
-// The formula admin set for this enquiry — durable, unlike workflow_comment.
-function pricingFormula(quote: Quote): string {
-  const meta = (quote.stage_meta ?? {}) as Record<string, unknown>;
-  return typeof meta.pricing_formula === "string" ? meta.pricing_formula : "";
-}
-
 function lastWorkflowAction(quote: Quote): string {
   const meta = (quote.stage_meta ?? {}) as Record<string, unknown>;
   const granular = (meta.granular_workflow ?? {}) as Record<string, unknown>;
@@ -107,15 +101,15 @@ function enquirySummary(quote: Quote): Array<[string, string]> {
 }
 
 // Actions that are meaningless without a note (mirrors require_comment on the
-// backend transitions): the pricing formula and the reviewer's error list.
+// backend transitions): the reviewer's error list.
 const NOTE_REQUIRED: Record<string, string> = {
-  open_pricing: "Enter the pricing formula before sending to estimation.",
   return_spec_errors: "Describe the errors found before returning to estimation.",
 };
 
-// Per-step placeholder for the row's note box.
+// Per-step placeholder for the row's note box. Admin gets no note box at
+// sent_for_pricing: an enquiry carries many different specs, so there is no one
+// formula to hand estimation — they price each spec on the pricing sheet.
 const NOTE_PLACEHOLDER: Record<string, string> = {
-  sent_for_pricing: "Pricing formula for estimation (e.g. base rate × factor; GTQ items → will quote soon)",
   technical_review_pending: "Note for estimation — required when returning with errors",
 };
 
@@ -157,7 +151,7 @@ export function RoleDashboardClient() {
   const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState<string | null>(null);
   const [registerExporting, setRegisterExporting] = React.useState(false);
-  // Per-row note: the pricing formula (admin) or the reviewer's error note.
+  // Per-row note: the reviewer's error note.
   const [rowNotes, setRowNotes] = React.useState<Record<string, string>>({});
 
   async function downloadEnquiryRegister() {
@@ -289,7 +283,7 @@ export function RoleDashboardClient() {
                   <TableHead>Customer</TableHead>
                   <TableHead>Enquiry summary</TableHead>
                   <TableHead>Stage</TableHead>
-                  <TableHead>{role === "admin" || role === "management" ? "Pricing formula" : "Note"}</TableHead>
+                  <TableHead>Note</TableHead>
                   <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -339,13 +333,6 @@ export function RoleDashboardClient() {
                             placeholder={notePlaceholder}
                             className="min-h-[52px] w-56 rounded-md border border-input bg-background px-2 py-1.5 text-xs outline-none focus:ring-2 focus:ring-ring"
                           />
-                        ) : pricingFormula(quote) ? (
-                          // Estimation prices against this — read-only here, and
-                          // repeated on the pricing sheet itself.
-                          <div className="max-w-56 text-xs" title={pricingFormula(quote)}>
-                            <span className="text-muted-foreground">Formula: </span>
-                            <span className="font-medium">{pricingFormula(quote)}</span>
-                          </div>
                         ) : (
                           <span className="text-xs text-muted-foreground">—</span>
                         )}
