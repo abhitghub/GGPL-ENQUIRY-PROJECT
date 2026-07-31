@@ -533,7 +533,8 @@ export const GRANULAR_WORKFLOW = process.env.NEXT_PUBLIC_ENABLE_GRANULAR_WORKFLO
 export const GRANULAR_ENQUIRY_WORKFLOW_STEPS = [
   { id: "enquiry_received", label: "Enquiry received", team: "Estimation" },
   { id: "spec_check", label: "Spec check & GGPL format", team: "Estimation" },
-  { id: "technical_review_pending", label: "Technical review", team: "Technical review" },
+  // Technical review is the manager's step — there is no separate technical team.
+  { id: "technical_review_pending", label: "Technical review", team: "Manager" },
   { id: "pricing_decision", label: "Pricing", team: "Admin → Estimation" },
   { id: "pricing_submitted", label: "Quotation generation", team: "Sales / Admin" },
   { id: "quotation_sent_to_customer", label: "Sent to customer", team: "Sales" },
@@ -586,8 +587,8 @@ export const GRANULAR_ENQUIRY_WORKFLOW_ACTIONS = [
   // Technical review is optional — estimation may skip straight to pricing.
   { action: "send_to_pricing_direct", from: ["spec_check"], roles: ["estimation"], label: "Spec complete — send for pricing (skip technical review)" },
   // Reviewer error loop: back to estimation with a note, re-submit, re-check.
-  { action: "return_spec_errors", from: ["technical_review_pending"], roles: ["technical"], label: "Errors found — return to estimation" },
-  { action: "return_tr_spec", from: ["technical_review_pending"], roles: ["technical"], label: "Technical review done — submit for pricing" },
+  { action: "return_spec_errors", from: ["technical_review_pending"], roles: ["management"], label: "Errors found — return to estimation" },
+  { action: "return_tr_spec", from: ["technical_review_pending"], roles: ["management"], label: "Technical review done — submit for pricing" },
   { action: "open_pricing", from: ["sent_for_pricing"], roles: ["admin", "management"], label: "Send to estimation for pricing" },
   { action: "submit_priced_quotation", from: ["pricing_decision"], roles: ["estimation", "management"], label: "Submit priced quotation" },
   // Domestic/international is derived from the enquiry's quote type — not asked again.
@@ -685,6 +686,7 @@ export async function advanceEnquiryWorkflow(
 export type ChangeQueryEvent = {
   at: string;
   by: string;
+  by_id?: string;
   role: string;
   action: string;
   note: string;
@@ -693,6 +695,7 @@ export type ChangeQueryEvent = {
 export type ChangeQuery = {
   id: string;
   raised_by: string;
+  raised_by_id?: string;
   raised_by_role: string;
   from_stage: string;
   target_stage: string;
@@ -703,6 +706,11 @@ export type ChangeQuery = {
   created_at: string;
   return_stage?: string;
   history?: ChangeQueryEvent[];
+  // Set by a "reply" action: the thread's latest message, so a list view can
+  // show who answered last without walking the whole history.
+  last_reply_at?: string;
+  last_reply_by?: string;
+  last_reply_note?: string;
 };
 
 export function readChangeQueries(stageMeta: Record<string, unknown> | null | undefined): ChangeQuery[] {
@@ -720,10 +728,12 @@ export async function raiseChangeQuery(id: string, targetStage: string, note: st
   );
 }
 
+// "reply" posts a message on the query's thread without deciding it or moving
+// the enquiry, so the team a query was sent to can answer it in place.
 export async function actOnChangeQuery(
   id: string,
   queryId: string,
-  action: "approve" | "reject" | "resolve",
+  action: "approve" | "reject" | "resolve" | "reply",
   note = "",
 ): Promise<Quote> {
   return parse<Quote>(

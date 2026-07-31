@@ -366,13 +366,28 @@ def _size_from_text(value: str | None) -> str | None:
     if not value:
         return None
     raw = str(value).strip()
+    # GGPL echoes the enquiry's own size style, and a customer who typed `¾`
+    # meant the fractional name (Master Spec v3: ¾ -> 3/4"), not `0.75"`.
     fraction_map = {
-        '¼': '0.25',
-        '½': '0.5',
-        '¾': '0.75',
+        '¼': '1/4',
+        '½': '1/2',
+        '¾': '3/4',
+        '⅜': '3/8',
+        '⅝': '5/8',
+        '⅞': '7/8',
+        '⅛': '1/8',
     }
     if raw in fraction_map:
         raw = fraction_map[raw]
+    # Mixed numbers reach here spelled four ways ("1 1/2", "1-1/2", "1.1/2",
+    # "1+1/2"); collapse to the hyphenated form the formatter expects.
+    mixed = re.match(r'^(\d+)\s*[.\-+\s]\s*(\d+/\d+)$', raw)
+    if mixed:
+        return f'{mixed.group(1)}-{mixed.group(2)}"'
+    # Bare fractions ("3/4") are inch sizes and need the inch mark, or
+    # size_type inference downstream reads them as dimensionless.
+    if re.match(r'^\d+/\d+$', raw):
+        return f'{raw}"'
     try:
         number = float(raw)
         return f'{int(number)}"' if number == int(number) else f'{number}"'
@@ -843,13 +858,66 @@ def _extract_spw_components(description: str) -> dict:
     return result
 
 
+# An inch size as customers write it. Alternation order is load-bearing:
+# regex alternation is first-match, not longest-match, so the bare-number form
+# has to come LAST or `NPS: 3/4` reads as 3" and `1-1/2IN` reads as 1" — a
+# 2-4x size error that quotes clean. `1.1/2` is the European spelling of
+# 1-1/2 (Master Spec v3). The lookbehind stops the whole part from being
+# picked up out of a preceding decimal, so `ASME B16.20 1/2"` stays 1/2".
+_SIZE_TOKEN = (
+    r'(?<![\d.])(?:'
+    r'\d+\s*[.\-+]\s*\d+/\d+'   # 1.1/2, 1-1/2, 1+1/2
+    r'|\d+\s\d+/\d+'            # 1 1/2
+    r'|\d+/\d+'                 # 3/4
+    r'|\d+(?:\.\d+)?'           # 4, 1.5
+    r'|[¼½¾]'
+    r')'
+)
+
+
+_ASME_CLASSES = ('2500', '1500', '900', '600', '400', '300', '150')
+
+
+def _split_glued_size_class(text: str) -> tuple[str, str] | None:
+    """RULE Y — `24600#` is a 24" gasket at class 600, not the number 24600.
+
+    ERP exports drop the separator between size and class ("30900#", "0.75150#").
+    Every candidate split is tested against the closed set of ASME classes and
+    the NPS table, and the split is accepted only when exactly one survives —
+    an ambiguous run is left alone rather than guessed at. Anchored to the start
+    of the row, which is where these exports put the pair.
+    """
+    from data.reference_data import normalize_size
+
+    head = re.match(r'^\s*(?P<digits>[\d./]+)\s*#', text)
+    if not head:
+        return None
+    digits = head.group('digits')
+    matches = []
+    for cls in _ASME_CLASSES:
+        if not digits.endswith(cls) or len(digits) == len(cls):
+            continue
+        size = digits[: -len(cls)]
+        if size.endswith('.') or not re.fullmatch(r'\d+(?:\.\d+)?|\d+/\d+', size):
+            continue
+        if normalize_size(f'{size}"'):
+            matches.append((size, cls))
+    if len(matches) != 1:
+        return None
+    size, cls = matches[0]
+    return _size_from_text(size), f'{cls}#'
+
+
 def _extract_first_size(text: str) -> str | None:
     s = text.upper()
     _Q = r'["\x94“”″˝]|\'{1,2}'
-    match = re.search(rf'\b(?:NPS|SIZE\s+IN\s+INCH|SIZE)\s*:?\s*(\d+(?:\.\d+)?|\d+[\s-]\d+/\d+|\d+/\d+|[¼½¾])\s*(?:{_Q}|INCH|IN)?\b', s)
+    glued = _split_glued_size_class(s)
+    if glued:
+        return glued[0]
+    match = re.search(rf'\b(?:NPS|SIZE\s+IN\s+INCH|SIZE)\s*:?\s*({_SIZE_TOKEN})\s*(?:{_Q}|INCH|IN)?\b', s)
     if match:
         return _size_from_text(match.group(1))
-    match = re.search(rf'\b(\d+(?:\.\d+)?|\d+[\s-]\d+/\d+|\d+/\d+|[¼½¾])\s*(?:{_Q}|INCH|IN)', s)
+    match = re.search(rf'\b({_SIZE_TOKEN})\s*(?:{_Q}|INCH|IN)', s)
     if match:
         return _size_from_text(match.group(1))
     # DN sizes keep their DN identity — GGPL prints them as e.g. '25 DN'

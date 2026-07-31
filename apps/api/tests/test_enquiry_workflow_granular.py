@@ -10,7 +10,8 @@ Verifies that:
 - Role ownership agrees between the two machines at equivalent checkpoints.
 
 Auth is via X-Org-Id / X-User-Id headers (LOGIN_ENABLED=false, set in conftest).
-Seeded users: shashnam (admin), sales, estimation, technical, verifier (approver).
+Seeded users: shashnam (admin), sales, estimation, jagadeeshan (management, who owns
+technical review), technical (legacy role, no granular step), verifier (approver).
 """
 
 import sys
@@ -131,7 +132,7 @@ def test_granular_happy_path(granular):
     tr = _act(client, org, "estimation", qid, "send_to_technical_review", gasket_type="soft_cut")
     assert _stage(tr) == "technical_review_pending"
     # Technical review done -> straight into the admin pricing queue.
-    assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "sent_for_pricing"
+    assert _stage(_act(client, org, "jagadeeshan", qid, "return_tr_spec")) == "sent_for_pricing"
     # Admin releases the enquiry back to estimation to price, no formula needed.
     assert _stage(_act(client, org, "shashnam", qid, "open_pricing")) == "pricing_decision"
     # Estimation prices and submits the quotation for generation.
@@ -163,7 +164,7 @@ def test_generate_route_derived_from_market_type(granular):
     for role, action in [
         ("estimation", "begin_spec_check"),
         ("estimation", "send_to_technical_review"),
-        ("technical", "return_tr_spec"),
+        ("jagadeeshan", "return_tr_spec"),
         ("shashnam", "open_pricing"),
         ("estimation", "submit_priced_quotation"),
     ]:
@@ -200,8 +201,8 @@ def test_reviewer_returns_errors_then_rechecks(granular):
     _act(client, org, "estimation", qid, "begin_spec_check")
     _act(client, org, "estimation", qid, "send_to_technical_review")
     # A return with no note is rejected — estimation must be told what to fix.
-    _act(client, org, "technical", qid, "return_spec_errors", expect=422)
-    returned = _act(client, org, "technical", qid, "return_spec_errors", comment="Flange rating missing on lines 3-5")
+    _act(client, org, "jagadeeshan", qid, "return_spec_errors", expect=422)
+    returned = _act(client, org, "jagadeeshan", qid, "return_spec_errors", comment="Flange rating missing on lines 3-5")
     assert _stage(returned) == "spec_check"
     assert returned.json()["stage_meta"]["workflow_comment"] == "Flange rating missing on lines 3-5"
     # Re-submitting a returned spec is a reply, so it must say what changed —
@@ -225,7 +226,7 @@ def test_reviewer_returns_errors_then_rechecks(granular):
         ("send_to_technical_review", "Added the rating on lines 3-5"),
     ]
     # Second round: the reviewer clears it, so it moves to the pricing queue.
-    assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "sent_for_pricing"
+    assert _stage(_act(client, org, "jagadeeshan", qid, "return_tr_spec")) == "sent_for_pricing"
 
 
 def test_technical_review_is_optional(granular):
@@ -265,32 +266,37 @@ def test_admin_releases_an_empty_enquiry_without_a_formula(granular):
     assert "pricing_formula" not in submitted_meta
 
 
-def test_technical_reviewer_is_review_only(granular):
-    """Technical review reviews and routes — it does not fix. The reviewer can
-    read the enquiry and perform both review handoffs, but cannot edit the line
-    items, the quotation or the enquiry metadata: estimation makes the changes."""
+def test_manager_owns_technical_review(granular):
+    """Technical review belongs to the MANAGER (Jagadeeshan, role `management`),
+    not to a separate technical-review team. He drives both exits, and the legacy
+    `technical` role — still a valid role — can no longer see or act on the step."""
     client = TestClient(app)
-    org = f"org-gw-review-only-{uuid.uuid4().hex}"
+    org = f"org-gw-mgr-review-{uuid.uuid4().hex}"
     qid = _create_enquiry(client, org)
     _act(client, org, "estimation", qid, "begin_spec_check")
     _act(client, org, "estimation", qid, "send_to_technical_review")
 
-    # He can read the enquiry he is reviewing.
-    assert client.get(f"/api/v1/quotes/{qid}", headers=_headers(org, "technical")).status_code == 200
-    # But he cannot rewrite the specs — that is estimation's job after a return.
-    for payload in (
-        {"items": [{"raw_description": "reviewer edited this"}]},
-        {"quote_data": {"payment_terms": "reviewer edited this"}},
-        {"stage_meta": {"due_date": "2026-01-01"}},
-    ):
-        resp = client.patch(f"/api/v1/quotes/{qid}", headers=_headers(org, "technical"), json=payload)
-        assert resp.status_code == 403, f"technical should not edit {list(payload)[0]}: {resp.status_code} {resp.text}"
-    # Both review handoffs still work — they gate on stage ownership, not on an
-    # edit capability, so stripping the edit rights does not disarm the reviewer.
-    returned = _act(client, org, "technical", qid, "return_spec_errors", comment="Rating missing on line 2")
+    # The step is handed to the manager, not to a technical-review team.
+    assert _stage_meta(client, org, "jagadeeshan", qid)["with_whom"] == "Manager"
+    # The manager can open the enquiry under review.
+    assert client.get(f"/api/v1/quotes/{qid}", headers=_headers(org, "jagadeeshan")).status_code == 200
+    # The retired technical role owns nothing here now — it cannot clear the
+    # review or bounce it back, and the step is not visible to it at all.
+    _act_blocked(client, org, "technical", qid, "return_tr_spec")
+    _act_blocked(client, org, "technical", qid, "return_spec_errors", comment="not mine to send")
+    # Estimation still cannot push past the manager's gate.
+    _act_blocked(client, org, "estimation", qid, "return_tr_spec")
+    # Both of the manager's exits work: bounce back with a note, then clear it.
+    returned = _act(client, org, "jagadeeshan", qid, "return_spec_errors", comment="Rating missing on line 2")
     assert _stage(returned) == "spec_check"
     _act(client, org, "estimation", qid, "send_to_technical_review", comment="Rating added")
-    assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "sent_for_pricing"
+    assert _stage(_act(client, org, "jagadeeshan", qid, "return_tr_spec")) == "sent_for_pricing"
+
+
+def _stage_meta(client, org, user_id, quote_id) -> dict:
+    resp = client.get(f"/api/v1/quotes/{quote_id}", headers=_headers(org, user_id))
+    assert resp.status_code == 200, resp.text
+    return resp.json()["stage_meta"]
 
 
 def _set_formulas(client, org, user_id, quote_id, rows, *, expect=200, **extra):
@@ -415,7 +421,7 @@ def test_granular_technical_review_gate(granular):
     )
     assert wrong_stage.status_code in (403, 404, 409)
     # Only technical forwards the enquiry ahead — into the pricing queue.
-    assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "sent_for_pricing"
+    assert _stage(_act(client, org, "jagadeeshan", qid, "return_tr_spec")) == "sent_for_pricing"
 
 
 def test_retired_step_ids_keep_flowing(granular):
@@ -518,7 +524,9 @@ def test_granular_is_superset_of_legacy(granular):
 _PARITY = [
     ("enquiry", "sales", "enquiry_received", "estimation"),
     ("estimation_review", "estimation", "spec_check", "estimation"),
-    ("technical_specs", "technical", "technical_review_pending", "technical"),
+    # Legacy keeps the `technical` role on its technical-specs stage for in-flight
+    # records; the granular machine hands technical review to the manager.
+    ("technical_specs", "technical", "technical_review_pending", "management"),
     ("pricing", "admin", "pricing_decision", "estimation"),
 ]
 

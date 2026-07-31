@@ -23,6 +23,21 @@ ESC_DATASHEET = 'KINDLY PROVIDE DATASHEET / DETAILED MATERIAL DESCRIPTION'
 ESC_DIMENSIONS = 'KINDLY PROVIDE DIMENSIONS'
 ESC_REGRET = 'REGRET'
 
+# Every escalation phrase, for callers that must recognise one in a description
+# slot. An escalation is the engine ASKING the customer for information — it is
+# never an answer, so it must never be stored, learned, or replayed as one.
+ESCALATION_PHRASES: frozenset[str] = frozenset({
+    ESC_WILL_QUOTE_SOON,
+    ESC_RING_NO,
+    ESC_RING_DIMS,
+    ESC_DRAWING,
+    ESC_DRAWING_DIMS,
+    ESC_CLEAR_SPEC,
+    ESC_DATASHEET,
+    ESC_DIMENSIONS,
+    ESC_REGRET,
+})
+
 # RULE J-2 Part 2 — mandatory confirmation for ringed SPW quoted by bare OD/ID
 # (no drawing): the stated dims may be the sealing element or the overall
 # gasket over the rings. Quote issues; order must not release unresolved.
@@ -1534,15 +1549,20 @@ def _apply_kamm_rules(item: dict, flags: list, applied_defaults: list) -> None:
         _add_item_deviation(item, flags, 'KINDLY CONFIRM RIB DETAILS', blocking=False)
 
     # No standard for custom OD/ID KAMM; only for NPS-rated KAMM
-    if item.get('size_type') != 'OD_ID' and not item.get('standard'):
+    if item.get('size_type') != 'OD_ID' and not is_non_standard(item.get('standard')):
         is_pn_kamm = str(item.get('rating') or '').upper().startswith('PN')
         size_val = _size_nps_value(item.get('size_norm'))
-        if is_pn_kamm:
-            item['standard'] = 'EN 1514-6'
-            applied_defaults.append('standard defaulted to EN 1514-6 (KAMM on PN-rated flanges)')
-        elif size_val is not None and size_val >= 26:
+        if size_val is not None and size_val >= 26:
+            # B16.20 stops at 24", so a cited B16.20 cannot govern a 26"+ gasket.
+            # SPW already overrides the customer here; KAMM used to skip the
+            # check whenever any standard was present and printed 32" B16.20.
             # RULE Y Part 8 — house practice for KAMM is SERIES B (SPW defaults A).
             _set_b1647_standard(item, flags, applied_defaults, default_series='B')
+        elif item.get('standard'):
+            pass
+        elif is_pn_kamm:
+            item['standard'] = 'EN 1514-6'
+            applied_defaults.append('standard defaulted to EN 1514-6 (KAMM on PN-rated flanges)')
         else:
             item['standard'] = 'ASME B16.20'
             applied_defaults.append('standard defaulted to ASME B16.20')
@@ -2043,6 +2063,63 @@ def _recover_common_fields_from_description(item: dict) -> None:
         )
         if thickness_match:
             item['thickness_mm'] = float(thickness_match.group('thk') or thickness_match.group('thk2'))
+
+    _recover_size_rating_from_description(item, upper)
+
+
+def _recover_size_rating_from_description(item: dict, upper: str) -> None:
+    """Deterministic size/rating backstop for rows Smart Parse left blank.
+
+    The LLM reads a size glued to the noun — `4GASKET RF 150#`, `24GASKET`,
+    `¾GASKET` — only some of the time, so identical rows in one sheet came back
+    with some sizes filled and some UNKNOWN. The regex extractor already handles
+    that shape; it just was never consulted once the LLM path owned the row.
+    Only fills blanks — anything the LLM or an operator supplied wins.
+    """
+    # OD/ID rows are dimensioned, not nominally sized; O-rings clear size by design.
+    if item.get('size_type') == 'OD_ID' or item.get('gasket_type') == 'ORING':
+        return
+    if item.get('od_mm') is not None and item.get('id_mm') is not None:
+        return
+
+    from core.parser import _extract_first_size, _split_glued_size_class
+
+    # `24600#` carries both halves; take them together so the class is not left
+    # for the rating regex below, which needs a word boundary it will never find.
+    glued = _split_glued_size_class(upper)
+    if glued:
+        if not item.get('size'):
+            item['size'] = glued[0]
+            if item.get('size_type') in (None, '', 'UNKNOWN'):
+                item['size_type'] = 'NPS'
+        if not item.get('rating'):
+            item['rating'] = glued[1]
+
+    if not item.get('size'):
+        size = _extract_first_size(upper)
+        # Gate on the reference tables: a stray `316 IN` inside a material spec
+        # normalises to nothing, and a blank size beats an invented one.
+        if size and normalize_size(size):
+            item['size'] = size
+            if item.get('size_type') in (None, '', 'UNKNOWN'):
+                if 'DN' in size:
+                    item['size_type'] = 'DN'
+                elif 'NB' in size:
+                    item['size_type'] = 'NB'
+                else:
+                    item['size_type'] = 'NPS'
+
+    if not item.get('rating'):
+        rating_match = re.search(
+            r'\b(?:CL(?:ASS)?\.?\s*)?(150|300|400|600|900|1500|2500)\s*(?:#|LB(?:S)?\b)',
+            upper,
+        )
+        if rating_match:
+            item['rating'] = f'{rating_match.group(1)}#'
+        else:
+            pn_match = re.search(r'\bPN\s*-?\s*(\d{1,3})(?!\d)', upper)
+            if pn_match:
+                item['rating'] = f'PN {pn_match.group(1)}'
 
 
 def _requires_review_for_default(default: str, gasket_type: str, item: dict) -> bool:

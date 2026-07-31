@@ -781,6 +781,7 @@ const QUERY_EVENT_LABELS: Record<string, string> = {
   approve: "approved",
   reject: "rejected",
   resolve: "marked it resolved",
+  reply: "replied",
 };
 
 // --- Excel-style helpers for the material planning sheets -------------------
@@ -3905,8 +3906,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     }
   }
 
-  async function handleQueryAction(quoteId: string, queryId: string, action: "approve" | "reject" | "resolve") {
+  async function handleQueryAction(quoteId: string, queryId: string, action: "approve" | "reject" | "resolve" | "reply") {
     const note = (queryActionNotes[queryId] ?? "").trim();
+    // A reply IS the message, so it cannot be empty (the backend rejects it too).
+    if (action === "reply" && !note) {
+      toast.error("Type your reply first");
+      return;
+    }
     setActingQueryId(queryId);
     try {
       const updated = await actOnChangeQuery(quoteId, queryId, action, note);
@@ -3918,7 +3924,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           ? "Query approved — the enquiry moved to the requested stage"
           : action === "reject"
             ? "Query rejected"
-            : "Query resolved — the enquiry returned to its previous stage",
+            : action === "reply"
+              ? "Reply sent on this query"
+              : "Query resolved — the enquiry returned to its previous stage",
       );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not update the query");
@@ -3931,7 +3939,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     const busy = actingQueryId === query.id;
     const showDecide = query.status === "pending_approval" && canApproveQueries;
     const showResolve = query.status === "approved" && canRaiseQuery;
+    // Anyone in the loop (i.e. not a viewer) can answer on the thread, whatever
+    // the status — that is how the team a query was sent to talks back to the
+    // team that raised it without the enquiry moving anywhere.
+    const showReply = canRaiseQuery;
     const roleLabel = roleLabels[query.raised_by_role as keyof typeof roleLabels] ?? query.raised_by_role;
+    // The opening "raised" event repeats query.note, which is already shown.
+    const thread = (query.history ?? []).filter((event, index) => !(index === 0 && event.action === "raised"));
     return (
       <div key={query.id} className="rounded-md border bg-background p-2.5 text-sm">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -3946,14 +3960,40 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           <span className="text-xs text-muted-foreground">{query.created_at ? new Date(query.created_at).toLocaleString("en-GB") : ""}</span>
         </div>
         <div className="mt-1">{query.note}</div>
-        {(showDecide || showResolve) && (
+        {thread.length > 0 && (
+          <div className="mt-2 space-y-1.5 border-l pl-3">
+            {thread.map((event, index) => (
+              <div key={`${query.id}-${index}`} className="text-xs">
+                <span className="font-medium text-foreground">{event.by}</span>{" "}
+                <span className="text-muted-foreground">
+                  ({roleLabels[event.role as keyof typeof roleLabels] ?? event.role}) {QUERY_EVENT_LABELS[event.action] ?? event.action}
+                  {event.at ? ` · ${new Date(event.at).toLocaleString("en-GB")}` : ""}
+                </span>
+                {event.note ? <div className="text-sm">{event.note}</div> : null}
+              </div>
+            ))}
+          </div>
+        )}
+        {(showDecide || showResolve || showReply) && (
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <Input
               className="h-8 w-64"
-              placeholder={showDecide ? "Optional note for the decision" : "Describe the change you made"}
+              placeholder={showDecide ? "Reply, or note for the decision" : showResolve ? "Describe the change you made" : "Write a reply…"}
               value={queryActionNotes[query.id] ?? ""}
               onChange={(event) => setQueryActionNotes((prev) => ({ ...prev, [query.id]: event.target.value }))}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && showReply && !busy) {
+                  event.preventDefault();
+                  void handleQueryAction(quoteId, query.id, "reply");
+                }
+              }}
             />
+            {showReply && (
+              <Button variant="secondary" size="sm" disabled={busy} onClick={() => handleQueryAction(quoteId, query.id, "reply")}>
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                Reply
+              </Button>
+            )}
             {showDecide && (
               <>
                 <Button size="sm" disabled={busy} onClick={() => handleQueryAction(quoteId, query.id, "approve")}>
@@ -3973,21 +4013,6 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               </Button>
             )}
           </div>
-        )}
-        {(query.history ?? []).length > 0 && (
-          <details className="mt-2">
-            <summary className="cursor-pointer text-xs font-medium text-muted-foreground">History ({(query.history ?? []).length})</summary>
-            <div className="mt-1 space-y-1 border-l pl-3">
-              {(query.history ?? []).map((event, index) => (
-                <div key={`${query.id}-${index}`} className="text-xs text-muted-foreground">
-                  <span className="font-medium text-foreground">{event.by}</span>{" "}
-                  {QUERY_EVENT_LABELS[event.action] ?? event.action}
-                  {event.at ? ` · ${new Date(event.at).toLocaleString("en-GB")}` : ""}
-                  {event.note ? ` — ${event.note}` : ""}
-                </div>
-              ))}
-            </div>
-          </details>
         )}
       </div>
     );
@@ -5100,7 +5125,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                 </div>
                 <Badge variant="warning">{pendingApprovals.length} pending</Badge>
               </div>
-              <div className="text-xs text-muted-foreground">Change queries waiting for your decision. Approving sends the enquiry to the requested stage; the raising note explains why.</div>
+              <div className="text-xs text-muted-foreground">
+                Change queries waiting for your decision. Approving sends the enquiry to the requested stage; the raising note explains why. Open the
+                enquiry to read or answer the query thread.
+              </div>
             </CardHeader>
             <CardContent className="space-y-2 p-3">
               {pendingApprovals.map(({ row, query }) => (
@@ -5115,6 +5143,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       </span>
                     </div>
                     <div className="mt-0.5 text-xs">{query.note}</div>
+                    {query.last_reply_note ? (
+                      <div className="mt-0.5 text-xs text-muted-foreground">
+                        Latest reply — {query.last_reply_by}: {query.last_reply_note}
+                      </div>
+                    ) : null}
                   </div>
                   <div className="flex shrink-0 gap-2">
                     <Button size="sm" disabled={actingQueryId === query.id} onClick={() => handleQueryAction(row.id, query.id, "approve")}>
@@ -5492,7 +5525,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           </div>
           {changeQueries.length === 0 ? (
             <div className="text-xs text-muted-foreground">
-              No queries on this enquiry yet. Raise one to send it to another team with a note (for example a quantity change) — an admin approves it before it moves.
+              No queries on this enquiry yet. Raise one to send it to another team with a note (for example a quantity change) — an admin approves it before it moves,
+              and either team can reply on the query itself.
             </div>
           ) : (
             <div className="space-y-2">{[...changeQueries].reverse().map((query) => renderQueryCard(quote.id, query))}</div>

@@ -53,7 +53,9 @@ def test_publish_targets_roles_and_users_and_excludes_actor():
 
 def test_notify_stage_change_reaches_destination_role(granular_workflow):
     async def scenario():
-        subscriber = hub.subscribe("org1", "tech-user", "technical")
+        # Technical review is the manager's step, so the manager is the one the
+        # handoff notification must reach.
+        subscriber = hub.subscribe("org1", "jagadeeshan", "management")
         try:
             actor = SimpleNamespace(org_id="org1", user_id="est-user", role="estimation", name="Meena", email="m@x.com")
             quote = SimpleNamespace(
