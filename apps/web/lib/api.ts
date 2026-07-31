@@ -177,6 +177,22 @@ export type ContactPerson = {
   email: string;
   phone: string;
   mobile: string;
+  /** Which of the customer's locations this person sits at ("" when unknown). */
+  location_id?: string;
+};
+
+/** One site of a customer company — a plant or office with its own address. */
+export type CustomerLocation = {
+  id: string;
+  label: string;
+  address_line1: string;
+  address_line2: string;
+  city: string;
+  state: string;
+  pin_code: string;
+  country: string;
+  region: string;
+  gst_no: string;
 };
 
 export type CustomerRecord = {
@@ -198,6 +214,7 @@ export type CustomerRecord = {
   delivery_terms: string;
   active: boolean;
   contacts?: ContactPerson[];
+  locations?: CustomerLocation[];
 };
 
 export type BusinessMasterData = {
@@ -1057,6 +1074,71 @@ export async function addCustomerRecord(payload: NewCustomerInput): Promise<Cust
   );
 }
 
+export type CustomerRecordPatch = Partial<
+  Pick<
+    CustomerRecord,
+    | "name"
+    | "address_line1"
+    | "address_line2"
+    | "city"
+    | "state"
+    | "pin_code"
+    | "country"
+    | "gst_no"
+    | "default_currency"
+    | "payment_terms"
+    | "delivery_terms"
+  >
+>;
+
+export async function updateCustomerRecord(customerId: string, payload: CustomerRecordPatch): Promise<CustomerRecord> {
+  return parse<CustomerRecord>(
+    await apiFetch(`${API_BASE}/api/v1/customers/records/${encodeURIComponent(customerId)}`, {
+      method: "PATCH",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export type NewLocationInput = Omit<Partial<CustomerLocation>, "id">;
+
+export async function addCustomerLocation(customerId: string, payload: NewLocationInput): Promise<CustomerRecord> {
+  return parse<CustomerRecord>(
+    await apiFetch(`${API_BASE}/api/v1/customers/records/${encodeURIComponent(customerId)}/locations`, {
+      method: "POST",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export async function updateCustomerLocation(
+  customerId: string,
+  locationId: string,
+  payload: NewLocationInput,
+): Promise<CustomerRecord> {
+  return parse<CustomerRecord>(
+    await apiFetch(
+      `${API_BASE}/api/v1/customers/records/${encodeURIComponent(customerId)}/locations/${encodeURIComponent(locationId)}`,
+      {
+        method: "PATCH",
+        headers: headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify(payload),
+      },
+    ),
+  );
+}
+
+export async function deleteCustomerLocation(customerId: string, locationId: string): Promise<CustomerRecord> {
+  return parse<CustomerRecord>(
+    await apiFetch(
+      `${API_BASE}/api/v1/customers/records/${encodeURIComponent(customerId)}/locations/${encodeURIComponent(locationId)}`,
+      { method: "DELETE", headers: headers() },
+    ),
+  );
+}
+
 export type NewContactInput = {
   name: string;
   designation?: string;
@@ -1064,7 +1146,25 @@ export type NewContactInput = {
   email?: string;
   phone?: string;
   mobile?: string;
+  location_id?: string;
 };
+
+export async function updateCustomerContact(
+  customerId: string,
+  contactId: string,
+  payload: Partial<NewContactInput>,
+): Promise<CustomerRecord> {
+  return parse<CustomerRecord>(
+    await apiFetch(
+      `${API_BASE}/api/v1/customers/records/${encodeURIComponent(customerId)}/contacts/${encodeURIComponent(contactId)}`,
+      {
+        method: "PATCH",
+        headers: headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify(payload),
+      },
+    ),
+  );
+}
 
 export async function addEpcName(name: string): Promise<BusinessMasterData> {
   return parse<BusinessMasterData>(

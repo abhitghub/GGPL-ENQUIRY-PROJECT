@@ -38,10 +38,27 @@ def _headers(org: str, user_id: str) -> dict:
 
 
 def _enquiry_at_spec_check(client: TestClient, org: str) -> str:
+    # A complete enquiry header: an enquiry with a blank in it cannot leave the
+    # first step (see REQUIRED_ENQUIRY_DETAILS in app/services/enquiry_workflow.py).
     created = client.post(
         "/api/v1/quotes",
         headers=_headers(org, "estimation"),
-        json={"customer": "ACME", "project_ref": "P-Q1", "items": [], "stage_meta": {"owner_id": "sales", "market_type": "domestic"}},
+        json={
+            "customer": "ACME",
+            "project_ref": "P-Q1",
+            "custom_label": "RFQ - P-Q1",
+            "items": [{"raw_description": "SPW 6IN 150# CS/GRAPHITE", "quantity": 4}],
+            "quote_data": {"attention": "R Kumar", "email": "rkumar@acme.test", "contact_no": "+91 90000 00000"},
+            "stage_meta": {
+                "owner_id": "sales",
+                "market_type": "domestic",
+                "bid_type": "firm",
+                "country": "India",
+                "city": "Chennai",
+                "epc_name": "ACME Projects Ltd",
+                "due_date": "2026-08-31",
+            },
+        },
     )
     assert created.status_code == 201, created.text
     quote_id = created.json()["id"]

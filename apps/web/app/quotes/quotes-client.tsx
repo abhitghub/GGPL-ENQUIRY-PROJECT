@@ -30,6 +30,7 @@ import {
   Minimize2,
   MoreHorizontal,
   PanelRight,
+  Pencil,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -52,6 +53,7 @@ import {
   BusinessMasterData,
   ChangeQuery,
   ContactPerson,
+  CustomerLocation,
   CustomerRecord,
   ENQUIRY_WORKFLOW_ACTIONS,
   ENQUIRY_WORKFLOW_STEPS,
@@ -63,10 +65,12 @@ import {
   ITEM_FIELDS,
   NewContactInput,
   NewCustomerInput,
+  NewLocationInput,
   OutlookLinkedMessage,
   Quote,
   actOnChangeQuery,
   addCustomerContact,
+  addCustomerLocation,
   addCustomerRecord,
   addEpcName,
   advanceEnquiryWorkflow,
@@ -98,6 +102,9 @@ import {
   rfiDraft,
   teachLearnedDescription,
   toNumber,
+  updateCustomerContact,
+  updateCustomerLocation,
+  updateCustomerRecord,
   workflowNoteRequirement,
 } from "@/lib/api";
 import { addBackgroundJob, BACKGROUND_JOBS_EVENT, listBackgroundJobs } from "@/lib/background-jobs";
@@ -114,6 +121,7 @@ import {
   MaterialInputRow,
   MaterialPlan,
 } from "@/lib/material-planning";
+import { enquiryDetailGaps, enquiryDetailGateMessage } from "@/lib/enquiry-details";
 import { buildExtractionSummary, extractionSummaryItemSignature, isUnclassifiedSummaryItem } from "@/lib/extraction-summary";
 import { pricingFormulaByLine, pricingFormulaRows, readPricingFormulas } from "@/lib/pricing-formulas";
 import { getString, notesFor, validateItemField } from "@/components/quotes/item-validation";
@@ -325,13 +333,55 @@ function quoteDataWithDefaults(data?: Record<string, unknown> | null): Record<st
   return next;
 }
 
+/** Label for a customer site — the saved label, else its city / state / country. */
+function locationLabel(location: CustomerLocation): string {
+  if (location.label?.trim()) return location.label.trim();
+  const parts = [location.city, location.state, location.country].map((part) => getString(part).trim());
+  return parts.filter(Boolean).join(", ") || "Unnamed location";
+}
+
+/** The full address of a site, one line, for the dropdown hint and the summary. */
+function locationAddressText(location: CustomerLocation): string {
+  return [
+    location.address_line1,
+    location.address_line2,
+    [location.city, location.state, location.pin_code].map((part) => getString(part).trim()).filter(Boolean).join(", "),
+    location.country,
+  ]
+    .map((part) => getString(part).trim())
+    .filter(Boolean)
+    .join(", ");
+}
+
+/**
+ * Which site to use for a customer, given the contact person that was picked.
+ *
+ * The contact's own site wins — that is the whole point of pinning contacts to
+ * locations. A single-site company leaves no choice, so use it either way. When
+ * the company has several sites and the contact names none, return nothing and
+ * let the location dropdown ask.
+ */
+function resolveLocation(
+  customer?: CustomerRecord | null,
+  contact?: ContactPerson | null,
+  explicitLocationId?: string,
+): CustomerLocation | undefined {
+  const locations = customer?.locations ?? [];
+  if (!locations.length) return undefined;
+  const explicit = explicitLocationId ? locations.find((row) => row.id === explicitLocationId) : undefined;
+  if (explicit) return explicit;
+  const pinned = contact?.location_id ? locations.find((row) => row.id === contact.location_id) : undefined;
+  if (pinned) return pinned;
+  return locations.length === 1 ? locations[0] : undefined;
+}
+
 // The quotation Setup tab prints Buyer details straight into the PDF, but the
 // same details were already captured once during enquiry setup — on the chosen
 // customer master record and on its contact person. Fill only the keys that are
 // still blank so a hand-typed override always wins.
 function withInheritedBuyerDetails(
   data: Record<string, unknown>,
-  quote?: Pick<Quote, "customer"> | null,
+  quote?: Pick<Quote, "customer" | "stage_meta"> | null,
   customer?: CustomerRecord | null,
 ): Record<string, unknown> {
   if (!quote && !customer) return data;
@@ -344,24 +394,30 @@ function withInheritedBuyerDetails(
     next[key] = value;
     filled = true;
   };
-  // A contact is only unambiguous when the customer has exactly one saved
-  // person; the legacy single-contact columns stand in for older records.
+  // A contact is only unambiguous when the enquiry names one, or when the
+  // customer has exactly one saved person; the legacy single-contact columns
+  // stand in for older records.
   const contacts = customer?.contacts ?? [];
-  const contact = contacts.length === 1 ? contacts[0] : undefined;
+  const selectedContactId = getString(quote?.stage_meta?.customer_contact_id);
+  const contact =
+    (selectedContactId ? contacts.find((row) => row.id === selectedContactId) : undefined) ??
+    (contacts.length === 1 ? contacts[0] : undefined);
   const contactName = contact?.name || (contacts.length === 0 ? customer?.contact_name : "");
   const contactDesignation = contact?.designation || (contacts.length === 0 ? customer?.designation : "");
   const contactEmail = contact?.email || (contacts.length === 0 ? customer?.email : "");
   const contactPhone = contact?.phone || (contacts.length === 0 ? customer?.phone : "");
   const contactMobile = contact?.mobile;
+  // The contact's own site address outranks the company's default one.
+  const location = resolveLocation(customer, contact, getString(quote?.stage_meta?.customer_location_id));
 
   inherit("buyer_name", quote?.customer, customer?.name);
-  inherit("buyer_address_line1", customer?.address_line1);
-  inherit("buyer_address_line2", customer?.address_line2);
-  inherit("buyer_city", customer?.city);
-  inherit("buyer_state", customer?.state);
-  inherit("buyer_pin_code", customer?.pin_code);
-  inherit("buyer_country", customer?.country);
-  inherit("gst_no", customer?.gst_no);
+  inherit("buyer_address_line1", location?.address_line1, customer?.address_line1);
+  inherit("buyer_address_line2", location?.address_line2, customer?.address_line2);
+  inherit("buyer_city", location?.city, customer?.city);
+  inherit("buyer_state", location?.state, customer?.state);
+  inherit("buyer_pin_code", location?.pin_code, customer?.pin_code);
+  inherit("buyer_country", location?.country, customer?.country);
+  inherit("gst_no", location?.gst_no, customer?.gst_no);
   inherit("attention", contactName);
   inherit("designation", contactDesignation);
   inherit("email", contactEmail);
@@ -1653,6 +1709,16 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const [addContactOpen, setAddContactOpen] = React.useState(false);
   const [addingContact, setAddingContact] = React.useState(false);
   const [newContact, setNewContact] = React.useState<NewContactInput>({ name: "" });
+  const [addLocationOpen, setAddLocationOpen] = React.useState(false);
+  const [addingLocation, setAddingLocation] = React.useState(false);
+  const [newLocation, setNewLocation] = React.useState<NewLocationInput>({});
+  // "Edit details" writes the correction back to the customer master, so it holds
+  // a draft of all three records (company, chosen site, chosen person) at once.
+  const [editDetailsOpen, setEditDetailsOpen] = React.useState(false);
+  const [savingDetails, setSavingDetails] = React.useState(false);
+  const [editCompanyDraft, setEditCompanyDraft] = React.useState<Partial<CustomerRecord>>({});
+  const [editLocationDraft, setEditLocationDraft] = React.useState<Partial<CustomerLocation>>({});
+  const [editContactDraft, setEditContactDraft] = React.useState<Partial<ContactPerson>>({});
   const [raiseQueryOpen, setRaiseQueryOpen] = React.useState(false);
   const [raiseQueryTarget, setRaiseQueryTarget] = React.useState("");
   const [raiseQueryNote, setRaiseQueryNote] = React.useState("");
@@ -1777,6 +1843,11 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       (item.from as readonly string[]).includes(currentWorkflowStep) &&
       (currentUser.role === "admin" || (item.roles as readonly string[]).includes(currentUser.role)),
   );
+  // Estimation must fill the whole enquiry header before the enquiry goes
+  // anywhere — spec check included. The API rejects an incomplete handoff; this
+  // is the same rule read from the record so the checklist is on screen before
+  // the button is pressed (mirrors lib/enquiry-details.ts).
+  const enquiryDetailGapList = React.useMemo(() => enquiryDetailGaps(quote), [quote]);
   const canRunMaterialPhase1 = canEditWorkflow;
   const canEditMaterialPhase2 = canRole(currentUser.role, "edit_material_phase2", accessSettings);
   // Change queries: anyone except viewers can raise one; deciding them needs an
@@ -1831,6 +1902,25 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       hint: contact.name && contact.email ? contact.email : contact.designation || undefined,
     })),
     [selectedCustomerRecord],
+  );
+  const selectedContactRecord = React.useMemo(
+    () => (selectedCustomerRecord?.contacts ?? []).find((row) => row.id === getString(quote?.stage_meta?.customer_contact_id)),
+    [selectedCustomerRecord, quote?.stage_meta?.customer_contact_id],
+  );
+  const customerLocations = React.useMemo(() => selectedCustomerRecord?.locations ?? [], [selectedCustomerRecord]);
+  const locationOptions = React.useMemo<ComboboxOption[]>(
+    () => customerLocations.map((location) => ({
+      value: location.id,
+      label: locationLabel(location),
+      hint: locationAddressText(location) || undefined,
+    })),
+    [customerLocations],
+  );
+  // The site actually in force: the one explicitly chosen, else the chosen
+  // contact's own, else the only one the company has.
+  const selectedLocationRecord = React.useMemo(
+    () => resolveLocation(selectedCustomerRecord, selectedContactRecord, getString(quote?.stage_meta?.customer_location_id)),
+    [selectedCustomerRecord, selectedContactRecord, quote?.stage_meta?.customer_location_id],
   );
   // EPC / project company choices come from the customer master itself, with any
   // separately saved EPC presets appended (deduped) so older selections still list.
@@ -3748,6 +3838,34 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     };
   }
 
+  /**
+   * Overwrite the buyer address block from a customer site.
+   *
+   * The address is the site's when one is in force, and the company's default
+   * otherwise — never a mix of the two, or the PDF would print a city from one
+   * site next to the street of another.
+   */
+  function locationQuoteData(
+    base: Record<string, unknown>,
+    customer: CustomerRecord,
+    location?: CustomerLocation,
+  ): Record<string, unknown> {
+    const source = location ?? customer;
+    const next: Record<string, unknown> = {
+      ...base,
+      buyer_name: customer.name,
+      buyer_address_line1: getString(source.address_line1),
+      buyer_address_line2: getString(source.address_line2),
+      buyer_city: getString(source.city),
+      buyer_state: getString(source.state),
+      buyer_pin_code: getString(source.pin_code),
+      buyer_country: getString(source.country),
+      gst_no: getString(location?.gst_no) || getString(customer.gst_no),
+    };
+    next.buyer_name_address = buyerNameAddressText(next);
+    return next;
+  }
+
   function selectCustomer(customerId: string) {
     const customer = masterData.customers.find((row) => row.id === customerId);
     if (customer) applyCustomer(customer);
@@ -3764,22 +3882,22 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         ? { id: "", name: customer.contact_name, designation: customer.designation, department: "", email: customer.email, phone: customer.phone, mobile: "" }
         : undefined;
     const appliedContact = soleContact ?? legacyContact;
+    // A single-site company (or the sole contact's own site) needs no second
+    // choice — fill the address now; a multi-site company waits for the Location
+    // dropdown rather than guessing one of its plants.
+    const appliedLocation = resolveLocation(customer, appliedContact);
     const nextQuoteData = quoteDataWithDefaults(
       contactQuoteData(
-        {
-          ...qd,
-          buyer_name: customer.name,
-          buyer_address_line1: customer.address_line1,
-          buyer_address_line2: customer.address_line2,
-          buyer_city: customer.city,
-          buyer_state: customer.state,
-          buyer_pin_code: customer.pin_code,
-          buyer_country: customer.country,
-          gst_no: customer.gst_no,
-          currency: customer.default_currency || getString(qd.currency) || "INR",
-          payment_terms: customer.payment_terms || qd.payment_terms,
-          delivery: customer.delivery_terms || qd.delivery,
-        },
+        locationQuoteData(
+          {
+            ...qd,
+            currency: customer.default_currency || getString(qd.currency) || "INR",
+            payment_terms: customer.payment_terms || qd.payment_terms,
+            delivery: customer.delivery_terms || qd.delivery,
+          },
+          customer,
+          appliedLocation,
+        ),
         appliedContact,
       ),
     );
@@ -3790,8 +3908,9 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
         ...(quote.stage_meta ?? {}),
         customer_master_id: customer.id,
         customer_contact_id: soleContact?.id ?? "",
-        country: customer.country || quote.stage_meta?.country,
-        city: customer.city || quote.stage_meta?.city,
+        customer_location_id: appliedLocation?.id ?? "",
+        country: appliedLocation?.country || customer.country || quote.stage_meta?.country,
+        city: appliedLocation?.city || customer.city || quote.stage_meta?.city,
       },
     });
   }
@@ -3800,10 +3919,40 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
     if (!quote) return;
     const customer = masterData.customers.find((row) => row.id === getString(quote.stage_meta?.customer_master_id));
     const contact = customer?.contacts?.find((row) => row.id === contactId);
-    if (!contact) return;
+    if (!customer || !contact) return;
+    // Picking the person is what settles the site for most enquiries: contacts
+    // are imported with the plant they sit at. Only fall back to whatever site
+    // was already chosen when this person has none of their own.
+    const location =
+      resolveLocation(customer, contact) ?? resolveLocation(customer, undefined, getString(quote.stage_meta?.customer_location_id));
+    const nextQuoteData = quoteDataWithDefaults(
+      contactQuoteData(location ? locationQuoteData({ ...qd }, customer, location) : { ...qd }, contact),
+    );
     updateQuoteDraft({
-      quote_data: quoteDataWithDefaults(contactQuoteData({ ...qd }, contact)),
-      stage_meta: { ...(quote.stage_meta ?? {}), customer_contact_id: contact.id },
+      quote_data: nextQuoteData,
+      stage_meta: {
+        ...(quote.stage_meta ?? {}),
+        customer_contact_id: contact.id,
+        customer_location_id: location?.id ?? "",
+        country: location?.country || quote.stage_meta?.country,
+        city: location?.city || quote.stage_meta?.city,
+      },
+    });
+  }
+
+  function selectLocation(locationId: string) {
+    if (!quote) return;
+    const customer = masterData.customers.find((row) => row.id === getString(quote.stage_meta?.customer_master_id));
+    const location = (customer?.locations ?? []).find((row) => row.id === locationId);
+    if (!customer || !location) return;
+    updateQuoteDraft({
+      quote_data: quoteDataWithDefaults(locationQuoteData({ ...qd }, customer, location)),
+      stage_meta: {
+        ...(quote.stage_meta ?? {}),
+        customer_location_id: location.id,
+        country: location.country || quote.stage_meta?.country,
+        city: location.city || quote.stage_meta?.city,
+      },
     });
   }
 
@@ -3847,9 +3996,16 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       }));
       const contact = updated.contacts?.[updated.contacts.length - 1];
       if (contact && quote) {
+        const location = resolveLocation(updated, contact, getString(quote.stage_meta?.customer_location_id));
         updateQuoteDraft({
-          quote_data: quoteDataWithDefaults(contactQuoteData({ ...qd }, contact)),
-          stage_meta: { ...(quote.stage_meta ?? {}), customer_contact_id: contact.id },
+          quote_data: quoteDataWithDefaults(
+            contactQuoteData(location ? locationQuoteData({ ...qd }, updated, location) : { ...qd }, contact),
+          ),
+          stage_meta: {
+            ...(quote.stage_meta ?? {}),
+            customer_contact_id: contact.id,
+            customer_location_id: location?.id ?? "",
+          },
         });
       }
       setAddContactOpen(false);
@@ -3859,6 +4015,147 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       toast.error(error instanceof Error ? error.message : "Could not add contact");
     } finally {
       setAddingContact(false);
+    }
+  }
+
+  async function saveNewLocation() {
+    if (!selectedCustomerRecord) {
+      toast.error("Select a customer first");
+      return;
+    }
+    const hasAnything = [newLocation.label, newLocation.city, newLocation.state, newLocation.country].some(
+      (value) => (value ?? "").trim(),
+    );
+    if (!hasAnything) {
+      toast.error("Give the location a label, or a city / state / country");
+      return;
+    }
+    setAddingLocation(true);
+    try {
+      const updated = await addCustomerLocation(selectedCustomerRecord.id, newLocation);
+      setMasterData((current) => ({
+        ...current,
+        customers: current.customers.map((row) => (row.id === updated.id ? updated : row)),
+      }));
+      const location = updated.locations?.[updated.locations.length - 1];
+      if (location && quote) {
+        // A freshly added site is the one the user means for this enquiry.
+        updateQuoteDraft({
+          quote_data: quoteDataWithDefaults(locationQuoteData({ ...qd }, updated, location)),
+          stage_meta: {
+            ...(quote.stage_meta ?? {}),
+            customer_location_id: location.id,
+            country: location.country || quote.stage_meta?.country,
+            city: location.city || quote.stage_meta?.city,
+          },
+        });
+      }
+      setAddLocationOpen(false);
+      setNewLocation({});
+      toast.success(`Location added: ${location ? locationLabel(location) : "saved"}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not add the location");
+    } finally {
+      setAddingLocation(false);
+    }
+  }
+
+  /** Seed the edit dialog from whatever is currently selected. */
+  function openEditDetails() {
+    if (!selectedCustomerRecord) {
+      toast.error("Select a customer first");
+      return;
+    }
+    const customer = selectedCustomerRecord;
+    setEditCompanyDraft({
+      name: customer.name,
+      gst_no: customer.gst_no,
+      payment_terms: customer.payment_terms,
+      delivery_terms: customer.delivery_terms,
+    });
+    setEditLocationDraft(
+      selectedLocationRecord
+        ? { ...selectedLocationRecord }
+        : {
+            // No site on record yet — offer the company's own address as the
+            // starting point so the edit creates the first location instead of
+            // making the user retype what is already there.
+            address_line1: customer.address_line1,
+            address_line2: customer.address_line2,
+            city: customer.city,
+            state: customer.state,
+            pin_code: customer.pin_code,
+            country: customer.country,
+          },
+    );
+    setEditContactDraft(selectedContactRecord ? { ...selectedContactRecord } : {});
+    setEditDetailsOpen(true);
+  }
+
+  /**
+   * Write the dialog's corrections back to the customer master, then re-apply
+   * them to this enquiry so the buyer block and the PDF pick them up at once.
+   */
+  async function saveEditedDetails() {
+    if (!selectedCustomerRecord || !quote) return;
+    const customerId = selectedCustomerRecord.id;
+    const companyName = (editCompanyDraft.name ?? "").trim();
+    if (!companyName) {
+      toast.error("Enter the company name");
+      return;
+    }
+    setSavingDetails(true);
+    try {
+      let updated = await updateCustomerRecord(customerId, { ...editCompanyDraft, name: companyName });
+      const locationFilled = ["address_line1", "address_line2", "city", "state", "pin_code", "country", "label"].some(
+        (key) => getString(editLocationDraft[key as keyof CustomerLocation]).trim(),
+      );
+      if (locationFilled) {
+        updated = selectedLocationRecord
+          ? await updateCustomerLocation(customerId, selectedLocationRecord.id, editLocationDraft)
+          : await addCustomerLocation(customerId, editLocationDraft);
+      }
+      if (selectedContactRecord && (editContactDraft.name ?? "").trim()) {
+        updated = await updateCustomerContact(customerId, selectedContactRecord.id, {
+          name: (editContactDraft.name ?? "").trim(),
+          designation: editContactDraft.designation ?? "",
+          department: editContactDraft.department ?? "",
+          email: editContactDraft.email ?? "",
+          phone: editContactDraft.phone ?? "",
+          mobile: editContactDraft.mobile ?? "",
+        });
+      }
+      setMasterData((current) => ({
+        ...current,
+        customers: current.customers.map((row) => (row.id === updated.id ? updated : row)),
+      }));
+      const contact = selectedContactRecord
+        ? updated.contacts?.find((row) => row.id === selectedContactRecord.id)
+        : undefined;
+      const location =
+        (selectedLocationRecord
+          ? updated.locations?.find((row) => row.id === selectedLocationRecord.id)
+          : updated.locations?.[updated.locations.length - 1]) ?? resolveLocation(updated, contact);
+      const withAddress = locationQuoteData({ ...qd }, updated, location);
+      updateQuoteDraft({
+        customer: updated.name,
+        // Re-apply the contact only when one is selected — contactQuoteData
+        // overwrites the attention/email/phone keys, so calling it without a
+        // contact would wipe details typed straight onto the enquiry.
+        quote_data: quoteDataWithDefaults(contact ? contactQuoteData(withAddress, contact) : withAddress),
+        stage_meta: {
+          ...(quote.stage_meta ?? {}),
+          customer_location_id: location?.id ?? "",
+          country: location?.country || quote.stage_meta?.country,
+          city: location?.city || quote.stage_meta?.city,
+        },
+      });
+      setEditDetailsOpen(false);
+      toast.success("Customer details updated");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not save the details");
+    } finally {
+      setSavingDetails(false);
     }
   }
 
@@ -4020,6 +4317,14 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
 
   async function runWorkflowAction(action: string) {
     if (!quote) return;
+    // An enquiry with a blank in its header does not move on. Open the setup
+    // dialog on the missing fields instead of letting the API reject it.
+    const detailGate = enquiryDetailGateMessage(action, quote);
+    if (detailGate) {
+      toast.error(detailGate);
+      setEnquirySetupOpen(true);
+      return;
+    }
     const comment = workflowComment.trim();
     // Some handoffs are rejected without a note: sales must be told what is
     // missing, the reviewer must say WHAT is wrong when returning an enquiry, and
@@ -5446,6 +5751,27 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               </div>
             </details>
           ) : null}
+          {/* An enquiry with a blank in its header goes nowhere — name every
+              missing field so estimation can finish the setup in one pass. */}
+          {enquiryDetailGapList.length > 0 && (
+            <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-950/30 dark:text-amber-200">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 font-medium">
+                  <AlertTriangle className="h-3.5 w-3.5" />
+                  {enquiryDetailGapList.length} enquiry detail{enquiryDetailGapList.length === 1 ? "" : "s"} still to fill — this enquiry cannot move forward until they are complete
+                </span>
+                <Button variant="secondary" size="sm" onClick={() => setEnquirySetupOpen(true)}>
+                  <FileText className="h-4 w-4" />
+                  Complete enquiry setup
+                </Button>
+              </div>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {enquiryDetailGapList.map((label) => (
+                  <Badge key={label} variant="outline">{label}</Badge>
+                ))}
+              </div>
+            </div>
+          )}
           {availableWorkflowActions.length > 0 ? (
             <div className="mt-3 space-y-2">
               <textarea
@@ -5464,12 +5790,15 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   // estimation's reply on a re-submission).
                   const noteRequired = workflowNoteRequirement(item.action, lastWorkflowAction);
                   const noteMissing = Boolean(noteRequired) && !workflowComment.trim();
+                  // Blocked while the enquiry header is incomplete — except for
+                  // the handoffs that exist to get it completed.
+                  const detailGate = enquiryDetailGateMessage(item.action, quote);
                   return (
                     <Button
                       key={item.action}
                       size="sm"
-                      disabled={noteMissing}
-                      title={noteMissing ? noteRequired : undefined}
+                      disabled={noteMissing || Boolean(detailGate)}
+                      title={detailGate || (noteMissing ? noteRequired : undefined)}
                       onClick={() => runWorkflowAction(item.action)}
                     >
                       <ArrowRight className="h-4 w-4" />
@@ -5614,6 +5943,225 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           </DialogContent>
         </Dialog>
 
+        <Dialog open={addLocationOpen} onOpenChange={setAddLocationOpen}>
+          <DialogContent className="max-w-lg">
+            <DialogHeader>
+              <DialogTitle>Add location</DialogTitle>
+              <DialogDescription>
+                Add another site or plant address for {selectedCustomerRecord?.name || "the selected customer"}. It will be
+                selected for this enquiry and offered in the Location dropdown from now on.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="md:col-span-2">
+                <Field
+                  label="Location name"
+                  value={newLocation.label ?? ""}
+                  onChange={(value) => setNewLocation((current) => ({ ...current, label: value }))}
+                />
+              </div>
+              <div className="md:col-span-2">
+                <Field
+                  label="Address line 1"
+                  value={newLocation.address_line1 ?? ""}
+                  onChange={(value) => setNewLocation((current) => ({ ...current, address_line1: value }))}
+                />
+              </div>
+              <div className="md:col-span-2">
+                <Field
+                  label="Address line 2"
+                  value={newLocation.address_line2 ?? ""}
+                  onChange={(value) => setNewLocation((current) => ({ ...current, address_line2: value }))}
+                />
+              </div>
+              <Field
+                label="City"
+                value={newLocation.city ?? ""}
+                onChange={(value) => setNewLocation((current) => ({ ...current, city: value }))}
+              />
+              <Field
+                label="State"
+                value={newLocation.state ?? ""}
+                onChange={(value) => setNewLocation((current) => ({ ...current, state: value }))}
+              />
+              <Field
+                label="PIN / ZIP"
+                value={newLocation.pin_code ?? ""}
+                onChange={(value) => setNewLocation((current) => ({ ...current, pin_code: value }))}
+              />
+              <Field
+                label="Country"
+                value={newLocation.country ?? ""}
+                onChange={(value) => setNewLocation((current) => ({ ...current, country: value }))}
+                options={COUNTRIES}
+              />
+              <Field
+                label="GST no. (this site)"
+                value={newLocation.gst_no ?? ""}
+                onChange={(value) => setNewLocation((current) => ({ ...current, gst_no: value }))}
+              />
+            </div>
+            <DialogFooter>
+              <Button variant="secondary" onClick={() => setAddLocationOpen(false)}>Cancel</Button>
+              <Button onClick={saveNewLocation} disabled={addingLocation}>
+                {addingLocation ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                Add location
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Editing writes back to the customer master, not just this enquiry —
+            the CRM import it came from has gaps and typos, and the person filling
+            the enquiry is the one who spots them. */}
+        <Dialog open={editDetailsOpen} onOpenChange={setEditDetailsOpen}>
+          <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>Edit customer details</DialogTitle>
+              <DialogDescription>
+                Correct the saved details for {selectedCustomerRecord?.name || "this customer"}
+                {selectedLocationRecord ? ` — ${locationLabel(selectedLocationRecord)}` : ""}. Changes are saved to the
+                customer master and re-applied to this enquiry.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4">
+              <div className="space-y-3">
+                <div className="text-xs font-medium text-muted-foreground">Company</div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="md:col-span-2">
+                    <Field
+                      label="Company name *"
+                      value={editCompanyDraft.name ?? ""}
+                      onChange={(value) => setEditCompanyDraft((current) => ({ ...current, name: value }))}
+                    />
+                  </div>
+                  <Field
+                    label="GST no."
+                    value={editCompanyDraft.gst_no ?? ""}
+                    onChange={(value) => setEditCompanyDraft((current) => ({ ...current, gst_no: value }))}
+                  />
+                  <Field
+                    label="Payment terms default"
+                    value={editCompanyDraft.payment_terms ?? ""}
+                    onChange={(value) => setEditCompanyDraft((current) => ({ ...current, payment_terms: value }))}
+                  />
+                  <Field
+                    label="Delivery terms default"
+                    value={editCompanyDraft.delivery_terms ?? ""}
+                    onChange={(value) => setEditCompanyDraft((current) => ({ ...current, delivery_terms: value }))}
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-3 border-t pt-3">
+                <div className="text-xs font-medium text-muted-foreground">
+                  {selectedLocationRecord ? `Location — ${locationLabel(selectedLocationRecord)}` : "Location (will be added)"}
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="md:col-span-2">
+                    <Field
+                      label="Location name"
+                      value={editLocationDraft.label ?? ""}
+                      onChange={(value) => setEditLocationDraft((current) => ({ ...current, label: value }))}
+                    />
+                  </div>
+                  <div className="md:col-span-2">
+                    <Field
+                      label="Address line 1"
+                      value={editLocationDraft.address_line1 ?? ""}
+                      onChange={(value) => setEditLocationDraft((current) => ({ ...current, address_line1: value }))}
+                    />
+                  </div>
+                  <div className="md:col-span-2">
+                    <Field
+                      label="Address line 2"
+                      value={editLocationDraft.address_line2 ?? ""}
+                      onChange={(value) => setEditLocationDraft((current) => ({ ...current, address_line2: value }))}
+                    />
+                  </div>
+                  <Field
+                    label="City"
+                    value={editLocationDraft.city ?? ""}
+                    onChange={(value) => setEditLocationDraft((current) => ({ ...current, city: value }))}
+                  />
+                  <Field
+                    label="State"
+                    value={editLocationDraft.state ?? ""}
+                    onChange={(value) => setEditLocationDraft((current) => ({ ...current, state: value }))}
+                  />
+                  <Field
+                    label="PIN / ZIP"
+                    value={editLocationDraft.pin_code ?? ""}
+                    onChange={(value) => setEditLocationDraft((current) => ({ ...current, pin_code: value }))}
+                  />
+                  <Field
+                    label="Country"
+                    value={editLocationDraft.country ?? ""}
+                    onChange={(value) => setEditLocationDraft((current) => ({ ...current, country: value }))}
+                    options={COUNTRIES}
+                  />
+                  <Field
+                    label="GST no. (this site)"
+                    value={editLocationDraft.gst_no ?? ""}
+                    onChange={(value) => setEditLocationDraft((current) => ({ ...current, gst_no: value }))}
+                  />
+                </div>
+              </div>
+
+              {selectedContactRecord ? (
+                <div className="space-y-3 border-t pt-3">
+                  <div className="text-xs font-medium text-muted-foreground">Contact person</div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="md:col-span-2">
+                      <Field
+                        label="Contact name *"
+                        value={editContactDraft.name ?? ""}
+                        onChange={(value) => setEditContactDraft((current) => ({ ...current, name: value }))}
+                      />
+                    </div>
+                    <Field
+                      label="Designation"
+                      value={editContactDraft.designation ?? ""}
+                      onChange={(value) => setEditContactDraft((current) => ({ ...current, designation: value }))}
+                    />
+                    <Field
+                      label="Department"
+                      value={editContactDraft.department ?? ""}
+                      onChange={(value) => setEditContactDraft((current) => ({ ...current, department: value }))}
+                    />
+                    <Field
+                      label="Email"
+                      value={editContactDraft.email ?? ""}
+                      onChange={(value) => setEditContactDraft((current) => ({ ...current, email: value }))}
+                    />
+                    <Field
+                      label="Phone"
+                      value={editContactDraft.phone ?? ""}
+                      onChange={(value) => setEditContactDraft((current) => ({ ...current, phone: value }))}
+                    />
+                    <Field
+                      label="Mobile"
+                      value={editContactDraft.mobile ?? ""}
+                      onChange={(value) => setEditContactDraft((current) => ({ ...current, mobile: value }))}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="border-t pt-3 text-xs text-muted-foreground">
+                  Pick a contact person to edit their name, email, phone and designation here too.
+                </div>
+              )}
+            </div>
+            <DialogFooter>
+              <Button variant="secondary" onClick={() => setEditDetailsOpen(false)}>Cancel</Button>
+              <Button onClick={saveEditedDetails} disabled={savingDetails || !(editCompanyDraft.name ?? "").trim()}>
+                {savingDetails ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                Save details
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
         <Dialog open={raiseQueryOpen} onOpenChange={setRaiseQueryOpen}>
           <DialogContent className="max-w-lg">
             <DialogHeader>
@@ -5661,9 +6209,31 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
           <DialogContent className="flex max-h-[90vh] max-w-6xl flex-col overflow-hidden">
             <DialogHeader>
               <DialogTitle>Enquiry setup</DialogTitle>
-              <DialogDescription>Update customer context, ownership, quote type, and optional Outlook details.</DialogDescription>
+              <DialogDescription>
+                Every enquiry detail below is mandatory — the enquiry cannot go for spec check or any later step until they are all filled. Internal notes and the Outlook thread stay optional.
+              </DialogDescription>
             </DialogHeader>
             <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+              {enquiryDetailGapList.length > 0 ? (
+                <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-950/30 dark:text-amber-200">
+                  <div className="inline-flex items-center gap-1.5 font-medium">
+                    <AlertTriangle className="h-3.5 w-3.5" />
+                    Still to fill ({enquiryDetailGapList.length})
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    {enquiryDetailGapList.map((label) => (
+                      <Badge key={label} variant="outline">{label}</Badge>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs text-emerald-900 dark:border-emerald-500/40 dark:bg-emerald-950/30 dark:text-emerald-200">
+                  <span className="inline-flex items-center gap-1.5 font-medium">
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    All enquiry details are filled — this enquiry can move forward.
+                  </span>
+                </div>
+              )}
         <div>
           <details className="rounded-md border bg-background p-2.5" open>
             <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
@@ -5909,6 +6479,61 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                     </Button>
                   )}
                 </div>
+                {/* A company routinely spans several plants, and each contact is
+                    imported with theirs. One site fills silently; several become
+                    a dropdown so the buyer address is never guessed. */}
+                <div className="space-y-1.5">
+                  <Label>Location {customerLocations.length > 1 ? `(${customerLocations.length} sites)` : ""}</Label>
+                  <Combobox
+                    value={selectedLocationRecord?.id ?? ""}
+                    onChange={selectLocation}
+                    options={locationOptions}
+                    placeholder={
+                      !selectedCustomerRecord
+                        ? "Select a customer first"
+                        : locationOptions.length
+                          ? "Select location"
+                          : "No saved locations"
+                    }
+                    searchPlaceholder="Search locations…"
+                    emptyText="No locations for this customer"
+                    disabled={!canAddDetails || !selectedCustomerRecord || locationOptions.length === 0}
+                  />
+                  <div className="text-xs text-muted-foreground">
+                    {selectedLocationRecord
+                      ? locationAddressText(selectedLocationRecord) || "No address saved for this location."
+                      : customerLocations.length > 1
+                        ? "This company has several sites — pick the one this enquiry is for."
+                        : "Fills the buyer address. Picking a contact person selects their location automatically."}
+                  </div>
+                  {canAddDetails && (
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={!selectedCustomerRecord}
+                        title={selectedCustomerRecord ? undefined : "Select a customer first"}
+                        onClick={() => {
+                          setNewLocation({ country: getString(quote.stage_meta?.country), city: getString(quote.stage_meta?.city) });
+                          setAddLocationOpen(true);
+                        }}
+                      >
+                        <Plus className="h-4 w-4" />
+                        Add location
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={!selectedCustomerRecord}
+                        title={selectedCustomerRecord ? undefined : "Select a customer first"}
+                        onClick={openEditDetails}
+                      >
+                        <Pencil className="h-4 w-4" />
+                        Edit details
+                      </Button>
+                    </div>
+                  )}
+                </div>
                 <Field label="Contact person email" value={getString(qd.email)} onChange={(value) => updateQd("email", value)} disabled={!canAddDetails} />
                 <Field label="Contact no" value={getString(qd.contact_no)} onChange={(value) => updateQd("contact_no", value)} disabled={!canAddDetails} />
                 <Field label="Email subject" value={quote.custom_label} onChange={(value) => updateQuoteDraft({ custom_label: value })} disabled={!canAddDetails} />
@@ -5919,7 +6544,13 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
             <details className="rounded-md border bg-background p-2.5" open>
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2"><FileText className="h-4 w-4" />Project details</span>
-                <Badge variant="outline">{quote.project_ref || getString(quote.stage_meta?.epc_name) ? "Added" : "Optional"}</Badge>
+                {/* Mandatory now: the register, the reviewer and the pricing desk
+                    all read these, so a blank cannot be left behind. */}
+                <Badge variant="outline">
+                  {quote.project_ref && getString(quote.stage_meta?.epc_name) && getString(quote.stage_meta?.country) && getString(quote.stage_meta?.city) && getString(quote.stage_meta?.bid_type)
+                    ? "Complete"
+                    : "Required"}
+                </Badge>
               </summary>
               <div className="mt-3 grid gap-3 md:grid-cols-2">
                 <Field label="Project name" value={quote.project_ref} onChange={(value) => updateQuoteDraft({ project_ref: value })} disabled={!canAddDetails} />

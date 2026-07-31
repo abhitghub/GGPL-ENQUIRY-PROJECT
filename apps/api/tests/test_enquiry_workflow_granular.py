@@ -49,19 +49,43 @@ def _headers(org: str, user_id: str) -> dict:
     return {"X-Org-Id": org, "X-User-Id": user_id}
 
 
-def _create_enquiry(client: TestClient, org: str, owner: str = "sales", market_type: str = "domestic") -> str:
-    """Create an enquiry as ESTIMATION (who owns enquiry creation) and assign it
-    to `owner` — estimation decides which sales person owns the record, and the
-    owner keeps read visibility after handoffs. The quote type (market_type) is
-    set up front, as in the enquiry setup form."""
+# One line item, so the enquiry has something to spec-check and price.
+_LINE_ITEM = {"raw_description": "SPW 6IN 150# CS/GRAPHITE 3.2THK", "quantity": 10, "uom": "NOS"}
+
+
+def _create_enquiry(
+    client: TestClient,
+    org: str,
+    owner: str = "sales",
+    market_type: str = "domestic",
+    items: list[dict] | None = None,
+) -> str:
+    """File a COMPLETE enquiry as ESTIMATION (who owns enquiry creation) and
+    assign it to `owner` — estimation decides which sales person owns the record,
+    and the owner keeps read visibility after handoffs.
+
+    Every enquiry detail is mandatory before the enquiry may leave a stage (see
+    REQUIRED_ENQUIRY_DETAILS), so the fixture fills the whole header as the setup
+    form does. Tests that probe that gate blank a field on purpose.
+    """
     created = client.post(
         "/api/v1/quotes",
         headers=_headers(org, "estimation"),
         json={
             "customer": "ACME",
             "project_ref": "P-GW",
-            "items": [],
-            "stage_meta": {"owner_id": owner, "market_type": market_type},
+            "custom_label": "RFQ - spiral wound gaskets",
+            "items": [_LINE_ITEM] if items is None else items,
+            "quote_data": {"attention": "R Kumar", "email": "rkumar@acme.test", "contact_no": "+91 90000 00000"},
+            "stage_meta": {
+                "owner_id": owner,
+                "market_type": market_type,
+                "bid_type": "firm",
+                "country": "India",
+                "city": "Chennai",
+                "epc_name": "ACME Projects Ltd",
+                "due_date": "2026-08-31",
+            },
         },
     )
     assert created.status_code == 201, created.text
@@ -133,7 +157,9 @@ def test_granular_happy_path(granular):
     assert _stage(tr) == "technical_review_pending"
     # Technical review done -> straight into the admin pricing queue.
     assert _stage(_act(client, org, "jagadeeshan", qid, "return_tr_spec")) == "sent_for_pricing"
-    # Admin releases the enquiry back to estimation to price, no formula needed.
+    # The pricing desk writes the rate rule for the enquiry's spec, then releases
+    # it to estimation.
+    _set_formulas(client, org, "shashnam", qid, [{"item": "SPW 6IN 150#", "count": 1, "formula": "weight x rate + 20%"}])
     assert _stage(_act(client, org, "shashnam", qid, "open_pricing")) == "pricing_decision"
     # Estimation prices and submits the quotation for generation.
     assert _stage(_act(client, org, "estimation", qid, "submit_priced_quotation")) == "pricing_submitted"
@@ -165,9 +191,10 @@ def test_generate_route_derived_from_market_type(granular):
         ("estimation", "begin_spec_check"),
         ("estimation", "send_to_technical_review"),
         ("jagadeeshan", "return_tr_spec"),
-        ("shashnam", "open_pricing"),
-        ("estimation", "submit_priced_quotation"),
     ]:
+        _act(client, org, role, qid, action)
+    _set_formulas(client, org, "shashnam", qid, [{"item": "SPW 6IN 150#", "count": 1, "formula": "weight x rate"}])
+    for role, action in [("shashnam", "open_pricing"), ("estimation", "submit_priced_quotation")]:
         _act(client, org, role, qid, action)
     generated = _act(client, org, "sales", qid, "generate_quotation")
     assert _stage(generated) == "quotation_generated"
@@ -250,7 +277,9 @@ def test_admin_releases_an_empty_enquiry_without_a_formula(granular):
     a free-text note stays an ordinary workflow_comment."""
     client = TestClient(app)
     org = f"org-gw-formula-{uuid.uuid4().hex}"
-    qid = _create_enquiry(client, org)
+    # Every line regretted: the enquiry is complete (it HAS line items) but there
+    # is no priceable spec, so no formula can be asked for.
+    qid = _create_enquiry(client, org, items=[{**_LINE_ITEM, "status": "regret"}])
 
     _act(client, org, "estimation", qid, "begin_spec_check")
     _act(client, org, "estimation", qid, "send_to_pricing_direct")
@@ -502,6 +531,151 @@ def test_spec_editors_can_fix_columns_at_any_stage(granular, editor):
     assert _stage(patched) == "technical_review_pending"
     if editor == "estimation":
         _act_blocked(client, org, editor, qid, "return_tr_spec")
+
+
+def _detail_blockers(resp) -> list[str]:
+    detail = resp.json()["detail"]
+    assert isinstance(detail, dict), detail
+    return detail["blockers"]
+
+
+def test_incomplete_enquiry_cannot_start_spec_check(granular):
+    """Estimation must fill the whole enquiry header before the enquiry goes
+    anywhere: a bare record cannot even begin spec check, and the response names
+    every field that is still missing."""
+    client = TestClient(app)
+    org = f"org-gw-details-{uuid.uuid4().hex}"
+    bare = client.post(
+        "/api/v1/quotes",
+        headers=_headers(org, "estimation"),
+        json={"customer": "ACME", "items": [], "stage_meta": {"owner_id": "sales"}},
+    )
+    assert bare.status_code == 201, bare.text
+    qid = bare.json()["id"]
+
+    blocked = _act(client, org, "estimation", qid, "begin_spec_check", expect=422)
+    blockers = _detail_blockers(blocked)
+    for label in [
+        "Contact person",
+        "Contact person email",
+        "Contact number",
+        "Email subject",
+        "Quote type (export or domestic)",
+        "Bidding or firm",
+        "Project name",
+        "Country",
+        "City",
+        "EPC / project company",
+        "Due date",
+        "Line items (at least one)",
+    ]:
+        assert label in blockers, f"{label} should be listed as missing: {blockers}"
+    # Filled in by the customer master / enquiry number, so never in the gaps.
+    assert "Customer" not in blockers and "Enquiry reference" not in blockers
+    # The enquiry has not budged.
+    assert _stage_meta(client, org, "estimation", qid).get("workflow_stage") in (None, "", "enquiry_received")
+
+    # Admin is not a way around it — the gate is about the record, not the role.
+    _act(client, org, "shashnam", qid, "begin_spec_check", expect=422)
+
+    # Complete the header and the enquiry moves.
+    filled = client.patch(
+        f"/api/v1/quotes/{qid}",
+        headers=_headers(org, "estimation"),
+        json={
+            "custom_label": "RFQ - spiral wound gaskets",
+            "project_ref": "P-GW",
+            "items": [_LINE_ITEM],
+            "quote_data": {"attention": "R Kumar", "email": "rkumar@acme.test", "contact_no": "+91 90000 00000"},
+            "stage_meta": {
+                "market_type": "domestic",
+                "bid_type": "firm",
+                "country": "India",
+                "city": "Chennai",
+                "epc_name": "ACME Projects Ltd",
+                "due_date": "2026-08-31",
+            },
+        },
+    )
+    assert filled.status_code == 200, filled.text
+    assert _stage(_act(client, org, "estimation", qid, "begin_spec_check")) == "spec_check"
+
+
+def test_detail_gate_holds_every_later_handoff_but_not_the_query_loop(granular):
+    """The rule is not only the spec-check door: a detail blanked later blocks the
+    handoffs that would carry the enquiry forward, while the customer-query loop —
+    the route to GETTING it completed — stays open."""
+    client = TestClient(app)
+    org = f"org-gw-details-later-{uuid.uuid4().hex}"
+    qid = _create_enquiry(client, org)
+    _act(client, org, "estimation", qid, "begin_spec_check")
+
+    blanked = client.patch(
+        f"/api/v1/quotes/{qid}",
+        headers=_headers(org, "estimation"),
+        json={"stage_meta": {"epc_name": ""}},
+    )
+    assert blanked.status_code == 200, blanked.text
+
+    for action in ["send_to_technical_review", "send_to_pricing_direct"]:
+        stopped = _act(client, org, "estimation", qid, action, expect=422)
+        assert _detail_blockers(stopped) == ["EPC / project company"]
+    # Raising the query to sales/the customer is exempt, so the enquiry can still
+    # be chased — and answering it comes back to spec check as usual.
+    assert _stage(_act(client, org, "estimation", qid, "raise_customer_query", comment="EPC name?")) == "query_raised_to_customer"
+    assert _stage(_act(client, org, "sales", qid, "answer_customer_query", comment="EPC is ACME Projects Ltd")) == "spec_check"
+    # Still blocked until the answer is actually recorded on the enquiry.
+    _act(client, org, "estimation", qid, "send_to_technical_review", expect=422)
+    refilled = client.patch(
+        f"/api/v1/quotes/{qid}",
+        headers=_headers(org, "estimation"),
+        json={"stage_meta": {"epc_name": "ACME Projects Ltd"}},
+    )
+    assert refilled.status_code == 200, refilled.text
+    assert _stage(_act(client, org, "estimation", qid, "send_to_technical_review")) == "technical_review_pending"
+
+
+def test_reviewer_can_always_return_an_incomplete_enquiry(granular):
+    """A spec returned by the reviewer is the other exempt handoff: the enquiry
+    must be able to go BACK to estimation however incomplete it is."""
+    client = TestClient(app)
+    org = f"org-gw-details-return-{uuid.uuid4().hex}"
+    qid = _create_enquiry(client, org)
+    _act(client, org, "estimation", qid, "begin_spec_check")
+    _act(client, org, "estimation", qid, "send_to_technical_review")
+
+    blanked = client.patch(
+        f"/api/v1/quotes/{qid}",
+        headers=_headers(org, "estimation"),
+        json={"stage_meta": {"due_date": ""}},
+    )
+    assert blanked.status_code == 200, blanked.text
+    # The reviewer cannot clear it for pricing while a detail is blank...
+    stopped = _act(client, org, "jagadeeshan", qid, "return_tr_spec", expect=422)
+    assert _detail_blockers(stopped) == ["Due date"]
+    # ...but returning it to estimation always works.
+    returned = _act(client, org, "jagadeeshan", qid, "return_spec_errors", comment="Due date dropped off the enquiry")
+    assert _stage(returned) == "spec_check"
+
+
+def test_legacy_machine_also_requires_the_details():
+    """Flag off: the same rule guards the legacy handoff, so the enquiry register
+    and the quotation never see a half-filled record on either machine."""
+    get_settings.cache_clear()
+    client = TestClient(app)
+    org = f"org-gw-details-legacy-{uuid.uuid4().hex}"
+    bare = client.post(
+        "/api/v1/quotes",
+        headers=_headers(org, "estimation"),
+        json={"customer": "ACME", "items": [], "stage_meta": {"owner_id": "sales"}},
+    )
+    assert bare.status_code == 201, bare.text
+    qid = bare.json()["id"]
+    blocked = _act(client, org, "sales", qid, "send_to_estimation", expect=422)
+    assert "Project name" in _detail_blockers(blocked)
+    # A complete enquiry moves as it always did.
+    complete = _create_enquiry(client, org)
+    assert _stage(_act(client, org, "sales", complete, "send_to_estimation")) == "estimation_review"
 
 
 def test_granular_is_superset_of_legacy(granular):
