@@ -103,9 +103,14 @@ export const defaultAccessSettings: AccessSettings = {
       "view_dashboard", "view_enquiry", "view_doc_assistant", "view_history",
       "create_enquiry", "edit_sales_details", "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
     ]),
+    // Technical review is a REVIEW-ONLY role (mirrors DEFAULT_ACCESS_SETTINGS in
+    // apps/api/app/db/repositories.py): read the specs, then pass the enquiry to
+    // pricing or return it to estimation with the error list. It fixes nothing
+    // itself — estimation makes the changes and re-submits — so it gets no edit
+    // capability. The two review handoffs are gated on stage ownership, not on a
+    // capability, so they stay available.
     technical: permissions([
       "view_dashboard", "view_enquiry", "view_doc_assistant", "view_history",
-      "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
     ]),
     planning: permissions([
       "view_dashboard", "view_enquiry", "view_material_planning", "view_purchase_orders", "view_history",

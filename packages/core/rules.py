@@ -2210,6 +2210,16 @@ def apply_rules(item: dict) -> dict:
     Returns updated item dict.
     """
     _sanitize_llm_nulls(item)
+    # Derived outputs are rebuilt from scratch on every run, never carried over
+    # from the stored row. `flags` already worked this way; `escalation` and
+    # `deviation_notes` did not, so once a row escalated ("KINDLY PROVIDE
+    # DATASHEET…") the phrase outranked the description forever — an operator
+    # could fill in every missing column and the GGPL Description cell would
+    # never change, because describe_item returns the escalation verbatim and
+    # the status stayed `missing`. Clearing them here means a recompute after a
+    # column edit re-derives the escalation from the CURRENT field values.
+    item.pop('escalation', None)
+    item.pop('deviation_notes', None)
     # Operator-selected NON STANDARD: canonicalize early so it stays a truthy
     # value — every `if not item.get('standard')` default is naturally skipped
     # and the formatter suppresses the tag in the description.
@@ -2565,15 +2575,18 @@ def apply_rules(item: dict) -> dict:
         if _requires_review_for_default(default, gasket_type, item)
     ]
 
+    # Like flags/escalation, the register of what the engine chose is a derived
+    # output — write it every run so a row that stops needing a default does not
+    # keep showing the old one.
+    item['applied_defaults'] = applied_defaults
+
     if item.get('escalation'):
         # Escalation phrase IS the GGPL description; status reflects the ask
         item['status'] = STATUS_REGRET if item['escalation'] == ESC_REGRET else STATUS_MISSING
-        item['applied_defaults'] = applied_defaults
     elif missing_critical or any('ambiguous' in f.lower() or 'missing critical' in f.lower() for f in flags):
         item['status'] = STATUS_MISSING
     elif review_defaults or flags:
         item['status'] = STATUS_CHECK
-        item['applied_defaults'] = applied_defaults
     else:
         item['status'] = STATUS_READY
 

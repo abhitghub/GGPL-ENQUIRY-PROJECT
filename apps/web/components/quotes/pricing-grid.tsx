@@ -14,9 +14,11 @@ import { toNumber } from "@/lib/api";
 // quotation prints "Will quote soon" for it and it carries no value into the
 // totals. Type any of yes/y/gtq/true/1 in the GTQ cell to set it.
 
-type ColKey = "sl" | "desc" | "ggpl" | "qty" | "uom" | "unit" | "disc" | "gtq" | "final" | "total";
+type ColKey = "sl" | "desc" | "ggpl" | "qty" | "uom" | "unit" | "disc" | "gtq" | "final" | "total" | "formula";
 
-const COLS: Array<{ key: ColKey; label: string; editable: boolean; className: string }> = [
+type Col = { key: ColKey; label: string; editable: boolean; className: string };
+
+const BASE_COLS: Col[] = [
   { key: "sl", label: "#", editable: false, className: "w-12 text-center" },
   { key: "desc", label: "Description", editable: false, className: "min-w-[280px]" },
   { key: "ggpl", label: "GGPL description", editable: false, className: "min-w-[280px]" },
@@ -29,6 +31,10 @@ const COLS: Array<{ key: ColKey; label: string; editable: boolean; className: st
   { key: "total", label: "Total", editable: false, className: "w-28 text-right" },
 ];
 
+// Read-only context column, appended only when the enquiry carries per-spec
+// pricing formulas: the rule the pricing desk set for this line's spec.
+const FORMULA_COL: Col = { key: "formula", label: "Pricing formula", editable: false, className: "min-w-[220px]" };
+
 const GTQ_LABEL = "Will quote soon";
 const GTQ_TRUE = new Set(["yes", "y", "gtq", "true", "1", "will quote soon", "quote soon"]);
 
@@ -36,7 +42,9 @@ function parseGtq(raw: string): boolean {
   return GTQ_TRUE.has(String(raw).trim().toLowerCase());
 }
 
-const EDITABLE_COLS = COLS.map((col, index) => (col.editable ? index : -1)).filter((index) => index >= 0);
+// Every editable column lives in BASE_COLS, so these indices hold whether or
+// not the read-only formula column is appended.
+const EDITABLE_COLS = BASE_COLS.map((col, index) => (col.editable ? index : -1)).filter((index) => index >= 0);
 
 type Range = { minRow: number; maxRow: number; minCol: number; maxCol: number };
 
@@ -57,6 +65,7 @@ export function PricingGrid({
   lineDiscounts,
   lineGtq,
   canEdit,
+  formulas,
   onApply,
 }: {
   items: GasketItem[];
@@ -64,8 +73,12 @@ export function PricingGrid({
   lineDiscounts: number[];
   lineGtq: boolean[];
   canEdit: boolean;
+  /** Per-line pricing formula (the spec's rule, set by the pricing desk). */
+  formulas?: string[];
   onApply: (next: { unit_prices: number[]; line_discounts_pct: number[]; line_gtq: boolean[] }) => void;
 }) {
+  const showFormula = Boolean(formulas?.some((formula) => formula));
+  const COLS = React.useMemo(() => (showFormula ? [...BASE_COLS, FORMULA_COL] : BASE_COLS), [showFormula]);
   const [active, setActive] = React.useState<{ row: number; col: number } | null>(null);
   const [anchor, setAnchor] = React.useState<{ row: number; col: number } | null>(null);
   const [focus, setFocus] = React.useState<{ row: number; col: number } | null>(null);
@@ -108,6 +121,7 @@ export function PricingGrid({
       case "gtq": return isGtq ? "Yes" : "";
       case "final": return isGtq ? GTQ_LABEL : finalPrice.toFixed(2);
       case "total": return isGtq ? "" : (finalPrice * qty).toFixed(2);
+      case "formula": return formulas?.[row] ?? "";
     }
   }
 
@@ -318,9 +332,9 @@ export function PricingGrid({
                     className={`relative border-b border-r px-2 py-1 align-middle last:border-r-0 ${col.className} ${col.editable && canEdit ? "cursor-cell" : "cursor-default"} ${
                       selected ? "bg-emerald-50 ring-1 ring-inset ring-emerald-400/60 dark:bg-emerald-950/20" : ""
                     } ${isActive ? "ring-2 ring-inset ring-emerald-600" : ""} ${isFillPreview ? "ring-1 ring-inset ring-emerald-500/70" : ""} ${
-                      col.key === "desc" || col.key === "ggpl" ? "max-w-[420px] truncate text-xs" : ""
+                      col.key === "desc" || col.key === "ggpl" || col.key === "formula" ? "max-w-[420px] truncate text-xs" : ""
                     }`}
-                    title={col.key === "desc" || col.key === "ggpl" ? cellValue(row, colIndex) : undefined}
+                    title={col.key === "desc" || col.key === "ggpl" || col.key === "formula" ? cellValue(row, colIndex) : undefined}
                     onMouseDown={(event) => {
                       if ((event.target as HTMLElement).closest("input")) return;
                       event.preventDefault();

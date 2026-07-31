@@ -25,7 +25,12 @@ _NON_STANDARD_TOKENS = {'NON STANDARD', 'NON-STANDARD', 'NONSTANDARD', 'NON STD'
 
 
 def is_non_standard(value) -> bool:
-    return str(value or '').strip().upper() in _NON_STANDARD_TOKENS
+    text = str(value or '').strip().upper()
+    # The house slot form is parenthesised — `(NON STANDARD)` — so accept it
+    # alongside the bare token, or the tag leaks back into the description.
+    if text.startswith('(') and text.endswith(')'):
+        text = text[1:-1].strip()
+    return text in _NON_STANDARD_TOKENS
 
 
 def _display_standard(item: dict, default: str | None = None) -> str | None:

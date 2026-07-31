@@ -90,10 +90,13 @@ import {
   patchQuote,
   raiseChangeQuery,
   readChangeQueries,
+  lastWorkflowActionOf,
   reprocessText,
   resolveOutlookMessage,
+  reviewLoopThread,
   rfiDraft,
   toNumber,
+  workflowNoteRequirement,
 } from "@/lib/api";
 import { addBackgroundJob, BACKGROUND_JOBS_EVENT, listBackgroundJobs } from "@/lib/background-jobs";
 import { ACCESS_SETTINGS_CHANGED_EVENT, canRole, getAccessSettings, normalizeAccessSettings, saveAccessSettings } from "@/lib/auth/access-control";
@@ -109,7 +112,8 @@ import {
   MaterialInputRow,
   MaterialPlan,
 } from "@/lib/material-planning";
-import { buildExtractionSummary, isUnclassifiedSummaryItem } from "@/lib/extraction-summary";
+import { buildExtractionSummary, extractionSummaryItemSignature, isUnclassifiedSummaryItem } from "@/lib/extraction-summary";
+import { pricingFormulaByLine, pricingFormulaRows, readPricingFormulas } from "@/lib/pricing-formulas";
 import { getString, notesFor, validateItemField } from "@/components/quotes/item-validation";
 import { buildQuotePricingSummary } from "@/components/quotes/pricing-utils";
 import { evaluateQuoteQuality } from "@/components/quotes/quality-utils";
@@ -764,6 +768,12 @@ const QUERY_STATUS_LABELS: Record<string, string> = {
   rejected: "Rejected",
   resolved: "Resolved",
 };
+// Who spoke, for each leg of the technical-review conversation.
+const REVIEW_LOOP_LABELS: Record<string, string> = {
+  send_to_technical_review: "Estimation → review",
+  return_spec_errors: "Review → estimation (errors found)",
+  return_tr_spec: "Review cleared — sent for pricing",
+};
 const QUERY_EVENT_LABELS: Record<string, string> = {
   raised: "raised the query",
   approve: "approved",
@@ -1359,14 +1369,6 @@ function normalizeStoredExtractionSummary(value: unknown): StoredExtractionSumma
   };
 }
 
-function extractionSummaryItemSignature(items: GasketItem[]): string {
-  return JSON.stringify(items.map((item) =>
-    Object.keys(item)
-      .sort()
-      .map((key) => [key, item[key]]),
-  ));
-}
-
 function summaryRowsMatch(left: ExtractionSummaryRow[], right: ExtractionSummaryRow[]) {
   if (left.length !== right.length) return false;
   return left.every((row, index) => row.item === right[index]?.item && row.count === right[index]?.count);
@@ -1654,16 +1656,21 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   const workflowSubstate = useGranularWorkflow ? GRANULAR_WORKFLOW_SUBSTATES[currentWorkflowStep] : undefined;
   // An enquiry sent back by the reviewer sits at spec_check again — flag it so
   // estimation sees the error note, not a neutral "last note" line.
-  const lastWorkflowAction = React.useMemo(() => {
-    const history = granularWorkflowMeta.history_log;
-    const entries = Array.isArray(history) ? history : [];
-    const last = entries[entries.length - 1] as { action?: unknown } | undefined;
-    return getString(last?.action);
-  }, [granularWorkflowMeta.history_log]);
+  const lastWorkflowAction = React.useMemo(
+    () => lastWorkflowActionOf(quote?.stage_meta as Record<string, unknown> | undefined),
+    [quote?.stage_meta],
+  );
   const returnedWithErrors =
     currentWorkflowStep === "spec_check" &&
     lastWorkflowAction === "return_spec_errors" &&
     Boolean(getString(quote?.stage_meta?.workflow_comment));
+  // The technical-review round trips on this enquiry (reviewer's error list ->
+  // estimation's reply -> re-check). Shown from the review step onward so the
+  // reviewer re-checking a spec sees what he flagged last round.
+  const reviewLoopEntries = React.useMemo(
+    () => reviewLoopThread(quote?.stage_meta as Record<string, unknown> | undefined).filter((entry) => entry.comment),
+    [quote?.stage_meta],
+  );
   const availableWorkflowActions = workflowActions.filter(
     (item) =>
       (item.from as readonly string[]).includes(currentWorkflowStep) &&
@@ -1946,6 +1953,18 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       .filter((row) => row.unclassified)
       .map((row) => row.index + 1),
     [items],
+  );
+  // Per-spec pricing formulas set by the pricing desk before the enquiry was
+  // released. Estimation prices each line against its spec's formula, so the
+  // pricing sheet carries it as a read-only column next to the line.
+  const storedPricingFormulas = React.useMemo(() => readPricingFormulas(quote), [quote]);
+  const pricingFormulaSpecs = React.useMemo(
+    () => pricingFormulaRows(items, storedPricingFormulas),
+    [items, storedPricingFormulas],
+  );
+  const pricingFormulaLines = React.useMemo(
+    () => pricingFormulaByLine(items, pricingFormulaSpecs),
+    [items, pricingFormulaSpecs],
   );
   const currentExtractionSummarySignature = React.useMemo(() => extractionSummaryItemSignature(items), [items]);
   const storedExtractionSummary = React.useMemo(
@@ -3801,17 +3820,16 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   async function runWorkflowAction(action: string) {
     if (!quote) return;
     const comment = workflowComment.trim();
-    // When estimation sends the enquiry back to sales for missing info, require a
-    // one-line note so sales knows what is missing.
-    if (action === "raise_customer_query" && !comment) {
-      toast.error("Add a one-line note on what is missing before sending back to sales.");
-      return;
-    }
-    // The reviewer must say WHAT is wrong when returning an enquiry (mirrors the
-    // backend require_comment gate).
-    if (action === "return_spec_errors" && !comment) {
-      toast.error("Describe the errors found before returning to estimation.");
-      return;
+    // Some handoffs are rejected without a note: sales must be told what is
+    // missing, the reviewer must say WHAT is wrong when returning an enquiry, and
+    // estimation must say what it changed when re-submitting a returned spec
+    // (mirrors the backend require_comment / require_comment_after gates).
+    if (!comment) {
+      const required = workflowNoteRequirement(action, lastWorkflowAction);
+      if (required) {
+        toast.error(required);
+        return;
+      }
     }
     try {
       const updated = await advanceEnquiryWorkflow(quote.id, action, comment);
@@ -5183,27 +5201,73 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
               <span className="font-medium">Returned by review — fix and send back: </span>
               <span>{getString(quote.stage_meta?.workflow_comment)}</span>
             </div>
+          ) : currentWorkflowStep === "technical_review_pending" && getString(quote.stage_meta?.workflow_comment) ? (
+            <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-950/30 dark:text-amber-200">
+              <span className="font-medium">
+                {reviewLoopEntries.some((entry) => entry.action === "return_spec_errors")
+                  ? "Re-submitted by estimation — what changed: "
+                  : "From estimation: "}
+              </span>
+              <span>{getString(quote.stage_meta?.workflow_comment)}</span>
+            </div>
           ) : getString(quote.stage_meta?.workflow_comment) ? (
             <div className="mt-2 rounded-md border bg-muted/30 px-2.5 py-1.5 text-xs">
               <span className="text-muted-foreground">Last note: </span>
               <span>{getString(quote.stage_meta?.workflow_comment)}</span>
             </div>
           ) : null}
+          {/* Every note exchanged with technical review, so the reviewer can see
+              what he flagged last round next to estimation's reply. */}
+          {reviewLoopEntries.length > 1 ? (
+            <details className="mt-2 rounded-md border bg-muted/20 px-2.5 py-1.5 text-xs">
+              <summary className="cursor-pointer font-medium text-muted-foreground">
+                Technical review thread ({reviewLoopEntries.length})
+              </summary>
+              <div className="mt-1.5 space-y-1.5 border-l pl-3">
+                {reviewLoopEntries.map((entry, index) => (
+                  <div key={`${entry.at}-${index}`}>
+                    <div className="text-muted-foreground">
+                      <span className="font-medium text-foreground">{REVIEW_LOOP_LABELS[entry.action] ?? entry.action}</span>
+                      {entry.by ? ` · ${entry.by}` : ""}
+                      {entry.at ? ` · ${new Date(entry.at).toLocaleString("en-GB")}` : ""}
+                    </div>
+                    <div>{entry.comment}</div>
+                  </div>
+                ))}
+              </div>
+            </details>
+          ) : null}
           {availableWorkflowActions.length > 0 ? (
             <div className="mt-3 space-y-2">
               <textarea
                 value={workflowComment}
                 onChange={(event) => setWorkflowComment(event.target.value)}
-                placeholder="Add a comment for the receiving team (optional)"
+                placeholder={
+                  availableWorkflowActions
+                    .map((item) => workflowNoteRequirement(item.action, lastWorkflowAction))
+                    .find(Boolean) ?? "Add a comment for the receiving team (optional)"
+                }
                 className="min-h-[52px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
               />
               <div className="flex flex-wrap gap-2">
-                {availableWorkflowActions.map((item) => (
-                  <Button key={item.action} size="sm" onClick={() => runWorkflowAction(item.action)}>
-                    <ArrowRight className="h-4 w-4" />
-                    {item.label}
-                  </Button>
-                ))}
+                {availableWorkflowActions.map((item) => {
+                  // Blocked until the note is written (the reviewer's error list,
+                  // estimation's reply on a re-submission).
+                  const noteRequired = workflowNoteRequirement(item.action, lastWorkflowAction);
+                  const noteMissing = Boolean(noteRequired) && !workflowComment.trim();
+                  return (
+                    <Button
+                      key={item.action}
+                      size="sm"
+                      disabled={noteMissing}
+                      title={noteMissing ? noteRequired : undefined}
+                      onClick={() => runWorkflowAction(item.action)}
+                    >
+                      <ArrowRight className="h-4 w-4" />
+                      {item.label}
+                    </Button>
+                  );
+                })}
                 {/* From pricing onward the pricing sheet lives on the Quotations
                     screen — give a direct way in from the enquiry. */}
                 {isDraftSection && ["sent_for_pricing", "pricing_decision", "pricing_submitted"].includes(currentWorkflowStep) && (
@@ -7506,12 +7570,32 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                       Click a cell and type · drag the corner handle to fill · paste from Excel · Ctrl+D fills down · tick GTQ when the price is not known yet
                     </div>
                   </div>
+                  {storedPricingFormulas?.rows.length ? (
+                    <div className="rounded-md border bg-muted/20 px-3 py-2 text-xs">
+                      <div className="font-medium">
+                        Pricing formulas per spec
+                        {storedPricingFormulas.set_by ? ` — set by ${storedPricingFormulas.set_by}` : ""}
+                        {storedPricingFormulas.stale ? " (line items changed since — re-check with pricing)" : ""}
+                      </div>
+                      <ul className="mt-1 space-y-0.5 text-muted-foreground">
+                        {pricingFormulaSpecs.map((row) => (
+                          <li key={row.item}>
+                            <span className="font-medium text-foreground">{row.item}</span>
+                            {" — "}
+                            {row.formula || "no formula"}
+                            {row.note ? ` (${row.note})` : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
                   <PricingGrid
                     items={items}
                     unitPrices={unitPrices}
                     lineDiscounts={lineDiscounts}
                     lineGtq={lineGtq}
                     canEdit={canEditQuotation}
+                    formulas={pricingFormulaLines}
                     onApply={(next) => updateQdMany(next)}
                   />
                 </TabsContent>

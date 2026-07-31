@@ -155,6 +155,29 @@ app_settings_table = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
+learned_descriptions_table = Table(
+    "learned_descriptions",
+    metadata,
+    Column("id", uuid_type, primary_key=True),
+    Column("org_id", uuid_type, index=True),
+    # sha1 of the normalized customer wording — the memory key.
+    Column("fingerprint", Text, nullable=False, default=""),
+    Column("source_text", Text, nullable=False, default=""),
+    Column("ggpl_description", Text, nullable=False, default=""),
+    Column("fields", json_type, nullable=False, default=dict),
+    # Empty string means the entry applies to every customer.
+    Column("customer", Text, nullable=False, default=""),
+    Column("status", Text, nullable=False, default="pending"),
+    Column("source", Text, nullable=False, default="edit"),
+    Column("note", Text, nullable=False, default=""),
+    Column("created_by", Text, nullable=False, default=""),
+    Column("approved_by", Text, nullable=False, default=""),
+    Column("hit_count", Integer, nullable=False, default=0),
+    Column("last_applied_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
 notifications_table = Table(
     "work_notifications",
     metadata,
@@ -463,6 +486,9 @@ ALL_CAPABILITIES = [
     "edit_material_phase2",
     "approve_quotes",
     "export_quotes",
+    # Curate the portal's learned descriptions: approve a team correction into
+    # permanent memory, edit it, or retire it.
+    "manage_description_memory",
     "manage_users",
 ]
 
@@ -479,10 +505,12 @@ DEFAULT_ACCESS_SETTINGS = AccessSettings(
         "management": _permissions([
             "view_dashboard", "view_enquiry", "view_material_planning", "view_quotation", "view_purchase_orders", "view_doc_assistant", "view_history",
             "edit_sales_details", "edit_workflow", "edit_line_items", "edit_quotation", "approve_quotes", "export_quotes",
+            "manage_description_memory",
         ]),
         "approver": _permissions([
             "view_dashboard", "view_enquiry", "view_quotation", "view_purchase_orders", "view_history",
             "edit_workflow", "edit_line_items", "edit_quotation", "approve_quotes", "export_quotes",
+            "manage_description_memory",
         ]),
         # Estimation (not sales) creates enquiries and assigns the sales owner;
         # sales works the customer-facing steps (queries, sending quotations).
@@ -494,9 +522,14 @@ DEFAULT_ACCESS_SETTINGS = AccessSettings(
             "view_dashboard", "view_enquiry", "view_doc_assistant", "view_history",
             "create_enquiry", "edit_sales_details", "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
         ]),
+        # Technical review is a REVIEW-ONLY role: read the specs, then either pass
+        # the enquiry to pricing or return it to estimation with the error list.
+        # It fixes nothing itself — estimation makes the changes and re-submits —
+        # so it gets no edit capability at all. The two review handoffs need none:
+        # the /workflow endpoint gates on stage ownership (technical owns
+        # technical_review_pending), not on a capability.
         "technical": _permissions([
             "view_dashboard", "view_enquiry", "view_doc_assistant", "view_history",
-            "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
         ]),
         "planning": _permissions([
             "view_dashboard", "view_enquiry", "view_material_planning", "view_purchase_orders", "view_history",

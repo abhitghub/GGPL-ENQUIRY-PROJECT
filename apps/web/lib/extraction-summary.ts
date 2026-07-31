@@ -21,7 +21,12 @@ import { getString } from "@/components/quotes/item-validation";
 
 export type ExtractionSummaryGroup = {
   item: string;
+  /** Line items that collapsed onto this spec. */
   count: number;
+  /** Total quantity across those line items — what pricing works against. */
+  qty: number;
+  /** 1-based line numbers feeding the spec, so a price can be traced back. */
+  lines: number[];
 };
 
 type FamilyRender = (ratings: string[], thicknesses: string[]) => string;
@@ -366,47 +371,95 @@ export function isUnclassifiedSummaryItem(item: GasketItem): boolean {
 }
 
 /**
- * Collapse processed rows into formula-request lines. Rows are ordered by how
- * many items feed the line, as before.
+ * The summary rows plus, for every line item, the row it collapsed onto
+ * (null when the row was skipped — a regret line, or one with no wording at
+ * all). Pricing needs both halves: the spec list carries the formula, and the
+ * per-line index puts that formula next to the line on the pricing sheet.
  */
-export function buildExtractionSummary(items: GasketItem[]): ExtractionSummaryGroup[] {
+export type ExtractionSummaryIndex = {
+  groups: ExtractionSummaryGroup[];
+  /** groupIndexByLine[i] — index into `groups` for items[i]. */
+  groupIndexByLine: Array<number | null>;
+};
+
+export function buildExtractionSummaryIndex(items: GasketItem[]): ExtractionSummaryIndex {
   type Bucket = {
     render: FamilyRender;
-    count: number;
+    lines: number[];
+    qty: number;
     ratings: Set<string>;
     thicknesses: Set<string>;
     order: number;
   };
   const buckets = new Map<string, Bucket>();
+  const bucketKeyByLine: Array<string | null> = [];
 
-  items.forEach((item) => {
+  items.forEach((item, index) => {
     const family = summaryFamily(item);
-    if (!family) return;
+    if (!family) {
+      bucketKeyByLine.push(null);
+      return;
+    }
     let bucket = buckets.get(family.groupKey);
     if (!bucket) {
       bucket = {
         render: family.render,
-        count: 0,
+        lines: [],
+        qty: 0,
         ratings: new Set<string>(),
         thicknesses: new Set<string>(),
         order: buckets.size,
       };
       buckets.set(family.groupKey, bucket);
     }
-    bucket.count += 1;
+    bucketKeyByLine.push(family.groupKey);
+    bucket.lines.push(index + 1);
+    const quantity = Number(item.quantity);
+    if (Number.isFinite(quantity)) bucket.qty += quantity;
     const rating = normalizeRatingLabel(item.rating);
     if (rating) bucket.ratings.add(rating);
     const thickness = numberText(item.thickness_mm);
     if (thickness) bucket.thicknesses.add(thickness);
   });
 
-  return [...buckets.values()]
-    .map((bucket) => ({
-      item: bucket.render(sortRatings(bucket.ratings), sortThicknesses(bucket.thicknesses)),
-      count: bucket.count,
+  const ordered = [...buckets.entries()]
+    .map(([groupKey, bucket]) => ({
+      groupKey,
+      row: {
+        item: bucket.render(sortRatings(bucket.ratings), sortThicknesses(bucket.thicknesses)),
+        count: bucket.lines.length,
+        qty: Number(bucket.qty.toFixed(3)),
+        lines: bucket.lines,
+      },
       order: bucket.order,
     }))
-    .filter((row) => row.item.trim().length > 0)
-    .sort((left, right) => (right.count - left.count) || (left.order - right.order))
-    .map(({ item, count }) => ({ item, count }));
+    .filter((entry) => entry.row.item.trim().length > 0)
+    .sort((left, right) => (right.row.count - left.row.count) || (left.order - right.order));
+
+  const positionByKey = new Map(ordered.map((entry, position) => [entry.groupKey, position]));
+  return {
+    groups: ordered.map((entry) => entry.row),
+    groupIndexByLine: bucketKeyByLine.map((key) => (key === null ? null : positionByKey.get(key) ?? null)),
+  };
+}
+
+/**
+ * Collapse processed rows into formula-request lines. Rows are ordered by how
+ * many items feed the line, as before.
+ */
+export function buildExtractionSummary(items: GasketItem[]): ExtractionSummaryGroup[] {
+  return buildExtractionSummaryIndex(items).groups;
+}
+
+/**
+ * Fingerprint of the line items a summary was built from. Shared by the
+ * extraction summary and the pricing formulas so both can tell when the specs
+ * moved underneath them. Mirrors `extraction_summary()` on the API side.
+ */
+export function extractionSummaryItemSignature(items: GasketItem[]): string {
+  return JSON.stringify(items.map((item) =>
+    Object.keys(item)
+      .sort()
+      .map((key) => [key, item[key]]),
+  ));
 }

@@ -34,9 +34,12 @@ from app.services.enquiry_workflow import (
     active_step_ids,
     active_steps,
     active_transitions,
+    PRICING_FORMULA_KEY,
     can_act_on_step,
     canonical_workflow_step,
     current_workflow_step,
+    pricing_formula_gap,
+    required_comment_reason,
     visible_steps_for_role,
 )
 from app.services.export_service import build_pdf, build_xlsx
@@ -111,6 +114,9 @@ MATERIAL_PHASE2_FIELDS = {
     "material_plan_finished_by",
 }
 EXTRACTION_SUMMARY_FIELDS = {"extraction_summary", "extraction_summary_rows", "extraction_summary_notes"}
+# The per-spec rate rules the pricing desk sets before releasing an enquiry to
+# estimation. Written only by the roles that own the pricing-desk stage.
+PRICING_FORMULA_FIELDS = {PRICING_FORMULA_KEY}
 SYSTEM_STAGE_META_FIELDS = {"material_plan_stale", "material_plan_stale_at"}
 
 
@@ -299,6 +305,10 @@ def _require_patch_capabilities(user: CurrentUser, current: QuoteRead, payload: 
     changed_meta = _changed_keys(current.stage_meta or {}, next_meta)
     if changed_meta & EXTRACTION_SUMMARY_FIELDS:
         require_capability(user, "edit_line_items")
+    # The rate rule per spec is the pricing desk's call — estimation reads it and
+    # prices against it, but cannot rewrite it.
+    if changed_meta & PRICING_FORMULA_FIELDS and not can_act_on_step(user.role, "sent_for_pricing"):
+        raise HTTPException(status_code=403, detail="Only the pricing desk can set the pricing formulas")
     if changed_meta & MATERIAL_PHASE1_FIELDS:
         require_capability(user, "edit_workflow")
     if changed_meta & MATERIAL_PHASE2_FIELDS:
@@ -317,6 +327,7 @@ def _require_patch_capabilities(user: CurrentUser, current: QuoteRead, payload: 
         | MATERIAL_PHASE1_FIELDS
         | MATERIAL_PHASE2_FIELDS
         | EXTRACTION_SUMMARY_FIELDS
+        | PRICING_FORMULA_FIELDS
         | SYSTEM_STAGE_META_FIELDS
         | {"approval"}
     )
@@ -813,10 +824,20 @@ def advance_workflow(
             )
         stage_meta["pricing_route"] = "international" if market == "export" else "domestic"
     comment = (payload.comment or "").strip()
-    # Some handoffs are meaningless without a note (the reviewer's error list) —
-    # block them instead of moving silently.
-    if transition.get("require_comment") and not comment:
-        raise HTTPException(status_code=422, detail=str(transition["require_comment"]))
+    # Some handoffs are meaningless without a note — the reviewer's error list
+    # always, and estimation's reply when it re-submits a returned spec. Block
+    # them instead of moving silently. `current.stage_meta` is read here (not the
+    # copy being built) only for the last action, which is unchanged either way.
+    if not comment:
+        reason = required_comment_reason(transition, current.stage_meta)
+        if reason:
+            raise HTTPException(status_code=422, detail=reason)
+    # Estimation prices each line against its spec's rate rule, so an enquiry
+    # must not leave the pricing desk with a spec left unpriced.
+    if transition.get("require_pricing_formulas"):
+        gap = pricing_formula_gap(stage_meta, current.items)
+        if gap:
+            raise HTTPException(status_code=422, detail=gap)
     stage_meta["workflow_comment"] = comment
     detail = f"{transition['label']} — {comment}" if comment else transition["label"]
     stage_meta = append_activity(
