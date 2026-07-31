@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageIntro } from "@/components/app-shell/page-intro";
+import { LearnedDescriptionsPanel } from "@/components/settings/learned-descriptions-panel";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -309,6 +310,8 @@ export function SettingsClient() {
           </div>
         </CardContent>
       </Card>
+
+      <LearnedDescriptionsPanel canCurate={canRole(currentUser.role, "manage_description_memory", accessSettings)} />
 
       <Card className="order-3 lg:col-span-2">
         <CardHeader className="border-b px-4 py-3">

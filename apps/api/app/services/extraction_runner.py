@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -9,6 +10,9 @@ from services.extraction import process_document
 
 from app.db import repo
 from app.schemas.quotes import QuotePatch
+from app.services import description_memory
+
+logger = logging.getLogger(__name__)
 
 
 def run_extraction_job(
@@ -19,7 +23,15 @@ def run_extraction_job(
     source_type: str,
     api_key: str | None,
     quote_id: str | None = None,
+    customer: str = "",
 ) -> None:
+    """Run Smart Parse and store the result on the job (and quote, if given).
+
+    `customer` scopes the description-memory lookup. It is passed separately from
+    `quote_id` because the first extraction of an enquiry happens before the
+    quote record exists, and a customer's own wording conventions are exactly
+    what memory is most often scoped to.
+    """
     key = (api_key or os.environ.get("OPENAI_API_KEY") or "").strip()
     if not key:
         repo.update_job(
@@ -63,9 +75,25 @@ def run_extraction_job(
         )
         return
 
+    # Descriptions the team has already corrected are answered from memory rather
+    # than re-derived, so a construction the engine gets wrong is only ever
+    # fixed once. Runs after the rules engine so the learned values are what the
+    # operator actually sees on the row.
+    target_quote = repo.get_quote(org_id, quote_id) if quote_id else None
+    try:
+        description_memory.apply_memory(
+            org_id,
+            items,
+            customer=customer or str(getattr(target_quote, "customer", "") or ""),
+        )
+    except Exception:
+        # An extraction that reaches the operator un-learned is recoverable; one
+        # that fails outright is not.
+        logger.warning("Could not apply description memory to extraction %s", job_id, exc_info=True)
+
     if quote_id:
         try:
-            quote = repo.get_quote(org_id, quote_id)
+            quote = target_quote or repo.get_quote(org_id, quote_id)
             if quote:
                 repo.update_quote(
                     org_id,

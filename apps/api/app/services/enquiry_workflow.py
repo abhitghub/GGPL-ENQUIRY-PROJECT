@@ -112,7 +112,9 @@ GRANULAR_WORKFLOW_STEPS: list[dict[str, str]] = [
     {"id": "enquiry_received", "label": "Enquiry received", "team": "Estimation"},
     {"id": "spec_check", "label": "Spec check & GGPL format", "team": "Estimation"},
     {"id": "query_raised_to_customer", "label": "Query raised to customer", "team": "Sales", "mainline": "spec_check"},
-    {"id": "technical_review_pending", "label": "Technical review", "team": "Technical review"},
+    # Technical review is the MANAGER's step: there is no separate technical-review
+    # team. The step keeps its business name; the team holding it is management.
+    {"id": "technical_review_pending", "label": "Technical review", "team": "Manager"},
     {"id": "sent_for_pricing", "label": "Sent for pricing", "team": "Admin", "mainline": "pricing_decision"},
     {"id": "pricing_decision", "label": "Pricing", "team": "Estimation"},
     {"id": "pricing_submitted", "label": "Quotation generation", "team": "Sales / Admin"},
@@ -185,7 +187,7 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "from": {"spec_check"},
         "roles": {"estimation"},
         "to": "technical_review_pending",
-        "with_whom": "Technical review",
+        "with_whom": "Manager",
         "label": "Spec complete — send for technical review",
         # First trip: no note needed. Re-submitting a spec the reviewer sent back
         # is a reply, so it must say what changed — otherwise the reviewer has to
@@ -203,23 +205,23 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "with_whom": "Admin",
         "label": "Spec complete — send for pricing (skip technical review)",
     },
-    # The reviewer found errors — send the enquiry back to estimation with a
+    # The manager found errors — send the enquiry back to estimation with a
     # note describing what to fix. After the fix, estimation re-submits for
-    # review, so the loop repeats until the reviewer clears it.
+    # review, so the loop repeats until the manager clears it.
     "return_spec_errors": {
         "from": {"technical_review_pending"},
-        "roles": {"technical"},
+        "roles": {"management"},
         "to": "spec_check",
         "with_whom": "Estimation",
         "label": "Errors found — return to estimation",
         "require_comment": "Describe the errors found so estimation knows what to fix",
     },
-    # Only technical can forward an enquiry that is up for technical review —
+    # Only the manager can forward an enquiry that is up for technical review —
     # done means the specs are cleared for pricing, so it goes straight to the
     # admin pricing queue.
     "return_tr_spec": {
         "from": {"technical_review_pending"},
-        "roles": {"technical"},
+        "roles": {"management"},
         "to": "sent_for_pricing",
         "with_whom": "Admin",
         "label": "Technical review done — submit for pricing",
@@ -280,7 +282,10 @@ GRANULAR_ROLE_VISIBLE_STEPS: dict[str, set[str]] = {
     # is GRANULAR_STAGE_OWNER_ROLES below, and the workflow HANDOFFS stay
     # stage-gated, so estimation still cannot advance an enquiry out of turn.
     "estimation": set(GRANULAR_WORKFLOW_STEP_IDS),
-    "technical": {"technical_review_pending"},
+    # No `technical` entry: the technical-review step belongs to the manager, so
+    # the legacy `technical` role sees no granular step at all. It stays a valid
+    # role (accounts holding it keep working, and it still owns the legacy
+    # `technical_specs` stage via ROLE_VISIBLE_STEPS) but has no job in this flow.
     "admin": {"sent_for_pricing", "pricing_submitted"},
     "management": set(GRANULAR_WORKFLOW_STEP_IDS),
 }
@@ -293,7 +298,9 @@ GRANULAR_STAGE_OWNER_ROLES: dict[str, set[str]] = {
     "enquiry_received": {"estimation", "management"},
     "spec_check": {"estimation", "management"},
     "query_raised_to_customer": {"sales", "management"},
-    "technical_review_pending": {"technical", "management"},
+    # The manager (Jagadeeshan) owns technical review — he clears it for pricing or
+    # returns it to estimation. This also picks the notification target.
+    "technical_review_pending": {"management"},
     "sent_for_pricing": {"admin", "management"},
     "pricing_decision": {"estimation", "management"},
     "pricing_submitted": {"sales", "admin", "management"},

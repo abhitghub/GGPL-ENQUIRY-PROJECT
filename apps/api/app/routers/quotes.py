@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
@@ -23,6 +24,7 @@ from app.schemas.quotes import (
     StageAdvanceRequest,
     WorkflowActionRequest,
 )
+from app.services import description_memory
 from app.services.approved_quote_cache import cache_final_approved_quote
 from app.services.enquiry_register import (
     REGISTER_FILENAME,
@@ -43,7 +45,12 @@ from app.services.enquiry_workflow import (
     visible_steps_for_role,
 )
 from app.services.export_service import build_pdf, build_xlsx
-from app.services.notification_hub import notify_assignment, notify_change_query, notify_stage_change
+from app.services.notification_hub import (
+    notify_assignment,
+    notify_change_query,
+    notify_change_query_reply,
+    notify_stage_change,
+)
 from app.services.quote_rules import (
     QuoteConflictError,
     QuoteValidationError,
@@ -486,6 +493,14 @@ def patch_quote(
     new_owner = str((quote.stage_meta or {}).get("owner_id") or "").strip()
     if new_owner and new_owner != str((current.stage_meta or {}).get("owner_id") or "").strip():
         notify_assignment(user, quote, new_owner)
+    # The portal also saves line edits through the whole-quote patch, so this is
+    # the second place a GGPL correction can arrive.
+    if authorized_payload.items is not None:
+        description_memory.capture_item_edits(
+            user,
+            before=[dict(item) for item in current.items],
+            after=[dict(item) for item in quote.items],
+        )
     return quote
 
 
@@ -532,6 +547,14 @@ def bulk_items(
         raise
     if not updated:
         raise HTTPException(status_code=404, detail="Quote not found")
+    # A GGPL description the team just fixed is knowledge, not a one-off edit:
+    # remember it against this customer wording so the next enquiry carrying the
+    # same wording is answered correctly without anyone touching it.
+    description_memory.capture_item_edits(
+        user,
+        before=[dict(item) for item in quote.items],
+        after=items,
+    )
     return updated
 
 
@@ -557,6 +580,10 @@ def bulk_recompute(
         item["ggpl_description"] = describe_item(item)
         recomputed.append(item)
 
+    # Re-running the rules engine would otherwise undo every correction the team
+    # has ever made to these wordings; memory is what makes a recompute safe.
+    description_memory.apply_memory(user.org_id, recomputed, customer=quote.customer)
+
     if payload.rows is None:
         for index, item in zip(target_indices, recomputed):
             if 0 <= index < len(items):
@@ -581,7 +608,7 @@ def reprocess_text(
     user: CurrentUser = Depends(get_current_user),
 ) -> list[dict]:
     require_capability(user, "edit_line_items")
-    _quote_or_404(user, quote_id)
+    quote = _quote_or_404(user, quote_id)
     if not payload.descriptions:
         return []
     from app.services.extraction_runner import run_extraction_job
@@ -594,6 +621,7 @@ def reprocess_text(
         source_type=payload.source_type,
         api_key=payload.api_key,
         quote_id=None,
+        customer=quote.customer,
     )
     finished = repo.get_job(user.org_id, job.id)
     if not finished or finished.status == "failed":
@@ -937,6 +965,19 @@ def _jump_workflow_stage(stage_meta: dict, dest: str, user: CurrentUser, action:
     return stage_meta
 
 
+def _query_participants(query: dict[str, Any]) -> tuple[set[str], set[str]]:
+    """Everyone already in a change query's conversation: the exact user ids we
+    know of plus the roles that have spoken. Queries raised before user ids were
+    stored only carry roles, so both are returned and the caller targets both."""
+    user_ids = {str(query.get("raised_by_id") or "")}
+    roles = {str(query.get("raised_by_role") or "")}
+    for event in query.get("history") or []:
+        if isinstance(event, dict):
+            user_ids.add(str(event.get("by_id") or ""))
+            roles.add(str(event.get("role") or ""))
+    return {uid for uid in user_ids if uid}, {role for role in roles if role}
+
+
 @router.post("/quotes/{quote_id}/queries", response_model=QuoteRead)
 def raise_change_query(
     quote_id: str,
@@ -965,6 +1006,7 @@ def raise_change_query(
         {
             "id": f"qry-{uuid.uuid4().hex[:10]}",
             "raised_by": raiser,
+            "raised_by_id": user.user_id,
             "raised_by_role": user.role,
             "from_stage": current_workflow_step(stage_meta),
             "target_stage": target,
@@ -973,7 +1015,9 @@ def raise_change_query(
             "note": note,
             "status": "pending_approval",
             "created_at": raised_at,
-            "history": [{"at": raised_at, "by": raiser, "role": user.role, "action": "raised", "note": note}],
+            "history": [
+                {"at": raised_at, "by": raiser, "by_id": user.user_id, "role": user.role, "action": "raised", "note": note}
+            ],
         }
     )
     stage_meta["change_queries"] = queries[-50:]
@@ -1003,14 +1047,17 @@ def act_on_change_query(
     payload: ChangeQueryActionRequest,
     user: CurrentUser = Depends(get_current_user),
 ) -> QuoteRead:
-    """Decide or close a change query. approve/reject need an approver/admin;
-    approve jumps the enquiry to the query's target stage (remembering where it
-    was). resolve is done by the team that made the change and sends the enquiry
-    back to the remembered stage. Every step is appended to the query's own
-    history plus the quote-level logs."""
+    """Decide, answer or close a change query. approve/reject need an
+    approver/admin; approve jumps the enquiry to the query's target stage
+    (remembering where it was). reply is a plain thread message any team can post
+    on the same query — the team the query was sent to answers the question
+    without changing the status or moving the enquiry. resolve is done by the
+    team that made the change and sends the enquiry back to the remembered
+    stage. Every step is appended to the query's own history plus the
+    quote-level logs."""
     current = _quote_or_404(user, quote_id)
     action = payload.action.strip().lower()
-    if action not in {"approve", "reject", "resolve"}:
+    if action not in {"approve", "reject", "resolve", "reply"}:
         raise HTTPException(status_code=400, detail=f"Unknown query action: {payload.action}")
     stage_meta = dict(current.stage_meta or {})
     queries = [dict(entry) for entry in (stage_meta.get("change_queries") or [])]
@@ -1019,9 +1066,22 @@ def act_on_change_query(
         raise HTTPException(status_code=404, detail="Change query not found")
     note = payload.note.strip()
     actor = user.name or user.user_id
-    event = {"at": now_iso(), "by": actor, "role": user.role, "action": action, "note": note}
+    event = {"at": now_iso(), "by": actor, "by_id": user.user_id, "role": user.role, "action": action, "note": note}
     jump_dest: str | None = None
-    if action in {"approve", "reject"}:
+    if action == "reply":
+        # A reply is conversation only: the query keeps its status and the
+        # enquiry stays where it is, so the receiving team can answer the
+        # question (or the raiser can clarify) at any point in the thread.
+        if user.role == "viewer":
+            raise HTTPException(status_code=403, detail="Viewers cannot reply to change queries")
+        if not note:
+            raise HTTPException(status_code=422, detail="Type a reply before sending it")
+        query["last_reply_at"] = event["at"]
+        query["last_reply_by"] = actor
+        query["last_reply_note"] = note
+        title = "Change query reply"
+        detail = f"{query.get('target_label') or query.get('target_stage')} — {note}"
+    elif action in {"approve", "reject"}:
         if not can_approve(user):
             raise HTTPException(status_code=403, detail="Only an admin or approver can decide change queries")
         if query.get("status") != "pending_approval":
@@ -1056,9 +1116,13 @@ def act_on_change_query(
         raise
     if not updated:
         raise HTTPException(status_code=404, detail="Quote not found")
-    # Real-time: an approved/resolved query moved the enquiry to another team's
-    # queue — tell the receiving team.
-    if jump_dest:
+    if action == "reply":
+        # Real-time: a reply is aimed at the other side of the conversation.
+        reply_user_ids, reply_roles = _query_participants(query)
+        notify_change_query_reply(user, updated, query, user_ids=reply_user_ids, roles=reply_roles)
+    elif jump_dest:
+        # Real-time: an approved/resolved query moved the enquiry to another
+        # team's queue — tell the receiving team.
         notify_stage_change(user, updated, jump_dest)
     return updated
 

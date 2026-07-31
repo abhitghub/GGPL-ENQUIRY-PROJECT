@@ -77,6 +77,7 @@ async def create_extraction(
         source_type=payload.source_type,
         api_key=payload.api_key,
         quote_id=payload.quote_id,
+        customer=payload.customer,
     )
     return ExtractionAccepted(job_id=job.id, status=job.status)
 

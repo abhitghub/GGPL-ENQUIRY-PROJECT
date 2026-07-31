@@ -769,10 +769,43 @@ def _csv_to_text(csv_source, max_rows: int | None = None) -> tuple[str, bool, in
     return '\n'.join(md_rows), was_truncated, len(clean_rows)
 
 
+# Typography that carries dimensional meaning, folded to ASCII before the
+# lossy encode in _sanitize_text. Without this the encode replaces each char
+# with '?' and the '?'->' ' pass turns the size into whitespace: the inch mark
+# in `4" X 150#` vanishes, and NFKC's decomposition of `3/4` (to 3 + U+2044 + 4)
+# leaves `3 4GASKET` — a size no downstream pattern can read.
+_ASCII_FOLD = {
+    '⁄': '/',                                    # fraction slash
+    '∕': '/', '÷': '/',                     # division slash / sign
+    '″': '"', '‶': '"', '˝': '"',      # double prime = inches
+    '“': '"', '”': '"', '„': '"', '‟': '"',
+    '′': "'", '‵': "'",                     # prime = feet
+    '‘': "'", '’': "'", '‚': "'", '‛': "'",
+    '–': '-', '—': '-', '―': '-', '−': '-', '‐': '-',
+    '×': 'X',                                    # multiplication sign
+    ' ': ' ', ' ': ' ', ' ': ' ', ' ': ' ',
+    '•': '-', '·': '-',
+}
+_ASCII_FOLD_RE = re.compile('|'.join(map(re.escape, _ASCII_FOLD)))
+# ¼½¾ and friends. A digit glued to one is a mixed number, so `1½` has to become
+# `1-1/2` rather than the `11/2` a bare decomposition would produce.
+_VULGAR_FRACTIONS = '¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞'
+_MIXED_FRACTION_RE = re.compile(rf'(?<=\d)([{_VULGAR_FRACTIONS}])')
+
+
+def _fold_to_ascii(text: str) -> str:
+    return _ASCII_FOLD_RE.sub(lambda m: _ASCII_FOLD[m.group(0)], text)
+
+
 def _sanitize_text(text: str) -> str:
     import unicodedata
     import re
+    text = _MIXED_FRACTION_RE.sub(r'-\1', text)
+    # Fold before AND after NFKC: before, to catch the quote/dash forms NFKC
+    # leaves alone; after, to catch the fraction slash NFKC introduces.
+    text = _fold_to_ascii(text)
     text = unicodedata.normalize('NFKC', text)
+    text = _fold_to_ascii(text)
     text = text.encode('ascii', errors='replace').decode('ascii')
     text = re.sub(r'\?+', ' ', text)
     return text

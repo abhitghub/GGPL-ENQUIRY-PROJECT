@@ -215,3 +215,44 @@ def notify_change_query(actor: "CurrentUser", quote: "QuoteRead", target_label: 
         hub.publish(actor.org_id, event, roles=QUERY_APPROVER_ROLES, exclude_user_ids={actor.user_id})
     except Exception:  # pragma: no cover - defensive: never break the request
         logger.exception("Failed to publish change-query notification")
+
+
+def notify_change_query_reply(
+    actor: "CurrentUser",
+    quote: "QuoteRead",
+    query: dict,
+    *,
+    user_ids: set[str] | None = None,
+    roles: set[str] | None = None,
+) -> None:
+    """Someone replied on a change query: tell the other side of that
+    conversation rather than the whole approver pool. The caller passes the
+    participants it collected from the query (exact user ids where they were
+    recorded, plus the roles that have spoken, for queries raised before ids
+    were stored); the team the query was aimed at is added here, so a question
+    still reaches whoever must answer it before they have joined the thread.
+    The replier is always excluded."""
+    try:
+        stage = str((quote.stage_meta or {}).get("workflow_stage") or "").strip()
+        event = _base_event("query", quote, actor, stage)
+        event["title"] = "New reply on a change query"
+        target_label = str(query.get("target_label") or query.get("target_stage") or "").strip()
+        about = f"{_describe(quote)} (to {target_label})" if target_label else _describe(quote)
+        note = str(query.get("last_reply_note") or "").strip()
+        event["message"] = f"{event['by']} replied on the change query for {about}" + (f": {note}" if note else ".")
+        recipients = {user for user in (user_ids or set()) if user and user != actor.user_id}
+        audience = {role for role in (roles or set()) if role} | stage_owner_roles(
+            str(query.get("target_stage") or "")
+        )
+        if not recipients and not audience:
+            return
+        _persist(actor.org_id, event, roles=audience, user_ids=recipients, actor_id=actor.user_id)
+        hub.publish(
+            actor.org_id,
+            event,
+            roles=audience,
+            user_ids=recipients,
+            exclude_user_ids={actor.user_id},
+        )
+    except Exception:  # pragma: no cover - defensive: never break the request
+        logger.exception("Failed to publish change-query reply notification")

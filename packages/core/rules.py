@@ -23,6 +23,21 @@ ESC_DATASHEET = 'KINDLY PROVIDE DATASHEET / DETAILED MATERIAL DESCRIPTION'
 ESC_DIMENSIONS = 'KINDLY PROVIDE DIMENSIONS'
 ESC_REGRET = 'REGRET'
 
+# Every escalation phrase, for callers that must recognise one in a description
+# slot. An escalation is the engine ASKING the customer for information — it is
+# never an answer, so it must never be stored, learned, or replayed as one.
+ESCALATION_PHRASES: frozenset[str] = frozenset({
+    ESC_WILL_QUOTE_SOON,
+    ESC_RING_NO,
+    ESC_RING_DIMS,
+    ESC_DRAWING,
+    ESC_DRAWING_DIMS,
+    ESC_CLEAR_SPEC,
+    ESC_DATASHEET,
+    ESC_DIMENSIONS,
+    ESC_REGRET,
+})
+
 # RULE J-2 Part 2 — mandatory confirmation for ringed SPW quoted by bare OD/ID
 # (no drawing): the stated dims may be the sealing element or the overall
 # gasket over the rings. Quote issues; order must not release unresolved.
@@ -52,6 +67,10 @@ _PIPE_OD_TO_NPS = {
     114.3: '4"', 141.3: '5"', 168.3: '6"', 219.1: '8"', 273.0: '10"',
     323.9: '12"', 355.6: '14"', 406.4: '16"', 457.0: '18"', 508.0: '20"', 610.0: '24"',
 }
+
+# RULE V — register-line prefix for the governance conclusion (see
+# _apply_standard_governance and _requires_review_for_default).
+_DEV_NO_DIM_STANDARD_PREFIX = 'no dimensional standard applies'
 
 STATUS_READY = 'ready'
 STATUS_CHECK = 'check'
@@ -1530,15 +1549,20 @@ def _apply_kamm_rules(item: dict, flags: list, applied_defaults: list) -> None:
         _add_item_deviation(item, flags, 'KINDLY CONFIRM RIB DETAILS', blocking=False)
 
     # No standard for custom OD/ID KAMM; only for NPS-rated KAMM
-    if item.get('size_type') != 'OD_ID' and not item.get('standard'):
+    if item.get('size_type') != 'OD_ID' and not is_non_standard(item.get('standard')):
         is_pn_kamm = str(item.get('rating') or '').upper().startswith('PN')
         size_val = _size_nps_value(item.get('size_norm'))
-        if is_pn_kamm:
-            item['standard'] = 'EN 1514-6'
-            applied_defaults.append('standard defaulted to EN 1514-6 (KAMM on PN-rated flanges)')
-        elif size_val is not None and size_val >= 26:
+        if size_val is not None and size_val >= 26:
+            # B16.20 stops at 24", so a cited B16.20 cannot govern a 26"+ gasket.
+            # SPW already overrides the customer here; KAMM used to skip the
+            # check whenever any standard was present and printed 32" B16.20.
             # RULE Y Part 8 — house practice for KAMM is SERIES B (SPW defaults A).
             _set_b1647_standard(item, flags, applied_defaults, default_series='B')
+        elif item.get('standard'):
+            pass
+        elif is_pn_kamm:
+            item['standard'] = 'EN 1514-6'
+            applied_defaults.append('standard defaulted to EN 1514-6 (KAMM on PN-rated flanges)')
         else:
             item['standard'] = 'ASME B16.20'
             applied_defaults.append('standard defaulted to ASME B16.20')
@@ -1856,6 +1880,7 @@ def _apply_isk_rules(item: dict, flags: list, applied_defaults: list) -> None:
     customer_standard = item.get('standard')
     item['isk_standard_explicit'] = bool(
         customer_standard and str(customer_standard).lower() not in ('null', 'none', '')
+        and not is_non_standard(customer_standard)
     )
 
     if gtype == 'ISK_RTJ':
@@ -1968,7 +1993,9 @@ def _apply_oring_rules(item: dict, flags: list, applied_defaults: list) -> None:
     item['size_norm'] = None
     item['rating_norm'] = None
     item['face_type'] = None
-    item['standard'] = None
+    # An O-ring is sized by ID x CS — no dimensional standard governs it. Keep
+    # the NON STANDARD sentinel the governance gate set (Rule V Part 2).
+    item['standard'] = NON_STANDARD if is_non_standard(item.get('standard')) else None
     item['dimensions'] = None
 
 
@@ -2037,8 +2064,71 @@ def _recover_common_fields_from_description(item: dict) -> None:
         if thickness_match:
             item['thickness_mm'] = float(thickness_match.group('thk') or thickness_match.group('thk2'))
 
+    _recover_size_rating_from_description(item, upper)
+
+
+def _recover_size_rating_from_description(item: dict, upper: str) -> None:
+    """Deterministic size/rating backstop for rows Smart Parse left blank.
+
+    The LLM reads a size glued to the noun — `4GASKET RF 150#`, `24GASKET`,
+    `¾GASKET` — only some of the time, so identical rows in one sheet came back
+    with some sizes filled and some UNKNOWN. The regex extractor already handles
+    that shape; it just was never consulted once the LLM path owned the row.
+    Only fills blanks — anything the LLM or an operator supplied wins.
+    """
+    # OD/ID rows are dimensioned, not nominally sized; O-rings clear size by design.
+    if item.get('size_type') == 'OD_ID' or item.get('gasket_type') == 'ORING':
+        return
+    if item.get('od_mm') is not None and item.get('id_mm') is not None:
+        return
+
+    from core.parser import _extract_first_size, _split_glued_size_class
+
+    # `24600#` carries both halves; take them together so the class is not left
+    # for the rating regex below, which needs a word boundary it will never find.
+    glued = _split_glued_size_class(upper)
+    if glued:
+        if not item.get('size'):
+            item['size'] = glued[0]
+            if item.get('size_type') in (None, '', 'UNKNOWN'):
+                item['size_type'] = 'NPS'
+        if not item.get('rating'):
+            item['rating'] = glued[1]
+
+    if not item.get('size'):
+        size = _extract_first_size(upper)
+        # Gate on the reference tables: a stray `316 IN` inside a material spec
+        # normalises to nothing, and a blank size beats an invented one.
+        if size and normalize_size(size):
+            item['size'] = size
+            if item.get('size_type') in (None, '', 'UNKNOWN'):
+                if 'DN' in size:
+                    item['size_type'] = 'DN'
+                elif 'NB' in size:
+                    item['size_type'] = 'NB'
+                else:
+                    item['size_type'] = 'NPS'
+
+    if not item.get('rating'):
+        rating_match = re.search(
+            r'\b(?:CL(?:ASS)?\.?\s*)?(150|300|400|600|900|1500|2500)\s*(?:#|LB(?:S)?\b)',
+            upper,
+        )
+        if rating_match:
+            item['rating'] = f'{rating_match.group(1)}#'
+        else:
+            pn_match = re.search(r'\bPN\s*-?\s*(\d{1,3})(?!\d)', upper)
+            if pn_match:
+                item['rating'] = f'PN {pn_match.group(1)}'
+
 
 def _requires_review_for_default(default: str, gasket_type: str, item: dict) -> bool:
+    # RULE V governance is a deterministic conclusion, not a guess: there is no
+    # table row to look up, so there is nothing for a human to confirm. The
+    # cases that DO need review (a cited standard overridden, an out-of-range
+    # size) raise their own blocking deviation.
+    if default.startswith(_DEV_NO_DIM_STANDARD_PREFIX):
+        return False
     if (
         gasket_type == 'SPIRAL_WOUND'
         and default == 'standard defaulted to ASME B16.20'
@@ -2204,6 +2294,112 @@ def _emit_material_register_lines(item: dict, flags: list, applied_defaults: lis
             blocking=False)
 
 
+# RULE V Part 2 (specials row) — families for which GGPL's own data shows no
+# dimensional standard. These are quoted to their own geometry or to a drawing,
+# never to a piping table.
+_NO_DIM_STANDARD_FAMILIES = frozenset({
+    'O_RING', 'PLUG_GASKET', 'CORRUGATED', 'CMG', 'SHEET',
+    'LIP_SEAL', 'DIAPHRAGM', 'MANHOLE', 'LENS', 'TRANSITION',
+})
+
+# A cited dimensional standard survives on a non-standard line only as a
+# *construction* reference (Rule V Part 5.0 case 3) — never in the slot.
+_CITED_DIM_STANDARD_RE = re.compile(
+    r'\bB\s*16\s*\.\s*(?:20|21|47)\b|\bAPI\s*6\s*A\b|\bEN\s*1514\b')
+
+
+def _is_dims_only(item: dict) -> bool:
+    """RULE V Part 5.0 — THE OD x ID LAW.
+
+    A dimensional standard is a table keyed by size + class (or DN + PN). When
+    the customer supplies raw geometry and no size key there is no row to look
+    up, so no standard can govern the dimensions — for every product family
+    without exception. The customer gave the dimensions precisely because no
+    standard does.
+    """
+    if item.get('ring_no'):
+        return False  # an RTJ ring number is itself the table key
+    has_geometry = bool(
+        (item.get('od_mm') and item.get('id_mm'))
+        or (item.get('obround_a_mm') and item.get('obround_b_mm'))
+        or item.get('size_type') in ('OD_ID', 'OBROUND')
+    )
+    if not has_geometry:
+        return False
+    # Dims stated alongside a size merely corroborate the table row (case 2).
+    return not item.get('size_norm') and _size_nps_value_from_item(item) is None
+
+
+def _out_of_range_reason(item: dict) -> str | None:
+    """RULE V Part 3 + Part 7 rule 1 — range validity beats every other input.
+
+    Returns a customer-facing reason when the stated size/class falls outside
+    every dimensional table, else None.
+    """
+    nps = _size_nps_value_from_item(item)
+    if nps is None:
+        return None
+    rating = str(item.get('rating') or '').strip().upper()
+    if rating.startswith('PN'):
+        return None
+    match = re.fullmatch(r'(\d{3,4})#?', rating)
+    cls = int(match.group(1)) if match else None
+    size_txt = item.get('size_norm') or item.get('size') or f'NPS {nps:g}'
+    if nps > 60:
+        return f'{size_txt} EXCEEDS THE ASME B16.47 RANGE (MAX 60")'
+    if cls == 2500 and nps >= 14:
+        return f'NO CLASS 2500 FLANGE AT {size_txt} (ASME B16.5)'
+    # RTJ rings exist only for NPS 1/2-24 (R11-R79) and NPS 26-36 (R93-R105,
+    # classes 300-900); NPS 22 has no listed ring.
+    if item.get('gasket_type') == 'RTJ' and not item.get('ring_no'):
+        if nps > 36 or nps == 22:
+            return f'NO ASME RING NUMBER LISTED AT {size_txt}'
+        if nps >= 26 and cls is not None and cls not in (300, 400, 600, 900):
+            return (f'ASME B16.47 RINGS AT {size_txt} EXIST ONLY FOR CLASSES '
+                    f'300-900 — NONE AT {cls}#')
+    return None
+
+
+def _apply_standard_governance(item: dict, flags: list, applied_defaults: list) -> None:
+    """RULE V — decide ONCE whether any dimensional standard can govern the
+    line, before the family handlers reach their `if not standard` defaults.
+
+    When none can, the slot is set to NON STANDARD. That value is truthy, so
+    every `if not item.get('standard')` default below is naturally skipped, and
+    `_display_standard` suppresses the tag outright — a non-standard gasket can
+    therefore never carry an ASME/API/EN standard in its description.
+    """
+    if is_non_standard(item.get('standard')):
+        return  # already settled by the operator or an earlier pass
+
+    family = item.get('gasket_type') or ''
+    if family in _NO_DIM_STANDARD_FAMILIES:
+        kind = 'family'
+        headline = f'{family.replace("_", " ")} HAS NO DIMENSIONAL STANDARD'
+    elif _is_dims_only(item):
+        kind = 'dims'
+        headline = 'SIZE NOT TABULATED — NO SIZE + CLASS GIVEN'
+    else:
+        headline = _out_of_range_reason(item)
+        if not headline:
+            return
+        kind = 'range'
+
+    cited = str(item.get('standard') or '').strip()
+    item['standard'] = NON_STANDARD
+    applied_defaults.append(
+        f'{_DEV_NO_DIM_STANDARD_PREFIX} — {headline.lower()} (RULE V)')
+
+    if cited and _CITED_DIM_STANDARD_RE.search(cited.upper()):
+        # The citation may govern construction (winding profile, ring thickness,
+        # materials); it cannot make a non-tabulated size standard.
+        _add_item_deviation(
+            item, flags,
+            f'{cited} CITED — {headline}; CONSTRUCTION PER {cited} ONLY (NON-STANDARD)')
+    elif kind == 'range':
+        _add_item_deviation(item, flags, f'{headline} — QUOTED AS NON-STANDARD')
+
+
 def apply_rules(item: dict) -> dict:
     """
     Normalize, apply defaults, validate, and assign status + flags.
@@ -2280,23 +2476,6 @@ def apply_rules(item: dict) -> dict:
     # for fields the row text left blank; row text always outranks the code.
     apply_gasket_code(item, flags, applied_defaults)
 
-    # --- RULE V Part 5.0 case 3: dims-only line + cited dimensional standard ---
-    # With no size+class there is no table row for the citation to govern, so
-    # the size is non-standard; the citation survives only as a construction
-    # reference. Scoped to the equipment-world families (SPW/DJI/KAMM) — soft
-    # cut keeps its ground-truth B16.21 convention.
-    if (item.get('size_type') == 'OD_ID'
-            and not item.get('rating') and not size_norm
-            and item.get('gasket_type') in ('SPIRAL_WOUND', 'DJI', 'KAMM')
-            and item.get('standard') and not is_non_standard(item['standard'])):
-        _cited_std = str(item['standard']).strip()
-        if re.search(r'\bB\s*16\s*\.\s*(?:20|21|47)\b', _cited_std.upper()):
-            item['standard'] = NON_STANDARD
-            _add_item_deviation(
-                item, flags,
-                f'{_cited_std} CITED ON DIMS-ONLY LINE — SIZE NOT TABULATED; '
-                f'CONSTRUCTION PER {_cited_std} ONLY (NON-STANDARD SIZE)')
-
     gasket_type = item.get('gasket_type', 'SOFT_CUT')
     raw_desc = (
         item.get('description')
@@ -2365,6 +2544,12 @@ def apply_rules(item: dict) -> dict:
     _apply_class_gap_rules(item, flags, applied_defaults)
 
     _remove_face_tokens_from_material_fields(item)
+
+    # RULE V — settle the standard slot BEFORE the family handlers run, so no
+    # `if not standard` default can stamp a piping standard onto a gasket that
+    # no standard governs. Runs after gasket_type inference (family test) and
+    # after class-gap resolution (range test reads the resolved rating).
+    _apply_standard_governance(item, flags, applied_defaults)
 
     if gasket_type == 'SPIRAL_WOUND':
         _apply_sw_rules(item, flags, applied_defaults)
@@ -2491,17 +2676,23 @@ def apply_rules(item: dict) -> dict:
     # If the obsolete citation itself landed in the standard field (LLM path),
     # replace it with the successor before wording the deviation (Rule V Part 4).
     _std_field_upper = str(item.get('standard') or '').upper()
-    if re.search(r'\bAPI\s*601\b', _std_field_upper):
+    if is_non_standard(_std_field_upper):
+        pass  # no standard governs this line — no successor to substitute
+    elif re.search(r'\bAPI\s*601\b', _std_field_upper):
         item['standard'] = 'ASME B16.20'
     elif re.search(r'\bAPI\s*605\b', _std_field_upper):
         item['standard'] = 'ASME B16.47 (SERIES-B)'
     elif re.search(r'\bMSS\s*SP[-\s]?44\b', _std_field_upper):
         item['standard'] = 'ASME B16.47 (SERIES-A)'
     if re.search(r'\bAPI\s*60[15]\b|\bMSS\s*SP[-\s]?44\b', _raw_all_std):
+        _successor = item.get('standard')
         _add_item_deviation(
             item, flags,
             f'OBSOLETE STANDARD CITED (API 601/605 / MSS SP-44) — SUPERSEDED; '
-            f'QUOTED TO {item.get("standard") or "CURRENT ASME STANDARD"}')
+            f'QUOTED AS NON-STANDARD (SIZE NOT TABULATED)'
+            if is_non_standard(_successor) else
+            f'OBSOLETE STANDARD CITED (API 601/605 / MSS SP-44) — SUPERSEDED; '
+            f'QUOTED TO {_successor or "CURRENT ASME STANDARD"}')
 
     # --- Explicit NACE certification demand → 'NACE MR0175,' before the standard ---
     if gasket_type in ('SPIRAL_WOUND', 'SOFT_CUT', 'KAMM', 'SHEET_GASKET', 'CMG'):

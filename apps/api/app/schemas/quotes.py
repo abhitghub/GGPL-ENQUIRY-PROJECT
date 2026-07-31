@@ -108,7 +108,9 @@ class ChangeQueryCreateRequest(BaseModel):
 
 
 class ChangeQueryActionRequest(BaseModel):
-    # "approve" | "reject" (admin decision) or "resolve" (change made, send the
-    # enquiry back to where it was when the query was approved).
+    # "approve" | "reject" (admin decision), "reply" (a message on the query's
+    # own thread — the team it was sent to answers without moving the enquiry)
+    # or "resolve" (change made, send the enquiry back to where it was when the
+    # query was approved). "reply" requires a note.
     action: str
     note: str = ""

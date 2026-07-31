@@ -97,8 +97,11 @@ SOURCE_IMPORT = 'import'
 # `#` `%` and `+` are kept: they carry meaning in sizes, ratings and grades
 # (1-1/2", 150#, 2.5MM, SS316L+GRAPHITE, 2%MO).
 _SEPARATORS = re.compile(r'[^A-Z0-9./\-#%+]+')
-_TRAILING_ZERO_DECIMAL = re.compile(r'\b(\d+)\.(\d*?)0+\b')
-_BARE_DECIMAL_POINT = re.compile(r'\b(\d+)\.(?=\D|$)')
+# `4.50MM` -> `4.5MM`, `150.00 NB` -> `150 NB`. The leading guard keeps standard
+# citations intact: the `16` of `B16.20` is preceded by a letter, so B16.20 never
+# collapses to B16.2.
+_TRAILING_ZERO_DECIMAL = re.compile(r'(?<![A-Z0-9.])(\d+)\.(\d*?)0+(?!\d)')
+_BARE_DECIMAL_POINT = re.compile(r'(?<![A-Z0-9.])(\d+)\.(?!\d)')
 _UNICODE_FOLD = {
     '‘': "'", '’': "'", '“': '"', '”': '"',
     '–': '-', '—': '-', '−': '-',
@@ -205,6 +208,20 @@ def descriptions_differ(left: Any, right: Any) -> bool:
     return normalize_source_text(left) != normalize_source_text(right)
 
 
+def is_escalation_text(value: Any) -> bool:
+    """Whether a description slot holds an escalation phrase.
+
+    An escalation ('KINDLY PROVIDE DATASHEET…', 'REGRET') is the rules engine
+    asking the customer for information, not the team's answer to a wording.
+    Learning one would teach the portal to reply "provide a datasheet" to every
+    future enquiry carrying that wording — and to overwrite the real
+    description the moment someone fixed the row. Never capture, never teach.
+    """
+    from core.rules import ESCALATION_PHRASES
+
+    return ' '.join(str(value or '').upper().split()) in ESCALATION_PHRASES
+
+
 @dataclass(frozen=True)
 class LearnedEntry:
     """One thing the portal has been taught."""
@@ -266,6 +283,11 @@ class DescriptionMemory:
         self._count = 0
         for entry in entries:
             if entry.status not in ACTIVE_STATUSES or not entry.fingerprint:
+                continue
+            # Belt and braces for stores written before entry_from_item refused
+            # them: an escalation phrase is a question, so replaying it would
+            # keep overwriting the answer the team just typed.
+            if is_escalation_text(entry.ggpl_description):
                 continue
             customer = _customer_key(entry.customer)
             self._by_fingerprint.setdefault((customer, entry.fingerprint), []).append(entry)
@@ -399,12 +421,19 @@ def entry_from_item(
 ) -> LearnedEntry | None:
     """Build an entry from a portal row, or None when there is nothing to learn.
 
-    Nothing to learn means: no customer wording to key on, or no GGPL
-    description and no corrected fields to remember.
+    Nothing to learn means: no customer wording to key on, no GGPL description
+    and no corrected fields to remember, or a row that has not been answered
+    yet — one still carrying an escalation (see `is_escalation_text`). The last
+    case matters most: 'KINDLY PROVIDE DATASHEET…' in the description slot is
+    the engine's question, and learning it would both answer every future
+    enquiry with that wording with the question and overwrite the real
+    description the moment someone filled the columns in.
     """
     source_text = source_text_of(item)
     key = fingerprint(source_text)
     if not key:
+        return None
+    if item.get('escalation') or is_escalation_text(item.get('ggpl_description')):
         return None
     description = str(item.get('ggpl_description') or '').strip()
     payload = {

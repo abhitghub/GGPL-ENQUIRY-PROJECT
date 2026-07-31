@@ -79,7 +79,7 @@ def test_ringed_spw_bare_od_id_gets_confirmation_flag():
 def test_dims_only_spw_gets_no_defaulted_standard():
     # RULE V OD x ID law: no size+class -> no dimensional standard defaulted
     item = _process(_HX_SPW)
-    assert not item.get("standard")
+    assert item["standard"] == "NON STANDARD"
     assert "ASME" not in item["ggpl_description"]
 
 
@@ -160,9 +160,9 @@ def test_dims_only_spw_with_cited_b1620_becomes_construction_reference():
     assert "ASME B16.20" not in item["ggpl_description"]
 
 
-def test_soft_cut_od_id_keeps_ground_truth_b1621_convention():
-    # Pinned behavior: the OD x ID conversion is scoped to SPW/DJI/KAMM —
-    # soft cut keeps its ground-truth B16.21 default (test_non_standard.py)
+def test_soft_cut_od_id_gets_no_defaulted_standard():
+    # RULE V Part 5.0: the OD x ID law applies to EVERY family without
+    # exception — a dims-only soft cut has no size+class to key B16.21.
     item = _process({
         "gasket_type": "SOFT_CUT",
         "size_type": "OD_ID",
@@ -172,7 +172,51 @@ def test_soft_cut_od_id_keeps_ground_truth_b1621_convention():
         "moc": "SOFT IRON",
         "raw_description": "GSKT,PLUG,35ODX30IDX2MM,SOFT IRON",
     })
-    assert item["ggpl_description"].endswith("ASME B16.21")
+    assert item["standard"] == "NON STANDARD"
+    assert "ASME" not in item["ggpl_description"]
+
+
+def test_dims_only_with_rating_but_no_size_is_non_standard():
+    # A bare class is not a table key — Part 5.0 needs size + class.
+    item = _process({
+        "gasket_type": "SPIRAL_WOUND",
+        "size_type": "OD_ID",
+        "od_mm": 2126,
+        "id_mm": 2100,
+        "rating": "150#",
+        "thickness_mm": 4.5,
+        "sw_winding_material": "SS304",
+        "sw_filler": "GRAPHITE",
+        "raw_description": "SS304 SPWD 2126 OD X 2100 ID X 4.5 THK 150#",
+    })
+    assert item["standard"] == "NON STANDARD"
+    assert "ASME" not in item["ggpl_description"]
+
+
+def test_out_of_range_class_2500_is_non_standard():
+    # RULE V Part 3 / Part 7 rule 1 — no CL2500 flange at NPS >= 14.
+    item = _process({
+        "gasket_type": "SPIRAL_WOUND",
+        "size": '16"',
+        "rating": "2500#",
+        "sw_winding_material": "SS316",
+        "sw_filler": "GRAPHITE",
+        "raw_description": 'SPIRAL WOUND GASKET 16" 2500# SS316',
+    })
+    assert item["standard"] == "NON STANDARD"
+    assert "ASME" not in item["ggpl_description"]
+
+
+def test_specials_family_never_carries_a_dimensional_standard():
+    for family in ("PLUG_GASKET", "CORRUGATED", "LENS", "O_RING"):
+        item = _process({
+            "gasket_type": family, "size": '2"', "rating": "150#",
+            "moc": "SS316", "thickness_mm": 3,
+            "raw_description": f'{family} 2" 150# SS316',
+        })
+        assert item["standard"] == "NON STANDARD", family
+        for tag in ("ASME", "DIN", "EN 1514", "API 6"):
+            assert tag not in item["ggpl_description"], (family, tag)
 
 
 def test_legacy_standard_typos_normalize():

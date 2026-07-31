@@ -47,7 +47,11 @@ const STEP_OWNER_ROLES: Record<string, string[]> = {
   enquiry_received: ["estimation"],
   spec_check: ["estimation"],
   query_raised_to_customer: ["sales"],
-  technical_review_pending: ["technical"],
+  // Technical review is the manager's step. This is the ONLY state management
+  // owns here: the backend lets management act on every step, but listing them
+  // all would make the manager's queue every open enquiry instead of the work
+  // actually waiting on him.
+  technical_review_pending: ["management"],
   sent_for_pricing: ["admin"],
   pricing_decision: ["estimation"],
   pricing_submitted: ["sales", "admin"],

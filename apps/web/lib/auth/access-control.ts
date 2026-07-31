@@ -19,6 +19,7 @@ export type AppCapability =
   | "edit_material_phase2"
   | "approve_quotes"
   | "export_quotes"
+  | "manage_description_memory"
   | "manage_users";
 
 export type RolePermissionMap = Record<AppRole, Record<AppCapability, boolean>>;
@@ -45,6 +46,7 @@ export const capabilityLabels: Record<AppCapability, string> = {
   edit_material_phase2: "Edit material planning rows",
   approve_quotes: "Approve quotes",
   export_quotes: "Export quotes",
+  manage_description_memory: "Approve learned descriptions",
   manage_users: "Manage users",
 };
 
@@ -68,6 +70,7 @@ export const actionCapabilities = [
   "edit_material_phase2",
   "approve_quotes",
   "export_quotes",
+  "manage_description_memory",
   "manage_users",
 ] as const satisfies readonly AppCapability[];
 
@@ -88,10 +91,12 @@ export const defaultAccessSettings: AccessSettings = {
     management: permissions([
       "view_dashboard", "view_enquiry", "view_material_planning", "view_quotation", "view_purchase_orders", "view_doc_assistant", "view_history",
       "edit_sales_details", "edit_workflow", "edit_line_items", "edit_quotation", "approve_quotes", "export_quotes",
+      "manage_description_memory",
     ]),
     approver: permissions([
       "view_dashboard", "view_enquiry", "view_quotation", "view_purchase_orders", "view_history",
       "edit_workflow", "edit_line_items", "edit_quotation", "approve_quotes", "export_quotes",
+      "manage_description_memory",
     ]),
     // Estimation (not sales) creates enquiries and assigns the sales owner;
     // sales works the customer-facing steps (queries, sending quotations).
@@ -102,6 +107,9 @@ export const defaultAccessSettings: AccessSettings = {
     estimation: permissions([
       "view_dashboard", "view_enquiry", "view_doc_assistant", "view_history",
       "create_enquiry", "edit_sales_details", "edit_workflow", "edit_line_items", "edit_quotation", "export_quotes",
+      // Estimation owns the GGPL wording, so it also owns what the portal is
+      // taught about it.
+      "manage_description_memory",
     ]),
     // Technical review is a REVIEW-ONLY role (mirrors DEFAULT_ACCESS_SETTINGS in
     // apps/api/app/db/repositories.py): read the specs, then pass the enquiry to
