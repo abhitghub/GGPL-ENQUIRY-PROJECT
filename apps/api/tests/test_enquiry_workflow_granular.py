@@ -25,7 +25,12 @@ sys.modules.pop("app", None)
 
 from app.config import get_settings  # noqa: E402
 from app.main import app  # noqa: E402
-from app.services.enquiry_workflow import active_step_ids, active_transitions, can_act_on_step  # noqa: E402
+from app.services.enquiry_workflow import (  # noqa: E402
+    REVIEW_LOOP_ACTIONS,
+    active_step_ids,
+    active_transitions,
+    can_act_on_step,
+)
 
 
 @pytest.fixture
@@ -199,10 +204,26 @@ def test_reviewer_returns_errors_then_rechecks(granular):
     returned = _act(client, org, "technical", qid, "return_spec_errors", comment="Flange rating missing on lines 3-5")
     assert _stage(returned) == "spec_check"
     assert returned.json()["stage_meta"]["workflow_comment"] == "Flange rating missing on lines 3-5"
+    # Re-submitting a returned spec is a reply, so it must say what changed —
+    # a note-less re-submission is rejected (a first submission needs no note).
+    _act(client, org, "estimation", qid, "send_to_technical_review", expect=422)
+    resubmitted = _act(client, org, "estimation", qid, "send_to_technical_review", comment="Added the rating on lines 3-5")
     # Estimation cannot skip the re-check by pushing straight past the reviewer
     # once it has re-submitted.
-    assert _stage(_act(client, org, "estimation", qid, "send_to_technical_review")) == "technical_review_pending"
+    assert _stage(resubmitted) == "technical_review_pending"
     _act_blocked(client, org, "estimation", qid, "return_tr_spec")
+    # Both sides of the exchange survive in the history log, so the reviewer can
+    # read what he flagged next to estimation's reply when he re-checks.
+    thread = [
+        (row["action"], row["comment"])
+        for row in resubmitted.json()["stage_meta"]["granular_workflow"]["history_log"]
+        if row["action"] in REVIEW_LOOP_ACTIONS
+    ]
+    assert thread == [
+        ("send_to_technical_review", ""),
+        ("return_spec_errors", "Flange rating missing on lines 3-5"),
+        ("send_to_technical_review", "Added the rating on lines 3-5"),
+    ]
     # Second round: the reviewer clears it, so it moves to the pricing queue.
     assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "sent_for_pricing"
 
@@ -222,26 +243,156 @@ def test_technical_review_is_optional(granular):
     _act_blocked(client, org, "sales", other, "send_to_pricing_direct")
 
 
-def test_admin_releases_to_pricing_without_a_formula(granular):
-    """An enquiry carries many different specs, so admin gives no single pricing
-    formula — the release to estimation needs no note, and none is recorded."""
+def test_admin_releases_an_empty_enquiry_without_a_formula(granular):
+    """There is no single formula for an enquiry — the rate rule is written per
+    spec. With nothing to price, the release needs no formula and no note, and
+    a free-text note stays an ordinary workflow_comment."""
     client = TestClient(app)
     org = f"org-gw-formula-{uuid.uuid4().hex}"
     qid = _create_enquiry(client, org)
 
     _act(client, org, "estimation", qid, "begin_spec_check")
     _act(client, org, "estimation", qid, "send_to_pricing_direct")
-    # No note needed -> the handoff goes through.
+    # No specs to price -> the handoff goes through with nothing recorded.
     priced = _act(client, org, "shashnam", qid, "open_pricing")
     meta = priced.json()["stage_meta"]
     assert _stage(priced) == "pricing_decision"
     assert "pricing_formula" not in meta
-    # A free-text note on this handoff stays an ordinary workflow_comment and is
-    # not promoted to a durable formula.
+    assert "pricing_formulas" not in meta
     submitted = _act(client, org, "estimation", qid, "submit_priced_quotation", comment="Priced per spec")
     submitted_meta = submitted.json()["stage_meta"]
     assert submitted_meta["workflow_comment"] == "Priced per spec"
     assert "pricing_formula" not in submitted_meta
+
+
+def test_technical_reviewer_is_review_only(granular):
+    """Technical review reviews and routes — it does not fix. The reviewer can
+    read the enquiry and perform both review handoffs, but cannot edit the line
+    items, the quotation or the enquiry metadata: estimation makes the changes."""
+    client = TestClient(app)
+    org = f"org-gw-review-only-{uuid.uuid4().hex}"
+    qid = _create_enquiry(client, org)
+    _act(client, org, "estimation", qid, "begin_spec_check")
+    _act(client, org, "estimation", qid, "send_to_technical_review")
+
+    # He can read the enquiry he is reviewing.
+    assert client.get(f"/api/v1/quotes/{qid}", headers=_headers(org, "technical")).status_code == 200
+    # But he cannot rewrite the specs — that is estimation's job after a return.
+    for payload in (
+        {"items": [{"raw_description": "reviewer edited this"}]},
+        {"quote_data": {"payment_terms": "reviewer edited this"}},
+        {"stage_meta": {"due_date": "2026-01-01"}},
+    ):
+        resp = client.patch(f"/api/v1/quotes/{qid}", headers=_headers(org, "technical"), json=payload)
+        assert resp.status_code == 403, f"technical should not edit {list(payload)[0]}: {resp.status_code} {resp.text}"
+    # Both review handoffs still work — they gate on stage ownership, not on an
+    # edit capability, so stripping the edit rights does not disarm the reviewer.
+    returned = _act(client, org, "technical", qid, "return_spec_errors", comment="Rating missing on line 2")
+    assert _stage(returned) == "spec_check"
+    _act(client, org, "estimation", qid, "send_to_technical_review", comment="Rating added")
+    assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "sent_for_pricing"
+
+
+def _set_formulas(client, org, user_id, quote_id, rows, *, expect=200, **extra):
+    resp = client.patch(
+        f"/api/v1/quotes/{quote_id}",
+        headers=_headers(org, user_id),
+        json={"stage_meta": {"pricing_formulas": {"rows": rows, "set_by": user_id, **extra}}},
+    )
+    assert resp.status_code == expect, f"set formulas as {user_id}: {resp.status_code} {resp.text}"
+    return resp
+
+
+def _at_pricing_desk(client, org, items) -> str:
+    """An enquiry with line items, parked in the pricing desk's queue."""
+    qid = _create_enquiry(client, org)
+    client.patch(f"/api/v1/quotes/{qid}", headers=_headers(org, "estimation"), json={"items": items})
+    _act(client, org, "estimation", qid, "begin_spec_check")
+    _act(client, org, "estimation", qid, "send_to_pricing_direct")
+    return qid
+
+
+SPEC_A = {"raw_description": "SPIRAL WOUND SS316 GRAPHITE 150#", "quantity": 4, "gasket_type": "SPIRAL_WOUND"}
+SPEC_B = {"raw_description": "CNAF SHEET 3MM 150# RF", "quantity": 10, "gasket_type": "SOFT_CUT"}
+
+
+def test_every_spec_needs_a_formula_before_the_release_to_estimation(granular):
+    """Estimation prices each line against its spec's rate rule, so an enquiry
+    with line items cannot leave the pricing desk until every spec row on the
+    quotation summary carries a formula."""
+    client = TestClient(app)
+    org = f"org-gw-per-spec-{uuid.uuid4().hex}"
+    qid = _at_pricing_desk(client, org, [SPEC_A, SPEC_B])
+
+    # Nothing entered yet -> blocked.
+    blocked = _act(client, org, "shashnam", qid, "open_pricing", expect=422)
+    assert "pricing formula" in blocked.json()["detail"].lower()
+    # One spec priced, one blank -> still blocked, and the gap is named.
+    _set_formulas(
+        client, org, "shashnam", qid,
+        [{"item": "SPW SS316/GRA", "count": 1, "formula": "weight x rate + 20%"}, {"item": "CNAF 3MM", "count": 1, "formula": ""}],
+    )
+    partial = _act(client, org, "shashnam", qid, "open_pricing", expect=422)
+    assert "CNAF 3MM" in partial.json()["detail"]
+    # Every spec priced -> the release goes through and the formulas travel with
+    # the enquiry to estimation.
+    _set_formulas(
+        client, org, "shashnam", qid,
+        [
+            {"item": "SPW SS316/GRA", "count": 1, "formula": "weight x rate + 20%"},
+            {"item": "CNAF 3MM", "count": 1, "formula": "area x sheet rate"},
+        ],
+    )
+    released = _act(client, org, "shashnam", qid, "open_pricing")
+    assert _stage(released) == "pricing_decision"
+    rows = released.json()["stage_meta"]["pricing_formulas"]["rows"]
+    assert [row["formula"] for row in rows] == ["weight x rate + 20%", "area x sheet rate"]
+
+
+def test_only_the_pricing_desk_writes_the_formulas(granular):
+    """Estimation reads the formulas and prices against them; it cannot rewrite
+    the rate rule itself."""
+    client = TestClient(app)
+    org = f"org-gw-formula-rbac-{uuid.uuid4().hex}"
+    qid = _at_pricing_desk(client, org, [SPEC_A])
+    rows = [{"item": "SPW SS316/GRA", "count": 1, "formula": "weight x rate + 20%"}]
+    _set_formulas(client, org, "shashnam", qid, rows)
+    _act(client, org, "shashnam", qid, "open_pricing")
+
+    overwritten = [{"item": "SPW SS316/GRA", "count": 1, "formula": "whatever estimation likes"}]
+    resp = client.patch(
+        f"/api/v1/quotes/{qid}",
+        headers=_headers(org, "estimation"),
+        json={"stage_meta": {"pricing_formulas": {"rows": overwritten}}},
+    )
+    assert resp.status_code == 403, resp.text
+    current = client.get(f"/api/v1/quotes/{qid}", headers=_headers(org, "estimation"))
+    assert current.json()["stage_meta"]["pricing_formulas"]["rows"][0]["formula"] == "weight x rate + 20%"
+
+
+def test_changed_line_items_send_the_formulas_back_for_a_re_check(granular):
+    """Rates written against a different set of line items must not be released
+    unreviewed: changing the items marks the formulas stale until they are
+    re-saved."""
+    client = TestClient(app)
+    org = f"org-gw-formula-stale-{uuid.uuid4().hex}"
+    qid = _at_pricing_desk(client, org, [SPEC_A])
+    rows = [{"item": "SPW SS316/GRA", "count": 1, "formula": "weight x rate + 20%"}]
+    _set_formulas(client, org, "shashnam", qid, rows)
+
+    changed = client.patch(
+        f"/api/v1/quotes/{qid}",
+        headers=_headers(org, "shashnam"),
+        json={"items": [SPEC_A, SPEC_B]},
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["stage_meta"]["pricing_formulas"]["stale"] is True
+
+    stale = _act(client, org, "shashnam", qid, "open_pricing", expect=422)
+    assert "changed" in stale.json()["detail"].lower()
+    # Re-saving the formulas against the new items clears it.
+    _set_formulas(client, org, "shashnam", qid, rows + [{"item": "CNAF 3MM", "count": 1, "formula": "area x sheet rate"}])
+    assert _stage(_act(client, org, "shashnam", qid, "open_pricing")) == "pricing_decision"
 
 
 def test_granular_technical_review_gate(granular):

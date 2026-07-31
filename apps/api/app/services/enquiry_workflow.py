@@ -187,6 +187,12 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "to": "technical_review_pending",
         "with_whom": "Technical review",
         "label": "Spec complete — send for technical review",
+        # First trip: no note needed. Re-submitting a spec the reviewer sent back
+        # is a reply, so it must say what changed — otherwise the reviewer has to
+        # re-check the whole spec blind.
+        "require_comment_after": {
+            "return_spec_errors": "Say what you changed so the reviewer knows what to re-check",
+        },
     },
     # Technical review is optional: when the specs need no review pass,
     # estimation may send the enquiry straight to the admin pricing queue.
@@ -218,15 +224,17 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "with_whom": "Admin",
         "label": "Technical review done — submit for pricing",
     },
-    # Admin releases the enquiry to estimation, which prices it per spec — a
-    # single formula cannot cover an enquiry with many different specs, so admin
-    # gives no formula here; any handoff note is optional.
+    # Admin (the pricing desk) releases the enquiry to estimation. One formula
+    # cannot cover an enquiry carrying many different specs, so the formula is
+    # entered PER SPEC against the quotation summary and every spec row must
+    # carry one before the release goes through. A handoff note stays optional.
     "open_pricing": {
         "from": {"sent_for_pricing"},
         "roles": {"admin", "management"},
         "to": "pricing_decision",
         "with_whom": "Estimation",
         "label": "Send to estimation for pricing",
+        "require_pricing_formulas": True,
     },
     # Estimation fills the pricing per the formula (and can preview the quotation),
     # then submits it for generation. Estimation does NOT generate the quotation.
@@ -263,13 +271,15 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
 # Sales/viewer stay owner-scoped; admin sees everything already; management stays
 # omniscient (mirrors the legacy map).
 GRANULAR_ROLE_VISIBLE_STEPS: dict[str, set[str]] = {
-    "estimation": {
-        "enquiry_received",
-        "spec_check",
-        # estimation prices the enquiry (admin sets the formula); it does not
-        # generate the quotation — sales/admin do.
-        "pricing_decision",
-    },
+    # Estimation owns spec correctness for the whole life of an enquiry, not just
+    # while it is parked on an estimation step: a wrong MOC or thickness spotted
+    # during technical review, at the pricing desk, or after the quotation was
+    # generated is still estimation's to fix. So estimation SEES every step
+    # (like management and admin) and can open any enquiry to correct its
+    # columns. This widens visibility only — which enquiries land in whose queue
+    # is GRANULAR_STAGE_OWNER_ROLES below, and the workflow HANDOFFS stay
+    # stage-gated, so estimation still cannot advance an enquiry out of turn.
+    "estimation": set(GRANULAR_WORKFLOW_STEP_IDS),
     "technical": {"technical_review_pending"},
     "admin": {"sent_for_pricing", "pricing_submitted"},
     "management": set(GRANULAR_WORKFLOW_STEP_IDS),
@@ -387,3 +397,84 @@ def can_perform(action: str, role: str) -> bool:
     if not rule:
         return False
     return role == "admin" or role in rule["roles"]
+
+
+# The technical-review conversation: the reviewer returns a spec with an error
+# list, estimation replies saying what it changed, and the enquiry comes back for
+# a re-check. Every note in this loop is worth reading side by side, so the UI
+# rebuilds the thread from the history_log by filtering on these actions.
+REVIEW_LOOP_ACTIONS: tuple[str, ...] = (
+    "send_to_technical_review",
+    "return_spec_errors",
+    "return_tr_spec",
+)
+
+
+def last_workflow_action(stage_meta: dict | None) -> str:
+    """The action name of the most recent handoff, or "" for a fresh enquiry."""
+    granular = (stage_meta or {}).get("granular_workflow") or {}
+    history = granular.get("history_log") or []
+    if not isinstance(history, list) or not history:
+        return ""
+    last = history[-1]
+    if not isinstance(last, dict):
+        return ""
+    return str(last.get("action") or "")
+
+
+def required_comment_reason(transition: dict, stage_meta: dict | None) -> str:
+    """Why this handoff needs a note, or "" when the note is optional.
+
+    Some handoffs always need one (the reviewer's error list). Others only need
+    one on a repeat trip — estimation re-submitting a spec the reviewer returned
+    must say what it changed.
+    """
+    always = transition.get("require_comment")
+    if always:
+        return str(always)
+    conditional = transition.get("require_comment_after") or {}
+    return str(conditional.get(last_workflow_action(stage_meta)) or "")
+
+
+# ---------------------------------------------------------------------------
+# Pricing formulas
+#
+# The pricing desk works off the quotation summary: the line items collapse into
+# one row per spec and a rate formula is written against each row (stored on
+# stage_meta.pricing_formulas by the portal). Estimation then prices every line
+# against its spec's formula and raises the process for those materials — so an
+# enquiry must not reach estimation with specs left unpriced.
+# ---------------------------------------------------------------------------
+
+PRICING_FORMULA_KEY = "pricing_formulas"
+
+
+def pricing_formula_gap(stage_meta: dict | None, items: list[dict] | None) -> str:
+    """Why this enquiry is not ready to leave the pricing desk, or "".
+
+    Nothing to price (no items, or every line regretted) is not a gap: the
+    release goes through and the formula table stays empty.
+    """
+    priceable = [item for item in (items or []) if (item or {}).get("status") != "regret"]
+    if not priceable:
+        return ""
+    record = (stage_meta or {}).get(PRICING_FORMULA_KEY)
+    rows = record.get("rows") if isinstance(record, dict) else None
+    if not isinstance(rows, list) or not rows:
+        return (
+            "Enter a pricing formula against every spec on the quotation summary "
+            "before sending this enquiry to estimation"
+        )
+    missing = [
+        str((row or {}).get("item") or "")
+        for row in rows
+        if not str((row or {}).get("formula") or "").strip()
+    ]
+    if missing:
+        return f"{len(missing)} spec(s) still have no pricing formula: {'; '.join(filter(None, missing))[:400]}"
+    if isinstance(record, dict) and record.get("stale") is True:
+        return (
+            "The line items changed after these formulas were entered — "
+            "review the quotation summary and re-save the formulas"
+        )
+    return ""

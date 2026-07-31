@@ -319,6 +319,13 @@ def apply_update_invariants(current: QuoteRead, data: dict[str, Any], *, actor_i
             stage_meta["material_plan_stale"] = True
             stage_meta["material_plan_stale_at"] = now_iso()
         stage_meta["extraction_summary"] = extraction_summary(new_items, next_version, stage_meta)
+        # The specs moved under the pricing desk's per-spec formulas: flag them
+        # so the release to estimation asks for a re-check instead of carrying
+        # rates that were written against different line items. Saving the
+        # formulas again clears the flag (the portal writes the record whole).
+        formulas = stage_meta.get("pricing_formulas")
+        if isinstance(formulas, dict) and formulas.get("rows"):
+            stage_meta["pricing_formulas"] = {**formulas, "stale": True, "stale_at": now_iso()}
     elif old_meta.get("material_plan_stale") is True:
         if breakdown_changed:
             stage_meta["material_plan_stale"] = False

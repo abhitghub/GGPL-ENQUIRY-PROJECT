@@ -595,6 +595,69 @@ export const GRANULAR_ENQUIRY_WORKFLOW_ACTIONS = [
   { action: "send_to_customer", from: ["quotation_generated"], roles: ["sales", "management"], label: "Send quotation to customer" },
 ] as const;
 
+// The technical-review conversation (mirrors REVIEW_LOOP_ACTIONS on the API):
+// the reviewer returns a spec with an error list, estimation replies saying what
+// it changed, and the enquiry comes back for a re-check. Filtering the workflow
+// history on these actions rebuilds the thread both teams need to read.
+export const REVIEW_LOOP_ACTIONS: readonly string[] = [
+  "send_to_technical_review",
+  "return_spec_errors",
+  "return_tr_spec",
+];
+
+// One entry in that thread, oldest first.
+export type ReviewLoopEntry = {
+  action: string;
+  by: string;
+  role: string;
+  at: string;
+  comment: string;
+};
+
+// Rebuild the technical-review thread from an enquiry's workflow history.
+export function reviewLoopThread(stageMeta: Record<string, unknown> | null | undefined): ReviewLoopEntry[] {
+  const granular = ((stageMeta ?? {}).granular_workflow ?? {}) as Record<string, unknown>;
+  const history = Array.isArray(granular.history_log) ? granular.history_log : [];
+  return history
+    .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === "object")
+    .filter((row) => REVIEW_LOOP_ACTIONS.includes(String(row.action ?? "")))
+    .map((row) => ({
+      action: String(row.action ?? ""),
+      by: String(row.by ?? ""),
+      role: String(row.role ?? ""),
+      at: String(row.at ?? ""),
+      comment: String(row.comment ?? ""),
+    }));
+}
+
+// Notes the API rejects a handoff without (mirrors require_comment /
+// require_comment_after in app/services/enquiry_workflow.py). `after` makes the
+// note mandatory only when it names the previous action — estimation must say
+// what it changed when re-submitting a spec the reviewer sent back, while a
+// first-time submission needs no note.
+export const WORKFLOW_NOTE_REQUIRED: Record<string, { always?: string; after?: Record<string, string> }> = {
+  raise_customer_query: { always: "Add a one-line note on what is missing before sending back to sales." },
+  return_spec_errors: { always: "Describe the errors found before returning to estimation." },
+  send_to_technical_review: {
+    after: { return_spec_errors: "Say what you changed so the reviewer knows what to re-check." },
+  },
+};
+
+// The message to block a note-less handoff with, or "" when the note is optional.
+export function workflowNoteRequirement(action: string, lastAction: string): string {
+  const rule = WORKFLOW_NOTE_REQUIRED[action];
+  if (!rule) return "";
+  return rule.always ?? rule.after?.[lastAction] ?? "";
+}
+
+// The action name of the most recent handoff, or "" for a fresh enquiry.
+export function lastWorkflowActionOf(stageMeta: Record<string, unknown> | null | undefined): string {
+  const granular = ((stageMeta ?? {}).granular_workflow ?? {}) as Record<string, unknown>;
+  const history = Array.isArray(granular.history_log) ? granular.history_log : [];
+  const last = history[history.length - 1] as { action?: unknown } | undefined;
+  return typeof last?.action === "string" ? last.action : "";
+}
+
 // The workflow constants active for the current flag state.
 export const activeWorkflowSteps = () => (GRANULAR_WORKFLOW ? GRANULAR_ENQUIRY_WORKFLOW_STEPS : ENQUIRY_WORKFLOW_STEPS);
 export const activeWorkflowActions = () => (GRANULAR_WORKFLOW ? GRANULAR_ENQUIRY_WORKFLOW_ACTIONS : ENQUIRY_WORKFLOW_ACTIONS);
