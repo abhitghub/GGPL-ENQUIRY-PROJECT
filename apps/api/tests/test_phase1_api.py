@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.modules.pop("app", None)
 
+from app.db.repositories import DEFAULT_APP_USERS
 from app.main import app
 
 
@@ -273,10 +274,15 @@ def test_seeded_admin_can_sign_in_locally():
     client = TestClient(app)
     org_id = f"org-admin-{uuid.uuid4().hex}"
 
+    # Read the bootstrap credential out of the seed list instead of hardcoding
+    # it, so rotating the seeded passwords cannot silently break this test.
+    seed = next(user for user in DEFAULT_APP_USERS if user["id"] == "shashnam")
+    password = seed["password_hash"].removeprefix("plain:")
+
     response = client.post(
         "/api/v1/auth/login",
         headers={"X-Org-Id": org_id},
-        json={"username": "shashnam", "password": "shashnam"},
+        json={"username": "shashnam", "password": password},
     )
 
     assert response.status_code == 200

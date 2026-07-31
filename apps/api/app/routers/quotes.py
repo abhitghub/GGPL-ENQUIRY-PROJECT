@@ -37,9 +37,11 @@ from app.services.enquiry_workflow import (
     active_steps,
     active_transitions,
     PRICING_FORMULA_KEY,
+    DETAIL_GATE_MESSAGE,
     can_act_on_step,
     canonical_workflow_step,
     current_workflow_step,
+    enquiry_detail_blockers,
     pricing_formula_gap,
     required_comment_reason,
     visible_steps_for_role,
@@ -821,6 +823,15 @@ def advance_workflow(
     if step not in transition["from"]:
         raise HTTPException(status_code=409, detail=f"This step is currently at '{step}', so it cannot be {payload.action.replace('_', ' ')}")
     _require_workflow_owner(user, step, transition)
+    # Estimation files the enquiry and owns its header; every team after it reads
+    # those fields and cannot recover a blank one. So an incomplete enquiry does
+    # not move on — not into spec check, not into any later step. Only the
+    # handoffs that exist to GET it completed stay open (see
+    # DETAIL_GATE_EXEMPT_ACTIONS). Enforced here so a direct API call cannot skip
+    # the check the portal makes.
+    detail_gaps = enquiry_detail_blockers(payload.action, current)
+    if detail_gaps:
+        raise HTTPException(status_code=422, detail={"message": DETAIL_GATE_MESSAGE, "blockers": detail_gaps})
     stage_meta = dict(current.stage_meta or {})
     # Persist the gasket-type flag (from payload or an existing value) before it
     # is needed to resolve a conditional branch.

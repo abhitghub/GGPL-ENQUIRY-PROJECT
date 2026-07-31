@@ -11,6 +11,8 @@ replace the primary quote.stage machine.
 
 from __future__ import annotations
 
+from typing import Any
+
 WORKFLOW_STEPS: list[dict[str, str]] = [
     {"id": "enquiry", "label": "Enquiry", "team": "Sales"},
     {"id": "estimation_review", "label": "Estimation review", "team": "Estimation"},
@@ -485,3 +487,108 @@ def pricing_formula_gap(stage_meta: dict | None, items: list[dict] | None) -> st
             "review the quotation summary and re-save the formulas"
         )
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Mandatory enquiry details
+#
+# Estimation files the enquiry and owns its header. Every team after it — the
+# reviewer, the pricing desk, sales — plus the enquiry register and the
+# quotation itself read those fields, and none of them can recover one that was
+# left blank. So an incomplete enquiry does not move on: not into spec check,
+# and not into any later step. The rule lives in one table so tightening or
+# relaxing it is a one-line edit.
+# ---------------------------------------------------------------------------
+
+# (label, sources) per mandatory detail. A detail counts as filled when ANY of
+# its sources carries text: "quote" reads a top-level record field, "quote_data"
+# the quotation payload, "stage_meta" the enquiry metadata. Several details are
+# captured in more than one place (choosing a customer master fills the name,
+# choosing a contact fills the person), so any one source is enough.
+#
+# Deliberately NOT required: the internal notes and the Outlook thread (the form
+# marks both optional), the customer's own RFQ number (not every customer sends
+# one), and priority/enquiry stage (the system applies a default).
+REQUIRED_ENQUIRY_DETAILS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    ("Customer", (("quote", "customer"), ("stage_meta", "customer_master_id"))),
+    ("Contact person", (("quote_data", "attention"), ("stage_meta", "customer_contact_id"))),
+    ("Contact person email", (("quote_data", "email"),)),
+    ("Contact number", (("quote_data", "contact_no"), ("quote_data", "mobile_no"), ("quote_data", "telephone_no"))),
+    ("Email subject", (("quote", "custom_label"),)),
+    ("Enquiry reference", (("quote", "quote_no"),)),
+    ("Quote type (export or domestic)", (("stage_meta", "market_type"),)),
+    ("Bidding or firm", (("stage_meta", "bid_type"),)),
+    ("Project name", (("quote", "project_ref"),)),
+    ("Country", (("stage_meta", "country"),)),
+    ("City", (("stage_meta", "city"),)),
+    ("EPC / project company", (("stage_meta", "epc_name"),)),
+    ("Sales rep", (("stage_meta", "owner_id"),)),
+    ("Due date", (("stage_meta", "due_date"),)),
+)
+
+LINE_ITEMS_DETAIL_LABEL = "Line items (at least one)"
+
+# The handoffs that stay open while details are missing: the ones whose whole
+# point is to GET the enquiry corrected — a query to the customer, its answer, a
+# spec the reviewer sent back. Anything absent from this set is gated, so a
+# transition added later is mandatory-by-default.
+DETAIL_GATE_EXEMPT_ACTIONS: frozenset[str] = frozenset(
+    {
+        "raise_customer_query",
+        "answer_customer_query",
+        "return_spec_errors",
+        # Legacy-machine equivalents: both return the enquiry to the team that
+        # has to fix the specs.
+        "return_to_estimation",
+        "pricing_to_technical",
+    }
+)
+
+
+def _detail_value(quote: Any, source: str, key: str) -> str:
+    if source == "quote":
+        return str(getattr(quote, key, "") or "").strip()
+    container = getattr(quote, source, None)
+    if not isinstance(container, dict):
+        return ""
+    return str(container.get(key) or "").strip()
+
+
+def enquiry_detail_gaps(quote: Any) -> list[str]:
+    """The mandatory enquiry details still blank on this record, by label.
+
+    `quote` is anything with the QuoteRead surface (the top-level fields plus
+    quote_data / stage_meta dicts) — duck-typed so this module keeps its
+    schema-free imports. Records fetched as list summaries carry no line items,
+    so the item count is read from n_items when items are absent.
+    """
+    gaps = [
+        label
+        for label, sources in REQUIRED_ENQUIRY_DETAILS
+        if not any(_detail_value(quote, source, key) for source, key in sources)
+    ]
+    items = getattr(quote, "items", None) or []
+    try:
+        n_items = int(getattr(quote, "n_items", 0) or 0)
+    except (TypeError, ValueError):
+        n_items = 0
+    if not items and not n_items:
+        gaps.append(LINE_ITEMS_DETAIL_LABEL)
+    return gaps
+
+
+def enquiry_detail_blockers(action: str, quote: Any) -> list[str]:
+    """The mandatory details holding this handoff back — empty when it may go.
+
+    Exempt handoffs return no blockers however incomplete the enquiry is: they
+    are the route to getting it completed.
+    """
+    if action in DETAIL_GATE_EXEMPT_ACTIONS:
+        return []
+    return enquiry_detail_gaps(quote)
+
+
+DETAIL_GATE_MESSAGE = (
+    "Fill in every enquiry detail before this enquiry can move forward — "
+    "open Enquiry setup to complete the missing ones"
+)

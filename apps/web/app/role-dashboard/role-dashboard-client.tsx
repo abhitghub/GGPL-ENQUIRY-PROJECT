@@ -27,6 +27,7 @@ import {
   reviewLoopThread,
   workflowNoteRequirement,
 } from "@/lib/api";
+import { enquiryDetailGaps, enquiryDetailGateMessage } from "@/lib/enquiry-details";
 import { isUnclassifiedSummaryItem } from "@/lib/extraction-summary";
 import {
   PRICING_FORMULA_META_KEY,
@@ -416,6 +417,13 @@ export function RoleDashboardClient() {
   }
 
   async function runAction(quote: Quote, action: string) {
+    // An incomplete enquiry header blocks every handoff except the ones that
+    // exist to get it completed — the fields are filled on the enquiry screen.
+    const detailGate = enquiryDetailGateMessage(action, quote);
+    if (detailGate) {
+      toast.error(detailGate);
+      return;
+    }
     const note = (rowNotes[quote.id] ?? "").trim();
     const noteRequired = noteRequiredFor(quote, action);
     if (noteRequired && !note) {
@@ -517,6 +525,9 @@ export function RoleDashboardClient() {
                   const pricingDesk = step === PRICING_DESK_STEP;
                   const isExpanded = expanded === quote.id;
                   const dirty = Object.keys(drafts[quote.id] ?? {}).length > 0;
+                  // Mandatory enquiry header fields still blank — they hold every
+                  // handoff on this row (see lib/enquiry-details.ts).
+                  const detailGaps = enquiryDetailGaps(quote);
                   const unmatchedLines = (detail?.items ?? [])
                     .map((item, index) => (isUnclassifiedSummaryItem(item) ? index + 1 : 0))
                     .filter(Boolean);
@@ -588,20 +599,25 @@ export function RoleDashboardClient() {
                               const blocked = gated && (!coverage.complete || !detail);
                               const noteRequired = noteRequiredFor(quote, item.action);
                               const noteMissing = Boolean(noteRequired) && !(rowNotes[quote.id] ?? "").trim();
+                              // An enquiry with a blank in its header moves
+                              // nowhere until estimation completes the setup.
+                              const detailGate = enquiryDetailGateMessage(item.action, quote);
                               return (
                                 <Button
                                   key={item.action}
                                   variant="secondary"
                                   size="sm"
-                                  disabled={busy !== null || blocked || noteMissing}
+                                  disabled={busy !== null || blocked || noteMissing || Boolean(detailGate)}
                                   title={
-                                    blocked
-                                      ? detail
-                                        ? `Enter a pricing formula against all ${coverage.total} spec(s) first`
-                                        : "Loading the quotation summary…"
-                                      : noteMissing
-                                        ? noteRequired
-                                        : undefined
+                                    detailGate
+                                      ? detailGate
+                                      : blocked
+                                        ? detail
+                                          ? `Enter a pricing formula against all ${coverage.total} spec(s) first`
+                                          : "Loading the quotation summary…"
+                                        : noteMissing
+                                          ? noteRequired
+                                          : undefined
                                   }
                                   onClick={() => runAction(quote, item.action)}
                                 >
@@ -613,6 +629,11 @@ export function RoleDashboardClient() {
                               <Link href={quoteHref(quote)}>{PRICING_SCREEN_STEPS.has(step) ? "Open pricing" : "Open"}</Link>
                             </Button>
                           </div>
+                          {detailGaps.length > 0 ? (
+                            <div className="mt-1 max-w-64 text-xs text-amber-700 dark:text-amber-300" title={detailGaps.join(", ")}>
+                              {`${detailGaps.length} enquiry detail(s) still to fill before this can move on: ${detailGaps.join(", ")}`}
+                            </div>
+                          ) : null}
                           {pricingDesk && detail && !coverage.complete ? (
                             <div className="mt-1 max-w-64 text-xs text-amber-700 dark:text-amber-300">
                               {`${coverage.missing.length} spec(s) still need a formula.`}
