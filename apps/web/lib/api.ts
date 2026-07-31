@@ -543,7 +543,7 @@ export const GRANULAR_ENQUIRY_WORKFLOW_STEPS = [
 // enquiry and the sub-status badge to show on the anchoring step.
 export const GRANULAR_WORKFLOW_SUBSTATES: Record<string, { mainline: string; label: string; team: string; badge: string }> = {
   query_raised_to_customer: { mainline: "spec_check", label: "Query raised to customer", team: "Sales", badge: "Waiting on customer" },
-  sent_for_pricing: { mainline: "pricing_decision", label: "Sent for pricing", team: "Admin", badge: "Awaiting pricing formula" },
+  sent_for_pricing: { mainline: "pricing_decision", label: "Sent for pricing", team: "Admin", badge: "Awaiting admin release" },
   quotation_generated: { mainline: "pricing_submitted", label: "Quotation generated", team: "Sales", badge: "Generated — ready to send" },
 };
 
@@ -588,7 +588,7 @@ export const GRANULAR_ENQUIRY_WORKFLOW_ACTIONS = [
   // Reviewer error loop: back to estimation with a note, re-submit, re-check.
   { action: "return_spec_errors", from: ["technical_review_pending"], roles: ["technical"], label: "Errors found — return to estimation" },
   { action: "return_tr_spec", from: ["technical_review_pending"], roles: ["technical"], label: "Technical review done — submit for pricing" },
-  { action: "open_pricing", from: ["sent_for_pricing"], roles: ["admin", "management"], label: "Set pricing formula & send to estimation" },
+  { action: "open_pricing", from: ["sent_for_pricing"], roles: ["admin", "management"], label: "Send to estimation for pricing" },
   { action: "submit_priced_quotation", from: ["pricing_decision"], roles: ["estimation", "management"], label: "Submit priced quotation" },
   // Domestic/international is derived from the enquiry's quote type — not asked again.
   { action: "generate_quotation", from: ["pricing_submitted"], roles: ["sales", "admin", "management"], label: "Generate quotation" },

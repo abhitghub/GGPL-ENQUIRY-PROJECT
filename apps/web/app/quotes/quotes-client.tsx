@@ -3807,15 +3807,10 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
       toast.error("Add a one-line note on what is missing before sending back to sales.");
       return;
     }
-    // The reviewer must say WHAT is wrong when returning an enquiry, and admin
-    // must give the pricing formula when handing to estimation (mirrors the
+    // The reviewer must say WHAT is wrong when returning an enquiry (mirrors the
     // backend require_comment gate).
     if (action === "return_spec_errors" && !comment) {
       toast.error("Describe the errors found before returning to estimation.");
-      return;
-    }
-    if (action === "open_pricing" && !comment) {
-      toast.error("Enter the pricing formula (in the comment box) before sending to estimation.");
       return;
     }
     try {
@@ -5192,15 +5187,6 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
             <div className="mt-2 rounded-md border bg-muted/30 px-2.5 py-1.5 text-xs">
               <span className="text-muted-foreground">Last note: </span>
               <span>{getString(quote.stage_meta?.workflow_comment)}</span>
-            </div>
-          ) : null}
-          {/* The pricing formula travels with the enquiry as a durable note —
-              unlike workflow_comment it survives later handoffs, so estimation
-              can always read it while pricing. */}
-          {getString(quote.stage_meta?.pricing_formula) ? (
-            <div className="mt-2 rounded-md border border-primary/40 bg-primary/5 px-2.5 py-1.5 text-xs">
-              <span className="font-medium">Pricing formula{getString(quote.stage_meta?.pricing_formula_by) ? ` (${getString(quote.stage_meta?.pricing_formula_by)})` : ""}: </span>
-              <span>{getString(quote.stage_meta?.pricing_formula)}</span>
             </div>
           ) : null}
           {availableWorkflowActions.length > 0 ? (

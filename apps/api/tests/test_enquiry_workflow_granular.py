@@ -112,7 +112,7 @@ def test_legacy_path_unchanged():
 
 def test_granular_happy_path(granular):
     """Full 6-step path: estimation does the spec work in one step, technical
-    review is a mandatory gate, admin sets the pricing formula, estimation
+    review is a mandatory gate, admin releases it to estimation, estimation
     prices, sales generates and sends — with a growing audit history_log."""
     client = TestClient(app)
     org = f"org-gw-happy-{uuid.uuid4().hex}"
@@ -127,9 +127,8 @@ def test_granular_happy_path(granular):
     assert _stage(tr) == "technical_review_pending"
     # Technical review done -> straight into the admin pricing queue.
     assert _stage(_act(client, org, "technical", qid, "return_tr_spec")) == "sent_for_pricing"
-    # Admin sets the pricing formula and hands it back to estimation to price.
-    # The pricing formula is the note on this action and is required.
-    assert _stage(_act(client, org, "shashnam", qid, "open_pricing", comment="Base rate x 1.4")) == "pricing_decision"
+    # Admin releases the enquiry back to estimation to price, no formula needed.
+    assert _stage(_act(client, org, "shashnam", qid, "open_pricing")) == "pricing_decision"
     # Estimation prices and submits the quotation for generation.
     assert _stage(_act(client, org, "estimation", qid, "submit_priced_quotation")) == "pricing_submitted"
     # Estimation cannot generate the quotation — only sales or admin.
@@ -163,8 +162,7 @@ def test_generate_route_derived_from_market_type(granular):
         ("shashnam", "open_pricing"),
         ("estimation", "submit_priced_quotation"),
     ]:
-        # open_pricing carries the pricing formula, which is required.
-        _act(client, org, role, qid, action, comment="Base rate x 1.4" if action == "open_pricing" else "")
+        _act(client, org, role, qid, action)
     generated = _act(client, org, "sales", qid, "generate_quotation")
     assert _stage(generated) == "quotation_generated"
     assert generated.json()["stage_meta"]["pricing_route"] == "international"
@@ -224,28 +222,26 @@ def test_technical_review_is_optional(granular):
     _act_blocked(client, org, "sales", other, "send_to_pricing_direct")
 
 
-def test_pricing_formula_is_required_and_durable(granular):
-    """Admin must enter the pricing formula to hand the enquiry to estimation,
-    and the formula survives later handoffs (workflow_comment does not)."""
+def test_admin_releases_to_pricing_without_a_formula(granular):
+    """An enquiry carries many different specs, so admin gives no single pricing
+    formula — the release to estimation needs no note, and none is recorded."""
     client = TestClient(app)
     org = f"org-gw-formula-{uuid.uuid4().hex}"
     qid = _create_enquiry(client, org)
 
     _act(client, org, "estimation", qid, "begin_spec_check")
     _act(client, org, "estimation", qid, "send_to_pricing_direct")
-    # No formula -> no handoff.
-    _act(client, org, "shashnam", qid, "open_pricing", expect=422)
-    priced = _act(client, org, "shashnam", qid, "open_pricing", comment="Base rate x 1.4, freight at actuals")
+    # No note needed -> the handoff goes through.
+    priced = _act(client, org, "shashnam", qid, "open_pricing")
     meta = priced.json()["stage_meta"]
     assert _stage(priced) == "pricing_decision"
-    assert meta["pricing_formula"] == "Base rate x 1.4, freight at actuals"
-    assert meta["pricing_formula_by"]
-    # A later handoff overwrites workflow_comment but leaves the formula intact,
-    # so estimation can still read it while pricing.
-    submitted = _act(client, org, "estimation", qid, "submit_priced_quotation", comment="Priced per formula")
+    assert "pricing_formula" not in meta
+    # A free-text note on this handoff stays an ordinary workflow_comment and is
+    # not promoted to a durable formula.
+    submitted = _act(client, org, "estimation", qid, "submit_priced_quotation", comment="Priced per spec")
     submitted_meta = submitted.json()["stage_meta"]
-    assert submitted_meta["workflow_comment"] == "Priced per formula"
-    assert submitted_meta["pricing_formula"] == "Base rate x 1.4, freight at actuals"
+    assert submitted_meta["workflow_comment"] == "Priced per spec"
+    assert "pricing_formula" not in submitted_meta
 
 
 def test_granular_technical_review_gate(granular):

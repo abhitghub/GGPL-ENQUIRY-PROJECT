@@ -101,7 +101,7 @@ ROLE_VISIBLE_STEPS: dict[str, set[str]] = {
 # Granular 6-step machine (additive; active only when ENABLE_GRANULAR_WORKFLOW).
 #
 # The business flow is presented to users as 6 numbered steps; three exception
-# states (customer query open, awaiting the admin pricing formula, quotation
+# states (customer query open, awaiting the admin release to pricing, quotation
 # generated but not yet sent) live INSIDE a numbered step and are shown as a
 # sub-status badge on that step — "mainline" names the step they anchor to.
 # When the feature flag is off, every accessor below returns the legacy
@@ -218,16 +218,15 @@ GRANULAR_WORKFLOW_TRANSITIONS: dict[str, dict] = {
         "with_whom": "Admin",
         "label": "Technical review done — submit for pricing",
     },
-    # Admin sets the pricing formula (the note on this action, kept durably in
-    # stage_meta.pricing_formula) and hands the enquiry back to estimation to
-    # price against it — admin does not price directly.
+    # Admin releases the enquiry to estimation, which prices it per spec — a
+    # single formula cannot cover an enquiry with many different specs, so admin
+    # gives no formula here; any handoff note is optional.
     "open_pricing": {
         "from": {"sent_for_pricing"},
         "roles": {"admin", "management"},
         "to": "pricing_decision",
         "with_whom": "Estimation",
-        "label": "Set pricing formula & send to estimation",
-        "require_comment": "Enter the pricing formula for estimation to price against",
+        "label": "Send to estimation for pricing",
     },
     # Estimation fills the pricing per the formula (and can preview the quotation),
     # then submits it for generation. Estimation does NOT generate the quotation.
