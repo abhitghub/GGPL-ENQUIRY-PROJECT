@@ -23,8 +23,9 @@ type DetailSource = "quote" | "quote_data" | "stage_meta";
  * choosing a contact fills the person), so any one source is enough.
  *
  * Deliberately NOT required: the internal notes and the Outlook thread (the
- * form marks both optional), the customer's own RFQ number (not every customer
- * sends one), and priority / enquiry stage (the system applies a default).
+ * form marks both optional), the email subject (an enquiry can arrive by phone
+ * or in person), the customer's own RFQ number (not every customer sends one),
+ * and priority / enquiry stage (the system applies a default).
  */
 export const REQUIRED_ENQUIRY_DETAILS: ReadonlyArray<{
   label: string;
@@ -37,7 +38,6 @@ export const REQUIRED_ENQUIRY_DETAILS: ReadonlyArray<{
     label: "Contact number",
     sources: [["quote_data", "contact_no"], ["quote_data", "mobile_no"], ["quote_data", "telephone_no"]],
   },
-  { label: "Email subject", sources: [["quote", "custom_label"]] },
   { label: "Enquiry reference", sources: [["quote", "quote_no"]] },
   { label: "Quote type (export or domestic)", sources: [["stage_meta", "market_type"]] },
   { label: "Bidding or firm", sources: [["stage_meta", "bid_type"]] },
@@ -50,6 +50,23 @@ export const REQUIRED_ENQUIRY_DETAILS: ReadonlyArray<{
 ];
 
 export const LINE_ITEMS_DETAIL_LABEL = "Line items (at least one)";
+
+/**
+ * Details the team may deliberately skip, and the stage_meta flag that records
+ * the decision. Not every customer gives a phone number, so estimation ticks
+ * "not available" rather than inventing one — the enquiry then carries a
+ * recorded, auditable skip instead of the requirement being dropped for everyone.
+ */
+export const SKIPPABLE_ENQUIRY_DETAILS: Readonly<Record<string, string>> = {
+  "Contact number": "contact_no_unavailable",
+};
+
+export const CONTACT_NO_SKIP_KEY = SKIPPABLE_ENQUIRY_DETAILS["Contact number"];
+
+function detailSkipped(quote: Quote, label: string): boolean {
+  const flag = SKIPPABLE_ENQUIRY_DETAILS[label];
+  return Boolean(flag && (quote.stage_meta ?? {})[flag]);
+}
 
 /**
  * The handoffs that stay open while details are missing: the ones whose whole
@@ -83,7 +100,9 @@ function sourceText(quote: Quote, source: DetailSource, key: string): string {
 export function enquiryDetailGaps(quote: Quote | null | undefined): string[] {
   if (!quote) return [];
   const gaps = REQUIRED_ENQUIRY_DETAILS.filter(
-    (detail) => !detail.sources.some(([source, key]) => sourceText(quote, source, key)),
+    (detail) =>
+      !detail.sources.some(([source, key]) => sourceText(quote, source, key)) &&
+      !detailSkipped(quote, detail.label),
   ).map((detail) => detail.label);
   if (!(quote.items?.length ?? 0) && !(quote.n_items ?? 0)) gaps.push(LINE_ITEMS_DETAIL_LABEL);
   return gaps;

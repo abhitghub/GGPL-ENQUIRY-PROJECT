@@ -559,7 +559,6 @@ def test_incomplete_enquiry_cannot_start_spec_check(granular):
         "Contact person",
         "Contact person email",
         "Contact number",
-        "Email subject",
         "Quote type (export or domestic)",
         "Bidding or firm",
         "Project name",
@@ -572,6 +571,8 @@ def test_incomplete_enquiry_cannot_start_spec_check(granular):
         assert label in blockers, f"{label} should be listed as missing: {blockers}"
     # Filled in by the customer master / enquiry number, so never in the gaps.
     assert "Customer" not in blockers and "Enquiry reference" not in blockers
+    # The email subject is optional: an enquiry can arrive by phone or in person.
+    assert "Email subject" not in blockers
     # The enquiry has not budged.
     assert _stage_meta(client, org, "estimation", qid).get("workflow_stage") in (None, "", "enquiry_received")
 
@@ -583,7 +584,6 @@ def test_incomplete_enquiry_cannot_start_spec_check(granular):
         f"/api/v1/quotes/{qid}",
         headers=_headers(org, "estimation"),
         json={
-            "custom_label": "RFQ - spiral wound gaskets",
             "project_ref": "P-GW",
             "items": [_LINE_ITEM],
             "quote_data": {"attention": "R Kumar", "email": "rkumar@acme.test", "contact_no": "+91 90000 00000"},
@@ -599,6 +599,47 @@ def test_incomplete_enquiry_cannot_start_spec_check(granular):
     )
     assert filled.status_code == 200, filled.text
     assert _stage(_act(client, org, "estimation", qid, "begin_spec_check")) == "spec_check"
+
+
+def test_a_missing_phone_number_can_be_skipped_on_the_record(granular):
+    """Some customers never give a phone number. Estimation records that instead
+    of inventing one — and only that ticked skip clears the gap, so the detail
+    stays mandatory for every other enquiry."""
+    client = TestClient(app)
+    org = f"org-gw-details-skip-{uuid.uuid4().hex}"
+    qid = _create_enquiry(client, org)
+    # quote_data is replaced wholesale by a patch, so the person and email are
+    # re-sent and only the phone number is dropped.
+    dropped = client.patch(
+        f"/api/v1/quotes/{qid}",
+        headers=_headers(org, "estimation"),
+        json={"quote_data": {"attention": "R Kumar", "email": "rkumar@acme.test"}},
+    )
+    assert dropped.status_code == 200, dropped.text
+
+    # No number and no skip -> blocked, like any other blank detail.
+    stopped = _act(client, org, "estimation", qid, "begin_spec_check", expect=422)
+    assert _detail_blockers(stopped) == ["Contact number"]
+
+    # Ticking "phone number not available" records the decision and clears it.
+    skipped = client.patch(
+        f"/api/v1/quotes/{qid}",
+        headers=_headers(org, "estimation"),
+        json={"stage_meta": {"contact_no_unavailable": True}},
+    )
+    assert skipped.status_code == 200, skipped.text
+    assert skipped.json()["stage_meta"]["contact_no_unavailable"] is True
+    assert _stage(_act(client, org, "estimation", qid, "begin_spec_check")) == "spec_check"
+
+    # Un-ticking it puts the requirement back.
+    restored = client.patch(
+        f"/api/v1/quotes/{qid}",
+        headers=_headers(org, "estimation"),
+        json={"stage_meta": {"contact_no_unavailable": False}},
+    )
+    assert restored.status_code == 200, restored.text
+    blocked_again = _act(client, org, "estimation", qid, "send_to_technical_review", expect=422)
+    assert _detail_blockers(blocked_again) == ["Contact number"]
 
 
 def test_detail_gate_holds_every_later_handoff_but_not_the_query_loop(granular):
@@ -656,6 +697,49 @@ def test_reviewer_can_always_return_an_incomplete_enquiry(granular):
     # ...but returning it to estimation always works.
     returned = _act(client, org, "jagadeeshan", qid, "return_spec_errors", comment="Due date dropped off the enquiry")
     assert _stage(returned) == "spec_check"
+
+
+def test_an_approved_change_query_is_no_way_around_the_details(granular):
+    """A change query re-orders the flow outside the transition table, so it gets
+    the same gate: an approved query cannot park a half-filled enquiry past spec
+    check, but it CAN still send it to a step where the gaps get filled."""
+    client = TestClient(app)
+    org = f"org-gw-details-query-{uuid.uuid4().hex}"
+    bare = client.post(
+        "/api/v1/quotes",
+        headers=_headers(org, "estimation"),
+        json={"customer": "ACME", "items": [], "stage_meta": {"owner_id": "sales"}},
+    )
+    assert bare.status_code == 201, bare.text
+    qid = bare.json()["id"]
+
+    def _raise(target: str) -> str:
+        resp = client.post(
+            f"/api/v1/quotes/{qid}/queries",
+            headers=_headers(org, "estimation"),
+            json={"target_stage": target, "note": f"send this to {target}"},
+        )
+        assert resp.status_code == 200, resp.text
+        return resp.json()["stage_meta"]["change_queries"][-1]["id"]
+
+    def _approve(query_id: str, expect: int):
+        resp = client.post(
+            f"/api/v1/quotes/{qid}/queries/{query_id}/action",
+            headers=_headers(org, "shashnam"),
+            json={"action": "approve", "note": "ok"},
+        )
+        assert resp.status_code == expect, resp.text
+        return resp
+
+    # Approving a jump PAST spec check is refused while details are missing, and
+    # the enquiry stays put.
+    refused = _approve(_raise("sent_for_pricing"), 422)
+    assert "Project name" in _detail_blockers(refused)
+    assert _stage_meta(client, org, "estimation", qid).get("workflow_stage") in (None, "", "enquiry_received")
+    # Sending it to spec check (where the gaps get filled) still works — chasing
+    # an incomplete enquiry must never be blocked.
+    approved = _approve(_raise("spec_check"), 200)
+    assert approved.json()["stage_meta"]["workflow_stage"] == "spec_check"
 
 
 def test_legacy_machine_also_requires_the_details():

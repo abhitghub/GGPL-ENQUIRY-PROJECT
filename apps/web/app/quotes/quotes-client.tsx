@@ -121,7 +121,7 @@ import {
   MaterialInputRow,
   MaterialPlan,
 } from "@/lib/material-planning";
-import { enquiryDetailGaps, enquiryDetailGateMessage } from "@/lib/enquiry-details";
+import { CONTACT_NO_SKIP_KEY, enquiryDetailGaps, enquiryDetailGateMessage } from "@/lib/enquiry-details";
 import { buildExtractionSummary, extractionSummaryItemSignature, isUnclassifiedSummaryItem } from "@/lib/extraction-summary";
 import { pricingFormulaByLine, pricingFormulaRows, readPricingFormulas } from "@/lib/pricing-formulas";
 import { getString, notesFor, validateItemField } from "@/components/quotes/item-validation";
@@ -1848,6 +1848,8 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
   // is the same rule read from the record so the checklist is on screen before
   // the button is pressed (mirrors lib/enquiry-details.ts).
   const enquiryDetailGapList = React.useMemo(() => enquiryDetailGaps(quote), [quote]);
+  // "Phone number not available" — the recorded decision to skip that detail.
+  const contactNoSkipped = Boolean(quote?.stage_meta?.[CONTACT_NO_SKIP_KEY]);
   const canRunMaterialPhase1 = canEditWorkflow;
   const canEditMaterialPhase2 = canRole(currentUser.role, "edit_material_phase2", accessSettings);
   // Change queries: anyone except viewers can raise one; deciding them needs an
@@ -6210,7 +6212,7 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
             <DialogHeader>
               <DialogTitle>Enquiry setup</DialogTitle>
               <DialogDescription>
-                Every enquiry detail below is mandatory — the enquiry cannot go for spec check or any later step until they are all filled. Internal notes and the Outlook thread stay optional.
+                Every enquiry detail below is mandatory — the enquiry cannot go for spec check or any later step until they are all filled. Email subject, internal notes and the Outlook thread stay optional, and a phone number the customer never gave can be ticked as unavailable.
               </DialogDescription>
             </DialogHeader>
             <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
@@ -6535,8 +6537,30 @@ export function QuotesClient({ section = "drafts" }: { section?: QuoteSection })
                   )}
                 </div>
                 <Field label="Contact person email" value={getString(qd.email)} onChange={(value) => updateQd("email", value)} disabled={!canAddDetails} />
-                <Field label="Contact no" value={getString(qd.contact_no)} onChange={(value) => updateQd("contact_no", value)} disabled={!canAddDetails} />
-                <Field label="Email subject" value={quote.custom_label} onChange={(value) => updateQuoteDraft({ custom_label: value })} disabled={!canAddDetails} />
+                {/* Mandatory, but skippable: some customers simply never give a
+                    phone number, so the tick records that instead of forcing an
+                    invented one onto the enquiry. */}
+                <div className="space-y-1.5">
+                  <Field
+                    label="Contact no"
+                    value={getString(qd.contact_no)}
+                    onChange={(value) => updateQd("contact_no", value)}
+                    disabled={!canAddDetails || contactNoSkipped}
+                  />
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={contactNoSkipped}
+                      disabled={!canAddDetails}
+                      onChange={(event) => {
+                        const skipped = event.target.checked;
+                        updateQuoteDraft({ stage_meta: { ...(quote.stage_meta ?? {}), [CONTACT_NO_SKIP_KEY]: skipped } });
+                      }}
+                    />
+                    Phone number not available — skip it
+                  </label>
+                </div>
+                <Field label="Email subject (optional)" value={quote.custom_label} onChange={(value) => updateQuoteDraft({ custom_label: value })} disabled={!canAddDetails} />
                 <Field label="Enq reference" value={quote.quote_no} onChange={(value) => updateQuoteDraft({ quote_no: value })} disabled={!canAddDetails} />
               </div>
             </details>

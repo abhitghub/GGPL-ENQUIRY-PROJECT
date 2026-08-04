@@ -42,6 +42,7 @@ from app.services.enquiry_workflow import (
     canonical_workflow_step,
     current_workflow_step,
     enquiry_detail_blockers,
+    enquiry_detail_jump_blockers,
     pricing_formula_gap,
     required_comment_reason,
     visible_steps_for_role,
@@ -101,6 +102,9 @@ SALES_STAGE_META_FIELDS = {
     "market_type",
     "customer_master_id",
     "customer_contact_id",
+    # "Phone number not available" — the recorded decision to skip a mandatory
+    # enquiry detail (see SKIPPABLE_ENQUIRY_DETAILS).
+    "contact_no_unavailable",
     # Enquiry triage/scheduling that sales owns during setup.
     "due_date",
     "priority",
@@ -976,6 +980,16 @@ def _jump_workflow_stage(stage_meta: dict, dest: str, user: CurrentUser, action:
     return stage_meta
 
 
+def _require_complete_enquiry_for_jump(current: QuoteRead, dest: str) -> None:
+    """A change query re-orders the flow OUTSIDE the transition table, so it gets
+    the same mandatory-details check the regular handoffs get — otherwise an
+    approved query would be a way to push a half-filled enquiry past spec check.
+    Jumps to a step where the gaps can still be filled stay open."""
+    gaps = enquiry_detail_jump_blockers(dest, current)
+    if gaps:
+        raise HTTPException(status_code=422, detail={"message": DETAIL_GATE_MESSAGE, "blockers": gaps})
+
+
 def _query_participants(query: dict[str, Any]) -> tuple[set[str], set[str]]:
     """Everyone already in a change query's conversation: the exact user ids we
     know of plus the roles that have spoken. Queries raised before user ids were
@@ -1101,6 +1115,7 @@ def act_on_change_query(
         if action == "approve":
             query["return_stage"] = current_workflow_step(stage_meta)
             jump_dest = str(query.get("target_stage"))
+            _require_complete_enquiry_for_jump(current, jump_dest)
             stage_meta = _jump_workflow_stage(stage_meta, jump_dest, user, "query_approved", note or str(query.get("note") or ""))
         title = "Change query approved" if action == "approve" else "Change query rejected"
         detail = f"{query.get('target_label') or query.get('target_stage')} — {note or query.get('note')}"
@@ -1114,6 +1129,7 @@ def act_on_change_query(
         return_stage = str(query.get("return_stage") or "")
         if return_stage in active_step_ids():
             jump_dest = return_stage
+            _require_complete_enquiry_for_jump(current, return_stage)
             stage_meta = _jump_workflow_stage(stage_meta, return_stage, user, "query_resolved", note)
         title = "Change query resolved"
         detail = note or str(query.get("note") or "")
