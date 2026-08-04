@@ -507,14 +507,14 @@ def pricing_formula_gap(stage_meta: dict | None, items: list[dict] | None) -> st
 # choosing a contact fills the person), so any one source is enough.
 #
 # Deliberately NOT required: the internal notes and the Outlook thread (the form
-# marks both optional), the customer's own RFQ number (not every customer sends
-# one), and priority/enquiry stage (the system applies a default).
+# marks both optional), the email subject (an enquiry can arrive by phone or in
+# person), the customer's own RFQ number (not every customer sends one), and
+# priority/enquiry stage (the system applies a default).
 REQUIRED_ENQUIRY_DETAILS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     ("Customer", (("quote", "customer"), ("stage_meta", "customer_master_id"))),
     ("Contact person", (("quote_data", "attention"), ("stage_meta", "customer_contact_id"))),
     ("Contact person email", (("quote_data", "email"),)),
     ("Contact number", (("quote_data", "contact_no"), ("quote_data", "mobile_no"), ("quote_data", "telephone_no"))),
-    ("Email subject", (("quote", "custom_label"),)),
     ("Enquiry reference", (("quote", "quote_no"),)),
     ("Quote type (export or domestic)", (("stage_meta", "market_type"),)),
     ("Bidding or firm", (("stage_meta", "bid_type"),)),
@@ -527,6 +527,14 @@ REQUIRED_ENQUIRY_DETAILS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = 
 )
 
 LINE_ITEMS_DETAIL_LABEL = "Line items (at least one)"
+
+# Details the team may deliberately skip, and the stage_meta flag that records
+# the decision. Not every customer gives a phone number, so estimation ticks
+# "not available" rather than inventing one — the enquiry then carries a
+# recorded, auditable skip instead of the requirement being dropped for everyone.
+SKIPPABLE_ENQUIRY_DETAILS: dict[str, str] = {
+    "Contact number": "contact_no_unavailable",
+}
 
 # The handoffs that stay open while details are missing: the ones whose whole
 # point is to GET the enquiry corrected — a query to the customer, its answer, a
@@ -554,6 +562,15 @@ def _detail_value(quote: Any, source: str, key: str) -> str:
     return str(container.get(key) or "").strip()
 
 
+def _detail_skipped(quote: Any, label: str) -> bool:
+    """Whether the team recorded this detail as unavailable for this enquiry."""
+    flag = SKIPPABLE_ENQUIRY_DETAILS.get(label)
+    if not flag:
+        return False
+    stage_meta = getattr(quote, "stage_meta", None)
+    return bool(isinstance(stage_meta, dict) and stage_meta.get(flag))
+
+
 def enquiry_detail_gaps(quote: Any) -> list[str]:
     """The mandatory enquiry details still blank on this record, by label.
 
@@ -566,6 +583,7 @@ def enquiry_detail_gaps(quote: Any) -> list[str]:
         label
         for label, sources in REQUIRED_ENQUIRY_DETAILS
         if not any(_detail_value(quote, source, key) for source, key in sources)
+        and not _detail_skipped(quote, label)
     ]
     items = getattr(quote, "items", None) or []
     try:
@@ -584,6 +602,34 @@ def enquiry_detail_blockers(action: str, quote: Any) -> list[str]:
     are the route to getting it completed.
     """
     if action in DETAIL_GATE_EXEMPT_ACTIONS:
+        return []
+    return enquiry_detail_gaps(quote)
+
+
+# The only steps an incomplete enquiry may be parked on: the ones where the
+# missing details get filled in. A change query re-orders the flow OUTSIDE the
+# transition table, so it is checked against this instead of the action list —
+# otherwise an approved query would be a way around the gate.
+DETAIL_GATE_FIXABLE_STEPS: frozenset[str] = frozenset(
+    {
+        "enquiry_received",
+        "spec_check",
+        "query_raised_to_customer",
+        # Legacy machine: the enquiry desk and estimation's review.
+        "enquiry",
+        "estimation_review",
+    }
+)
+
+
+def enquiry_detail_jump_blockers(dest: str, quote: Any) -> list[str]:
+    """The mandatory details holding back a change-query jump to `dest`.
+
+    Empty when the enquiry is complete, or when `dest` is a step where the gaps
+    can still be filled — a query asking for a half-filled enquiry to be sent
+    back to estimation must always work.
+    """
+    if canonical_workflow_step(dest) in DETAIL_GATE_FIXABLE_STEPS:
         return []
     return enquiry_detail_gaps(quote)
 

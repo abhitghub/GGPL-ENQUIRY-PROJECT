@@ -161,7 +161,7 @@ def build_customers(xlsx: Path, sheet: str) -> list[dict]:
             if location_id:
                 # Same plant seen again — take whatever this row fills in that the
                 # first sighting left blank (often the PIN or the country).
-                _absorb(next(row for row in rec["locations"] if row["id"] == location_id), loc)
+                _absorb(next(site for site in rec["locations"] if site["id"] == location_id), loc)
             else:
                 location_id = f"{rec['id']}-l{len(rec['locations']) + 1}"
                 loc_index[key][lkey] = location_id
